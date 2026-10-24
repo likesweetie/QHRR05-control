@@ -86,18 +86,11 @@
  *
  */
 
-
-
-
 Joystick::Joystick(const char* device_id, ShmData* shared_memory)
-:
-    device_id_(device_id),
-    shared_memory_(shared_memory)
-{
+    : device_id_(device_id), shared_memory_(shared_memory) {
 }
 
-void Joystick::initialize()
-{
+void Joystick::initialize() {
     running_ = false;
 
     axes_.fill(0.0f);
@@ -105,121 +98,93 @@ void Joystick::initialize()
 
     js_ = open(device_id_, O_RDONLY | O_NONBLOCK);
 
-    if (js_ == -1)
-    {
-        std::cerr << "Failed to open joystick device: "
-                  << device_id_
-                  << ", errno: "
-                  << errno
-                  << ", message: "
-                  << std::strerror(errno)
-                  << std::endl;
+    if (js_ == -1) {
+        std::cerr << "Failed to open joystick device: " << device_id_ << ", errno: " << errno
+                  << ", message: " << std::strerror(errno) << std::endl;
         throw std::runtime_error("joystick device open failed");
     }
 
     std::cout << "Joystick device opened: " << device_id_ << std::endl;
 }
 
-void Joystick::start()
-{
-    if (js_ == -1)
-    {
+void Joystick::start() {
+    if (js_ == -1) {
         throw std::runtime_error("joystick device is not open");
     }
 
     running_ = true;
 
     const int ret = pthread_create(&thread_, nullptr, Joystick::thread_function_wrapper, this);
-    if (ret != 0)
-    {
+    if (ret != 0) {
         thread_ = 0;
         running_ = false;
-        std::cerr << "Failed to create joystick thread: "
-                  << std::strerror(ret)
-                  << std::endl;
+        std::cerr << "Failed to create joystick thread: " << std::strerror(ret) << std::endl;
         throw std::runtime_error("joystick thread creation failed");
     }
 }
 
-void Joystick::stop()
-{
+void Joystick::stop() {
     running_ = false;
 }
 
-void Joystick::join()
-{
-    if (thread_)
-    {
+void Joystick::join() {
+    if (thread_) {
         pthread_join(thread_, nullptr);
         thread_ = 0;
     }
 
-    if (js_ != -1)
-    {
+    if (js_ != -1) {
         close(js_);
         js_ = -1;
     }
 }
 
-float Joystick::getAxis(uint8_t axis_number) const
-{
-    if (axis_number >= axes_.size())
-    {
+float Joystick::getAxis(uint8_t axis_number) const {
+    if (axis_number >= axes_.size()) {
         return 0.0f;
     }
 
     return axes_[axis_number];
 }
 
-bool Joystick::getButton(uint8_t button_number) const
-{
-    if (button_number >= buttons_.size())
-    {
+bool Joystick::getButton(uint8_t button_number) const {
+    if (button_number >= buttons_.size()) {
         return false;
     }
 
     return buttons_[button_number];
 }
 
-float Joystick::mapAxisValue_(int16_t value)
-{
+float Joystick::mapAxisValue_(int16_t value) {
     /*
      * Linux joystick axis value is approximately [-32767, 32767].
      * int16_t minimum can be -32768, so clamp for safety.
      */
     float normalized = static_cast<float>(value) / 32767.0f;
 
-    if (normalized > 1.0f)
-    {
+    if (normalized > 1.0f) {
         normalized = 1.0f;
-    }
-    else if (normalized < -1.0f)
-    {
+    } else if (normalized < -1.0f) {
         normalized = -1.0f;
     }
 
     return normalized;
 }
 
-float Joystick::applyDeadband_(float value, float deadband)
-{
-    if (std::fabs(value) < deadband)
-    {
+float Joystick::applyDeadband_(float value, float deadband) {
+    if (std::fabs(value) < deadband) {
         return 0.0f;
     }
 
     return value;
 }
 
-void* Joystick::thread_function_wrapper(void* context)
-{
+void* Joystick::thread_function_wrapper(void* context) {
     return static_cast<Joystick*>(context)->loop();
 }
 
-void* Joystick::loop()
-{
-    while (running_.load())
-    {
+void* Joystick::loop() {
+    while (running_.load()) {
         js_event event;
 
         /*
@@ -228,35 +193,25 @@ void* Joystick::loop()
          */
         const ssize_t bytes = read(js_, &event, sizeof(event));
 
-        if (bytes == sizeof(event))
-        {
+        if (bytes == sizeof(event)) {
             processEvent_(event);
-            try { Publish(); }
-            catch (const std::exception& error) {
+            try {
+                Publish();
+            } catch (const std::exception& error) {
                 std::cerr << "[joystick] " << error.what() << std::endl;
                 break;
             }
-        }
-        else if (bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        {
+        } else if (bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             /*
              * 이벤트가 없는 정상 상태입니다.
              * CPU 점유율을 줄이려면 짧게 sleep을 넣는 것이 좋습니다.
              */
             usleep(1000);
-        }
-        else if (bytes == -1)
-        {
-            std::cerr << "Error reading joystick event: "
-                      << std::strerror(errno)
-                      << std::endl;
+        } else if (bytes == -1) {
+            std::cerr << "Error reading joystick event: " << std::strerror(errno) << std::endl;
             break;
-        }
-        else
-        {
-            std::cerr << "Partial joystick event read. bytes = "
-                      << bytes
-                      << std::endl;
+        } else {
+            std::cerr << "Partial joystick event read. bytes = " << bytes << std::endl;
             break;
         }
     }
@@ -265,25 +220,19 @@ void* Joystick::loop()
     return nullptr;
 }
 
-void Joystick::processEvent_(const js_event& event)
-{
+void Joystick::processEvent_(const js_event& event) {
     /*
      * JS_EVENT_INIT bit를 제거해야 axis/button 판별이 깔끔합니다.
      * 예: JS_EVENT_AXIS | JS_EVENT_INIT
      */
     const uint8_t event_type = event.type & ~JS_EVENT_INIT;
 
-    if (event_type == JS_EVENT_AXIS)
-    {
-        if (event.number < axes_.size())
-        {
+    if (event_type == JS_EVENT_AXIS) {
+        if (event.number < axes_.size()) {
             axes_[event.number] = mapAxisValue_(event.value);
         }
-    }
-    else if (event_type == JS_EVENT_BUTTON)
-    {
-        if (event.number < buttons_.size())
-        {
+    } else if (event_type == JS_EVENT_BUTTON) {
+        if (event.number < buttons_.size()) {
             buttons_[event.number] = (event.value != 0);
         }
     }
@@ -293,17 +242,21 @@ void Joystick::Publish() {
     ShmJoystick input;
     for (const auto& mapping : axis_mappings_) {
         double value = applyDeadband_(axes_[mapping.axis_number], mapping.deadband);
-        if (mapping.invert) value = -value;
+        if (mapping.invert)
+            value = -value;
         const int index = mapping.target == TargetType::AngVel ? 2 : mapping.target_index;
-        input.axes[index] = value*mapping.scale;
+        input.axes[index] = value * mapping.scale;
     }
     for (const auto& mapping : button_mappings_) {
-        const int index = static_cast<int>(mapping.target)-static_cast<int>(TargetType::AButton);
+        const int index = static_cast<int>(mapping.target) - static_cast<int>(TargetType::AButton);
         input.buttons[index] = buttons_[mapping.button_number] != mapping.invert;
     }
     shm_utils::Lock lock(*shared_memory_);
-    if (shared_memory_->stopping || shared_memory_->simulation_finished) { running_ = false; return; }
-    input.sequence = shared_memory_->joystick_sequence+1;
+    if (shared_memory_->stopping || shared_memory_->simulation_finished) {
+        running_ = false;
+        return;
+    }
+    input.sequence = shared_memory_->joystick_sequence + 1;
     input.published_ns = shm_utils::MonotonicNs();
     shared_memory_->joystick[input.sequence % 2] = input;
     shared_memory_->joystick_sequence = input.sequence;

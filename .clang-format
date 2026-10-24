@@ -1,0 +1,33 @@
+# Project C++ style: LLVM layout with the existing four-space indentation.
+# Reproducible formatter version: clang-format 18.1.8.
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++17
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AlignAfterOpenBracket: DontAlign
+ColumnLimit: 100
+UseTab: Never
+BreakBeforeBraces: Attach
+NamespaceIndentation: None
+AccessModifierOffset: -4
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+BinPackArguments: false
+BinPackParameters: false
+SortIncludes: Never
+IncludeBlocks: Preserve
+BreakStringLiterals: false
+FixNamespaceComments: false
+ReflowComments: false
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments: Never
+SeparateDefinitionBlocks: Always
+MaxEmptyLinesToKeep: 1

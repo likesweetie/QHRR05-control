@@ -18,6 +18,7 @@ public:
     void Control();
     void WriteOutput();
     void WaitNextCycle();
+
 private:
     shm_utils::Mapping shm_;
     std::uint64_t cycle_ = 0, state_sequence_ = 0, state_published_ns_ = 0;
@@ -32,10 +33,10 @@ private:
     int requested_mode_ = 0;
     double control_time_ = 0;
     bool holding_ = false;
-    std::array<double, 3> joint_position_{};      // rad
-    std::array<double, 3> joint_velocity_{};      // rad/s
-    std::array<double, 3> gravity_torque_{};      // N*m
-    std::array<double, 3> torque_command_{};      // N*m
+    std::array<double, 3> joint_position_{};  // rad
+    std::array<double, 3> joint_velocity_{};  // rad/s
+    std::array<double, 3> gravity_torque_{};  // N*m
+    std::array<double, 3> torque_command_{};  // N*m
     std::array<double, 3> position_reference_{};  // rad
 };
 }  // namespace qhrr05

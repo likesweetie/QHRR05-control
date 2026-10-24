@@ -1,4 +1,5 @@
 """Integration checks for SHM ownership, CSV consumer, child failure, and shutdown."""
+
 import csv
 import ctypes
 import errno
@@ -22,28 +23,42 @@ def assert_unlinked(name):
 
 with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
     name = f'/qhrr05-daemon-test-{os.getpid()}'
-    command = [str(root/'build/daemon'), '--shm-name', name]
-    csv_path = Path(tmp)/'telemetry.csv'
-    result = subprocess.run(command+['--headless', '--duration', '4', '--csv', str(csv_path)],
-                            capture_output=True, text=True, timeout=15, cwd=tmp)
-    assert result.returncode == 0, result.stdout+result.stderr
+    command = [str(root / 'build/daemon'), '--shm-name', name]
+    csv_path = Path(tmp) / 'telemetry.csv'
+    result = subprocess.run(
+        command + ['--headless', '--duration', '4', '--csv', str(csv_path)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        cwd=tmp,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
     with csv_path.open() as stream:
         rows = list(csv.DictReader(stream))
     assert len(rows) > 1, result.stdout
     sequences = [int(row['sample_seq']) for row in rows]
     assert all(a < b for a, b in zip(sequences, sequences[1:]))
-    assert sum(int(row['skipped_samples']) for row in rows) == sequences[-1]-len(rows)
+    assert sum(int(row['skipped_samples']) for row in rows) == sequences[-1] - len(rows)
     assert any(row['state_seq'] != row['command_seq'] for row in rows)
-    assert all((not row['control_latency_us'] or float(row['control_latency_us']) >= 0)
-               and float(row['sample_age_us']) >= 0 for row in rows)
+    assert all(
+        (not row['control_latency_us'] or float(row['control_latency_us']) >= 0)
+        and float(row['sample_age_us']) >= 0
+        for row in rows
+    )
     assert 'shm_logger exited code=0' in result.stdout, result.stdout
     assert_unlinked(name)
-    print(f'PASS: headless SHM CSV, {len(rows)} rows, {sequences[-1]-len(rows)} skipped samples explicitly reported')
+    print(
+        f'PASS: headless SHM CSV, {len(rows)} rows, {sequences[-1]-len(rows)} skipped samples explicitly reported'
+    )
 
     original = csv_path.read_bytes()
-    result = subprocess.run(command+['--headless', '--duration', '4', '--csv', str(csv_path)],
-                            capture_output=True, text=True, timeout=15)
-    assert result.returncode != 0, result.stdout+result.stderr
+    result = subprocess.run(
+        command + ['--headless', '--duration', '4', '--csv', str(csv_path)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
     assert csv_path.read_bytes() == original
     assert_unlinked(name)
     print('PASS: CSV collision fails explicitly and owned SHM is cleaned up')
@@ -52,8 +67,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
     assert fd >= 0
     try:
         os.write(fd, b'pre-existing-shm')
-        result = subprocess.run(command+['--headless', '--duration', '.1'],
-                                capture_output=True, text=True, timeout=15)
+        result = subprocess.run(
+            command + ['--headless', '--duration', '.1'], capture_output=True, text=True, timeout=15
+        )
         assert result.returncode != 0
         assert os.fstat(fd).st_size == len(b'pre-existing-shm')
         os.lseek(fd, 0, os.SEEK_SET)
@@ -67,8 +83,12 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
     print('PASS: existing SHM is rejected without reuse, resize, or unlink')
 
     for action in ['kill_controller', 'stop_daemon']:
-        process = subprocess.Popen(command+['--headless', '--duration', '100000'],
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        process = subprocess.Popen(
+            command + ['--headless', '--duration', '100000'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
         output = []
         controller = None
         try:

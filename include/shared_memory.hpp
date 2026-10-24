@@ -12,34 +12,57 @@ struct ShmState {
     // Generic, time-aligned model/encoder feedback. No contact/constraint truth.
     std::uint64_t measurement_sequence = 0;
     double measurement_dt = 0;
-    std::array<double, 3> acceleration{}, motor_torque{}, bias_torque{}, passive_torque{}, friction_limit{};
+    std::array<double, 3> acceleration{}, motor_torque{}, bias_torque{}, passive_torque{},
+        friction_limit{};
     std::array<double, 9> mass{}, jacobian{};  // Row-major, J maps dq to world toe velocity.
     std::array<double, 3> toe_position{}, joint_min{}, joint_max{};
 };
 
 enum class MagneticPhase : int { Free, Candidate, Following, Releasing };
-enum class MagneticReason : int { None, NoMeasurement, ObserverInvalid, Workspace, JointLimit, StrokeLimit, ContactLost };
+enum class MagneticReason : int {
+    None,
+    NoMeasurement,
+    ObserverInvalid,
+    Workspace,
+    JointLimit,
+    StrokeLimit,
+    ContactLost
+};
+
 inline const char* MagneticPhaseName(MagneticPhase phase) {
     switch (phase) {
-    case MagneticPhase::Free: return "FREE";
-    case MagneticPhase::Candidate: return "CONTACT CANDIDATE";
-    case MagneticPhase::Following: return "FORCE FOLLOWING";
-    case MagneticPhase::Releasing: return "RELEASE PENDING";
+    case MagneticPhase::Free:
+        return "FREE";
+    case MagneticPhase::Candidate:
+        return "CONTACT CANDIDATE";
+    case MagneticPhase::Following:
+        return "FORCE FOLLOWING";
+    case MagneticPhase::Releasing:
+        return "RELEASE PENDING";
     }
     return "INVALID PHASE";
 }
+
 inline const char* MagneticReasonName(MagneticReason reason) {
     switch (reason) {
-    case MagneticReason::None: return "none";
-    case MagneticReason::NoMeasurement: return "no measurement";
-    case MagneticReason::ObserverInvalid: return "observer invalid/singular";
-    case MagneticReason::Workspace: return "workspace limit";
-    case MagneticReason::JointLimit: return "joint limit";
-    case MagneticReason::StrokeLimit: return "following distance limit";
-    case MagneticReason::ContactLost: return "contact lost";
+    case MagneticReason::None:
+        return "none";
+    case MagneticReason::NoMeasurement:
+        return "no measurement";
+    case MagneticReason::ObserverInvalid:
+        return "observer invalid/singular";
+    case MagneticReason::Workspace:
+        return "workspace limit";
+    case MagneticReason::JointLimit:
+        return "joint limit";
+    case MagneticReason::StrokeLimit:
+        return "following distance limit";
+    case MagneticReason::ContactLost:
+        return "contact lost";
     }
     return "invalid reason";
 }
+
 struct MagneticTelemetry {
     MagneticPhase phase = MagneticPhase::Free;
     MagneticReason reason = MagneticReason::None;
@@ -79,7 +102,8 @@ struct ShmSample {
     int mode = 0;
     std::array<double, 3> position{}, reference{}, torque{};
     MagneticTelemetry magnetic{};
-    std::array<double, 3> toe_position{}, contact_force{}, contact_torque{}, object_position{};  // GT ONLY; never in ShmState.
+    std::array<double, 3> toe_position{}, contact_force{}, contact_torque{},
+        object_position{};  // GT ONLY; never in ShmState.
 };
 
 struct ShmJoystick {
@@ -94,7 +118,8 @@ struct ShmData {
     pthread_cond_t changed;
     bool stopping = false, failed = false, simulation_finished = false;
     std::uint64_t request_sequence = 0;
-    std::uint64_t state_sequence = 0, command_sequence = 0, sample_sequence = 0, joystick_sequence = 0;
+    std::uint64_t state_sequence = 0, command_sequence = 0, sample_sequence = 0,
+                  joystick_sequence = 0;
     // Writers fill the other slot, then publish its sequence under the shared mutex.
     // Readers copy the selected slot under the same mutex, so an old slot cannot
     // be overwritten while a slower reader is still copying it.

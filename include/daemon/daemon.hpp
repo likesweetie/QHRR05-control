@@ -33,7 +33,11 @@ public:
     void TerminateAll(int signal = 15);
     std::vector<std::string> Reap();
     std::optional<ProcessInfo> Get(const std::string& name) const;
-    int LastErrno() const noexcept { return last_errno_; }
+
+    int LastErrno() const noexcept {
+        return last_errno_;
+    }
+
 private:
     std::map<std::string, ProcessInfo> processes_;
     int last_errno_{0};

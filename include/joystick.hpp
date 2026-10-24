@@ -12,11 +12,9 @@
 
 #include "shared_memory.hpp"
 
-class Joystick
-{
+class Joystick {
 public:
-    enum class TargetType
-    {
+    enum class TargetType {
         LinVel,
         AngVel,
 
@@ -33,31 +31,37 @@ public:
         R3Button
     };
 
-    struct ButtonMapping
-    {
+    struct ButtonMapping {
         uint8_t button_number;
         TargetType target;
         bool invert;
     };
-    struct AxisMapping
-    {
-        uint8_t axis_number;   // joystick axis index
-        TargetType target;     // lin_vel_target or ang_vel_target
+
+    struct AxisMapping {
+        uint8_t axis_number;  // joystick axis index
+        TargetType target;  // lin_vel_target or ang_vel_target
         uint8_t target_index;  // 0:x, 1:y, 2:z
-        float scale;           // gain
-        bool invert;           // sign inversion
-        float deadband;        // normalized deadband, e.g. 0.05
+        float scale;  // gain
+        bool invert;  // sign inversion
+        float deadband;  // normalized deadband, e.g. 0.05
     };
 
 public:
     Joystick(const char* device_id, ShmData* shared_memory);
-    ~Joystick() { stop(); join(); }
+
+    ~Joystick() {
+        stop();
+        join();
+    }
 
     void initialize();
     void start();
     void stop();
     void join();
-    bool isRunning() const { return running_.load(); }
+
+    bool isRunning() const {
+        return running_.load();
+    }
 
     float getAxis(uint8_t axis_number) const;
     bool getButton(uint8_t button_number) const;
@@ -86,25 +90,23 @@ private:
     std::array<float, kMaxAxes> axes_{};
     std::array<bool, kMaxButtons> buttons_{};
 
-
     std::array<AxisMapping, 3> axis_mappings_{{
-        {1, TargetType::LinVel, 0, 1.0f, true,  0.05f},
-        {0, TargetType::LinVel, 1, 1.0f, true,  0.05f},
-        {3, TargetType::AngVel, 2, 1.0f, true,  0.05f},
+        {1, TargetType::LinVel, 0, 1.0f, true, 0.05f},
+        {0, TargetType::LinVel, 1, 1.0f, true, 0.05f},
+        {3, TargetType::AngVel, 2, 1.0f, true, 0.05f},
     }};
 
-
     std::array<ButtonMapping, 11> button_mappings_{{
-    {0,  TargetType::AButton,     false},  // A
-    {1,  TargetType::BButton,     false},  // B
-    {2,  TargetType::XButton,     false},  // X
-    {3,  TargetType::YButton,     false},  // Y
-    {4,  TargetType::LBButton,    false},  // LB
-    {5,  TargetType::RBButton,    false},  // RB
-    {6,  TargetType::BackButton,  false},  // Back / View
-    {7,  TargetType::StartButton, false},  // Start / Menu
-    {8,  TargetType::GuideButton, false},  // Xbox / Guide
-    {9,  TargetType::L3Button,    false},  // Left stick press
-    {10, TargetType::R3Button,    false},  // Right stick press
+        {0, TargetType::AButton, false},  // A
+        {1, TargetType::BButton, false},  // B
+        {2, TargetType::XButton, false},  // X
+        {3, TargetType::YButton, false},  // Y
+        {4, TargetType::LBButton, false},  // LB
+        {5, TargetType::RBButton, false},  // RB
+        {6, TargetType::BackButton, false},  // Back / View
+        {7, TargetType::StartButton, false},  // Start / Menu
+        {8, TargetType::GuideButton, false},  // Xbox / Guide
+        {9, TargetType::L3Button, false},  // Left stick press
+        {10, TargetType::R3Button, false},  // Right stick press
     }};
 };
