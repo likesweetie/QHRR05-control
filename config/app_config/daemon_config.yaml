@@ -1,3 +1,6 @@
+# Created exclusively by daemon; an existing name is an error, never reused.
+shm_name: /qhrr05
+
 # Robot asset paths are relative to this file.
 robots:
   qhrr-05:
@@ -9,5 +12,6 @@ robots:
 processes:
   - name: task_controller
     exec_path: task_controller
+
   - name: mujoco_simulate
     exec_path: mujoco_simulate

@@ -40,10 +40,6 @@ std::optional<int> Daemon::Spawn(const ProcessSpec& spec) {
         if (spec.create_process_group && ::setpgid(0, 0) != 0) fail();
         for (const auto& [key, value] : spec.env)
             if (::setenv(key.c_str(), value.c_str(), 1) != 0) fail();
-        for (int fd : spec.inherited_fds) {
-            const int flags = ::fcntl(fd, F_GETFD);
-            if (flags < 0 || ::fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0) fail();
-        }
         ::execv(spec.exec_path.c_str(), argv.data());
         fail();
     }

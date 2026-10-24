@@ -10,7 +10,6 @@ struct ProcessSpec {
     std::string exec_path;
     std::vector<std::string> args;
     std::map<std::string, std::string> env;
-    std::vector<int> inherited_fds;
     bool create_process_group{true};
 };
 

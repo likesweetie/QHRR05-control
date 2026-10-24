@@ -11,7 +11,11 @@ find_package(PkgConfig REQUIRED)
 find_package(yaml-cpp REQUIRED)
 pkg_search_module(GLFW REQUIRED glfw3)
 
-add_library(motion_controllers STATIC app/motion_controllers/homing_controller.cpp)
+add_library(motion_controllers STATIC
+    app/motion_controllers/homing_controller.cpp
+    app/motion_controllers/gravity_compensation_controller.cpp
+    app/motion_controllers/reaction_force_observer.cpp
+    app/motion_controllers/magnetic_touch_controller.cpp)
 target_include_directories(motion_controllers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/app ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(motion_controllers PUBLIC yaml-cpp)
 
@@ -19,7 +23,7 @@ add_library(mujoco_simulation STATIC app/mujoco_simulate/simulation.cpp)
 target_include_directories(mujoco_simulation PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/app ${CMAKE_CURRENT_SOURCE_DIR}/include ${MUJOCO_DIR}/include)
 target_link_directories(mujoco_simulation PUBLIC ${MUJOCO_DIR}/lib)
-target_link_libraries(mujoco_simulation PUBLIC yaml-cpp mujoco)
+target_link_libraries(mujoco_simulation PUBLIC yaml-cpp mujoco pthread)
 
 add_executable(daemon
     app/daemon/main.cpp
@@ -36,7 +40,7 @@ target_compile_definitions(daemon PRIVATE
     QHRR05_DEFAULT_DAEMON_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/app_config/daemon_config.yaml")
 
 add_executable(task_controller app/task_controller/main.cpp app/task_controller/task_controller.cpp)
-target_link_libraries(task_controller PRIVATE motion_controllers)
+target_link_libraries(task_controller PRIVATE motion_controllers pthread)
 
 set(SIMULATE_COPY ${CMAKE_CURRENT_SOURCE_DIR}/app/mujoco_simulate/simulate)
 add_executable(mujoco_simulate
@@ -77,7 +81,25 @@ if(BUILD_TESTING)
     set_target_properties(task_controller_io_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
     add_test(NAME task_controller_io COMMAND task_controller_io_test
         ${CMAKE_CURRENT_SOURCE_DIR}/config/control_config/control_config.yaml
+        ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
+        $<TARGET_FILE:task_controller>)
+    add_executable(magnetic_touch_test tests/magnetic_touch_test.cpp)
+    target_link_libraries(magnetic_touch_test PRIVATE motion_controllers mujoco_simulation)
+    set_target_properties(magnetic_touch_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME magnetic_touch COMMAND magnetic_touch_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/control_config/control_config.yaml
         ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml)
+    add_executable(motion_controller_config_test tests/motion_controller_config_test.cpp)
+    target_link_libraries(motion_controller_config_test PRIVATE motion_controllers)
+    add_test(NAME motion_controller_config COMMAND motion_controller_config_test)
+    add_executable(shm_buffers_test tests/shm_buffers_test.cpp)
+    target_include_directories(shm_buffers_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(shm_buffers_test PRIVATE pthread)
+    add_test(NAME shm_buffers COMMAND shm_buffers_test)
+    add_executable(shm_logger_test tests/shm_logger_test.cpp)
+    target_include_directories(shm_logger_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(shm_logger_test PRIVATE pthread)
+    add_test(NAME shm_logger COMMAND shm_logger_test $<TARGET_FILE:shm_logger>)
     add_executable(daemon_lifecycle_test tests/daemon_lifecycle_test.cpp app/daemon/daemon.cpp)
     target_include_directories(daemon_lifecycle_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(daemon_lifecycle_test PRIVATE pthread)
@@ -96,6 +118,12 @@ if(BUILD_TESTING)
     target_link_libraries(homing_control_test PRIVATE motion_controllers mujoco_simulation)
     set_target_properties(homing_control_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
     add_test(NAME qhrr05_homing COMMAND homing_control_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/control_config/control_config.yaml)
+    add_executable(gravity_compensation_test tests/gravity_compensation_test.cpp)
+    target_link_libraries(gravity_compensation_test PRIVATE motion_controllers mujoco_simulation)
+    set_target_properties(gravity_compensation_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME qhrr05_gravity COMMAND gravity_compensation_test
         ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
         ${CMAKE_CURRENT_SOURCE_DIR}/config/control_config/control_config.yaml)
     add_test(NAME qhrr05_startup_guards COMMAND ${CMAKE_COMMAND}

@@ -1,4 +1,6 @@
 #include "daemon/daemon.hpp"
+#include "shm_utils.hpp"
+#include <memory>
 
 #include <yaml-cpp/yaml.h>
 #include <chrono>
@@ -9,7 +11,6 @@
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
-#include <sys/socket.h>
 #include <map>
 
 namespace {
@@ -39,16 +40,17 @@ fs::path ExecutableDirectory() {
 int main(int argc, char** argv) {
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
+    std::unique_ptr<shm_utils::Mapping> shm;
     Daemon daemon;
     try {
         fs::path config_path = QHRR05_DEFAULT_DAEMON_CONFIG;
-        std::string control_override;
+        std::string control_override, shm_override, csv_path;
         std::vector<std::string> forwarded;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
             if (argument == "--help" || argument == "-h") {
                 std::cout << "daemon [--config YAML] [--control-config YAML] [--robot qhrr-05] "
-                             "[--headless --duration SEC] [--csv PATH]\n";
+                             "[--shm-name NAME] [--headless --duration SEC] [--csv PATH]\n";
                 return 0;
             }
             if (argument == "--headless") { forwarded.push_back(argument); continue; }
@@ -56,9 +58,11 @@ int main(int argc, char** argv) {
             const std::string value = argv[++i];
             if (argument == "--config") config_path = value;
             else if (argument == "--control-config") control_override = value;
+            else if (argument == "--shm-name") shm_override = value;
+            else if (argument == "--csv") csv_path = value;
             else if (argument == "--robot") {
                 if (value != "qhrr-05") throw std::runtime_error("unsupported robot: " + value);
-            } else if (argument == "--duration" || argument == "--csv") {
+            } else if (argument == "--duration") {
                 forwarded.push_back(argument); forwarded.push_back(value);
             } else throw std::runtime_error("unknown argument: " + argument);
         }
@@ -86,48 +90,47 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("only one task_controller and one mujoco_simulate are supported");
             executables[name] = Resolve(ExecutableDirectory(), process["exec_path"].as<std::string>()).string();
         }
-        int channel[2];
-        if (::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, channel) != 0)
-            throw std::runtime_error(std::string("control socketpair failed: ") + std::strerror(errno));
-        try {
-            for (const auto& name : {"task_controller", "mujoco_simulate"}) {
-                const bool controller = std::string(name) == "task_controller";
-                const int fd = channel[controller ? 0 : 1];
-                ProcessSpec spec;
-                spec.name = name;
-                spec.exec_path = executables.at(name);
-                spec.env["ROBOT_NAME"] = "qhrr-05";
-                spec.inherited_fds = {fd};
-                if (controller) spec.args = {control.string(), std::to_string(fd)};
-                else {
-                    spec.args = {"--model", model.string(), "--control-config", control.string(), "--io-fd", std::to_string(fd)};
-                    spec.args.insert(spec.args.end(), forwarded.begin(), forwarded.end());
-                }
-                const auto pid = daemon.Spawn(spec);
-                if (!pid) throw std::runtime_error(std::string("exec failed: ") + std::strerror(daemon.LastErrno()));
-                std::cout << "[daemon] " << name << " started pid=" << *pid << std::endl;
+        if (!csv_path.empty())
+            executables["shm_logger"] = Resolve(ExecutableDirectory(), "shm_logger").string();
+        const auto shm_name = shm_override.empty() ? config["shm_name"].as<std::string>() : shm_override;
+        shm = std::make_unique<shm_utils::Mapping>(shm_name, true);
+        std::cout << "[daemon] SHM " << shm_name << " (sequence double buffers)" << std::endl;
+        // Start readers before the simulator. The daemon owns creation and unlink.
+        for (const auto& name : {"task_controller", "shm_logger", "mujoco_simulate"}) {
+            if (!executables.count(name)) continue;
+            ProcessSpec spec;
+            spec.name = name;
+            spec.exec_path = executables.at(name);
+            if (spec.name == "task_controller") spec.args = {control.string(), shm_name};
+            else if (spec.name == "shm_logger") spec.args = {shm_name, csv_path};
+            else {
+                spec.args = {"--model", model.string(), "--control-config", control.string(), "--shm-name", shm_name};
+                spec.args.insert(spec.args.end(), forwarded.begin(), forwarded.end());
             }
-        } catch (...) {
-            ::close(channel[0]); ::close(channel[1]);
-            daemon.TerminateAll(SIGTERM);
-            for (const auto& [name, _] : executables) {
-                while (daemon.Get(name) && daemon.Get(name)->running) {
-                    daemon.Reap();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-            }
-            throw;
+            const auto pid = daemon.Spawn(spec);
+            if (!pid) throw std::runtime_error(std::string("exec failed: ") + std::strerror(daemon.LastErrno()));
+            std::cout << "[daemon] " << name << " started pid=" << *pid << std::endl;
         }
-        ::close(channel[0]); ::close(channel[1]);
         int result = 0;
         while (!stop_requested) {
             const auto exited = daemon.Reap();
-            if (!exited.empty()) break;
+            if (!exited.empty()) {
+                bool finished;
+                { shm_utils::Lock lock(*shm->get()); finished = shm->get()->simulation_finished; }
+                if (finished) shm_utils::Stop(*shm->get());
+                if (!finished) {
+                    std::cerr << "[daemon] child exited before simulation finished\n";
+                    result = 1;
+                    shm_utils::Stop(*shm->get(), true);
+                    daemon.TerminateAll(SIGTERM);
+                }
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        // Let a normally closed viewer send its stop frame before forced shutdown.
+        // A finished simulator wakes the controller and logger through SHM.
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        if (stop_requested) daemon.TerminateAll(SIGTERM);
+        if (stop_requested) { shm_utils::Stop(*shm->get()); daemon.TerminateAll(SIGTERM); }
         for (;;) {
             daemon.Reap();
             bool running = false;
@@ -136,6 +139,7 @@ int main(int argc, char** argv) {
                 running |= info.running;
                 if (info.exited && (info.exit_code != 0 || (info.term_signal != 0 && info.term_signal != SIGTERM))) {
                     result = info.exit_code != 0 ? info.exit_code : 128+info.term_signal;
+                    shm_utils::Stop(*shm->get(), true);
                     daemon.TerminateAll(SIGTERM);
                 }
             }
@@ -153,6 +157,24 @@ int main(int argc, char** argv) {
         }
         return result;
     } catch (const std::exception& error) {
+        if (shm) {
+            try { shm_utils::Stop(*shm->get(), true); }
+            catch (const std::exception& stop_error) { std::cerr << "[daemon] " << stop_error.what() << '\n'; }
+        }
+        daemon.TerminateAll(SIGTERM);
+        const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            daemon.Reap();
+            bool running = false;
+            for (const char* name : {"task_controller", "shm_logger", "mujoco_simulate"}) {
+                const auto child = daemon.Get(name);
+                running |= child && child->running;
+            }
+            if (!running) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        daemon.TerminateAll(SIGKILL);
+        daemon.Reap();
         std::cerr << "[daemon] ERROR: " << error.what() << '\n';
         return 1;
     }

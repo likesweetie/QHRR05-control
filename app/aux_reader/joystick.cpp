@@ -1,4 +1,5 @@
 #include "joystick.hpp"
+#include "shm_utils.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -113,7 +114,7 @@ void Joystick::initialize()
                   << ", message: "
                   << std::strerror(errno)
                   << std::endl;
-        return;
+        throw std::runtime_error("joystick device open failed");
     }
 
     std::cout << "Joystick device opened: " << device_id_ << std::endl;
@@ -123,8 +124,7 @@ void Joystick::start()
 {
     if (js_ == -1)
     {
-        std::cerr << "Joystick device is not opened. start() ignored." << std::endl;
-        return;
+        throw std::runtime_error("joystick device is not open");
     }
 
     running_ = true;
@@ -132,10 +132,12 @@ void Joystick::start()
     const int ret = pthread_create(&thread_, nullptr, Joystick::thread_function_wrapper, this);
     if (ret != 0)
     {
+        thread_ = 0;
         running_ = false;
         std::cerr << "Failed to create joystick thread: "
                   << std::strerror(ret)
                   << std::endl;
+        throw std::runtime_error("joystick thread creation failed");
     }
 }
 
@@ -149,6 +151,7 @@ void Joystick::join()
     if (thread_)
     {
         pthread_join(thread_, nullptr);
+        thread_ = 0;
     }
 
     if (js_ != -1)
@@ -228,8 +231,11 @@ void* Joystick::loop()
         if (bytes == sizeof(event))
         {
             processEvent_(event);
-            applyAxisMappings_();
-            applyButtonMappings_();
+            try { Publish(); }
+            catch (const std::exception& error) {
+                std::cerr << "[joystick] " << error.what() << std::endl;
+                break;
+            }
         }
         else if (bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
@@ -255,6 +261,7 @@ void* Joystick::loop()
         }
     }
 
+    running_ = false;
     return nullptr;
 }
 
@@ -282,119 +289,23 @@ void Joystick::processEvent_(const js_event& event)
     }
 }
 
-void Joystick::applyAxisMappings_()
-{
-    if (shared_memory_ == nullptr)
-    {
-        return;
+void Joystick::Publish() {
+    ShmJoystick input;
+    for (const auto& mapping : axis_mappings_) {
+        double value = applyDeadband_(axes_[mapping.axis_number], mapping.deadband);
+        if (mapping.invert) value = -value;
+        const int index = mapping.target == TargetType::AngVel ? 2 : mapping.target_index;
+        input.axes[index] = value*mapping.scale;
     }
-
-    for (const AxisMapping& mapping : axis_mappings_)
-    {
-        if (mapping.axis_number >= axes_.size())
-        {
-            continue;
-        }
-
-        float value = axes_[mapping.axis_number];
-
-        value = applyDeadband_(value, mapping.deadband);
-
-        if (mapping.invert)
-        {
-            value = -value;
-        }
-
-        value *= mapping.scale;
-
-        switch (mapping.target)
-        {
-        case TargetType::LinVel:
-            if (mapping.target_index < 3)
-            {
-                shared_memory_->lin_vel_target[mapping.target_index] = value;
-            }
-            break;
-
-        case TargetType::AngVel:
-            if (mapping.target_index < 3)
-            {
-                shared_memory_->ang_vel_target[mapping.target_index] = value;
-            }
-            break;
-        }
+    for (const auto& mapping : button_mappings_) {
+        const int index = static_cast<int>(mapping.target)-static_cast<int>(TargetType::AButton);
+        input.buttons[index] = buttons_[mapping.button_number] != mapping.invert;
     }
-}
-
-void Joystick::applyButtonMappings_()
-{
-    if (shared_memory_ == nullptr)
-    {
-        return;
-    }
-
-    for (const ButtonMapping& mapping : button_mappings_)
-    {
-        if (mapping.button_number >= buttons_.size())
-        {
-            continue;
-        }
-
-        bool value = buttons_[mapping.button_number];
-
-        if (mapping.invert)
-        {
-            value = !value;
-        }
-
-        switch (mapping.target)
-        {
-        case TargetType::AButton:
-            shared_memory_->a_button = value;
-            break;
-
-        case TargetType::BButton:
-            shared_memory_->b_button = value;
-            break;
-
-        case TargetType::XButton:
-            shared_memory_->x_button = value;
-            break;
-
-        case TargetType::YButton:
-            shared_memory_->y_button = value;
-            break;
-
-        case TargetType::LBButton:
-            shared_memory_->lb_button = value;
-            break;
-
-        case TargetType::RBButton:
-            shared_memory_->rb_button = value;
-            break;
-
-        case TargetType::BackButton:
-            shared_memory_->back_button = value;
-            break;
-
-        case TargetType::StartButton:
-            shared_memory_->start_button = value;
-            break;
-
-        case TargetType::GuideButton:
-            shared_memory_->guide_button = value;
-            break;
-
-        case TargetType::L3Button:
-            shared_memory_->l3_button = value;
-            break;
-
-        case TargetType::R3Button:
-            shared_memory_->r3_button = value;
-            break;
-
-        default:
-            break;
-        }
-    }
+    shm_utils::Lock lock(*shared_memory_);
+    if (shared_memory_->stopping || shared_memory_->simulation_finished) { running_ = false; return; }
+    input.sequence = shared_memory_->joystick_sequence+1;
+    input.published_ns = shm_utils::MonotonicNs();
+    shared_memory_->joystick[input.sequence % 2] = input;
+    shared_memory_->joystick_sequence = input.sequence;
+    shm_utils::Notify(*shared_memory_);
 }

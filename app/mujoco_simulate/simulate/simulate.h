@@ -261,6 +261,10 @@ class Simulate {
   std::function<void()> user_reset_callback_;
   std::function<void()> user_step_callback_;
   std::function<void()> user_render_callback_;
+  std::function<void(int)> user_controller_callback_;
+  std::function<void(double)> user_force_callback_;
+  mjtNum user_target_force_ = 3.0;
+  mjtNum user_maximum_force_ = 5.0;
   int user_panel_percent_ = 0;
   std::vector<std::tuple<int, int, std::string, std::string>> user_texts_;
   std::vector<std::tuple<mjrRect, unsigned char*>> user_images_;
@@ -298,7 +302,7 @@ class Simulate {
 
 
   // simulation section of UI
-  const mjuiDef def_simulation[14] = {
+  mjuiDef def_simulation[19] = {
     {mjITEM_SECTION,   "Simulation",    mjPRESERVE, nullptr,     "AS"},
     {mjITEM_RADIO,     "",              5, &this->run,           "Pause\nRun"},
     {mjITEM_BUTTON,    "Reset",         2, nullptr,              " #259"},
@@ -312,6 +316,11 @@ class Simulate {
     {mjITEM_SLIDERNUM, "Noise rate",    5, &this->ctrl_noise_rate, "0 4"},
     {mjITEM_SEPARATOR, "History",       1},
     {mjITEM_SLIDERINT, "",              5, &this->scrub_index,     "0 0"},
+    {mjITEM_SEPARATOR, "Controller",    1},
+    {mjITEM_BUTTON,    "Homing [H]",    2},
+    {mjITEM_BUTTON,    "Gravity [G]",   2},
+    {mjITEM_BUTTON,    "Magnetic [M]",  2},
+    {mjITEM_SLIDERNUM, "Target [N]",    2, &this->user_target_force_, "0 5"},
     {mjITEM_END}
   };
 

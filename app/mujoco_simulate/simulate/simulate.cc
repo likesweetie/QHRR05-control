@@ -97,6 +97,18 @@ inline void Copy(T& dst, const T& src) {
 
 const double zoom_increment = 0.02;  // ratio of one click-wheel zoom increment to vertical extent
 
+// Rendering and mouse selection must use the same 3D viewport.
+mjrRect SceneRect(mjrRect rect, const mj::Simulate* sim) {
+  const int width = rect.width;
+  if (sim->user_panel_percent_ > 0) {
+    rect.width = width * (100 - sim->user_panel_percent_) / 100;
+  }
+  if (sim->profiler) {
+    rect.width = width - width/4;
+  }
+  return rect;
+}
+
 // section ids
 enum {
   // left ui
@@ -1501,6 +1513,15 @@ void UiEvent(mjuiState* state) {
         sim->pending_.load_from_history = true;
         mjui0_update_section(sim, SECT_SIMULATION);
         break;
+
+      case 13:            // Project homing controller
+      case 14:            // Project gravity compensation controller
+      case 15:            // Project magnetic touch controller
+        if (sim->user_controller_callback_) sim->user_controller_callback_(it->itemid-13);
+        break;
+      case 16:            // Live target force, without restarting the motion
+        if (sim->user_force_callback_) sim->user_force_callback_(sim->user_target_force_);
+        break;
       }
     }
 
@@ -2090,14 +2111,17 @@ void Simulate::Sync() {
     }
 
     // find geom and 3D click point, get corresponding body
-    mjrRect r = pending_.select_state.rect[3];
+    mjrRect r = SceneRect(pending_.select_state.rect[3], this);
     mjtNum selpnt[3];
     int selgeom, selflex, selskin;
-    int selbody = mjv_select(m_, d_, &this->opt,
+    int selbody = -1;
+    if (pending_.select_state.x >= r.left && pending_.select_state.x < r.left+r.width) {
+      selbody = mjv_select(m_, d_, &this->opt,
                              static_cast<mjtNum>(r.width) / r.height,
                              (pending_.select_state.x - r.left) / r.width,
                              (pending_.select_state.y - r.bottom) / r.height,
                              &this->scn, selpnt, &selgeom, &selflex, &selskin);
+    }
 
     // set lookat point, start tracking is requested
     if (selmode==2 || selmode==3) {
@@ -2436,13 +2460,7 @@ void Simulate::Render() {
 
   // get 3D rectangle and reduced for profiler
   mjrRect rect = this->uistate.rect[3];
-  mjrRect smallrect = rect;
-  if (this->user_panel_percent_ > 0) {
-    smallrect.width = rect.width * (100 - this->user_panel_percent_) / 100;
-  }
-  if (this->profiler) {
-    smallrect.width = rect.width - rect.width/4;
-  }
+  mjrRect smallrect = SceneRect(rect, this);
 
   // no model
   if (!this->is_passive_ && !this->m_) {
@@ -2750,6 +2768,8 @@ void Simulate::RenderLoop() {
   this->ui1.userdata = this;
   mjui_add(&this->ui0, defFile);
   mjui_add(&this->ui0, this->def_option);
+  std::snprintf(this->def_simulation[17].other, sizeof(this->def_simulation[17].other),
+                "0 %.9g", static_cast<double>(this->user_maximum_force_));
   mjui_add(&this->ui0, this->def_simulation);
   this->ui0.sect[0].state = 1;
   this->ui0.sect[1].state = 1;

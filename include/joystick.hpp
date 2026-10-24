@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <linux/joystick.h>
 
-#include "shared_memory.hpp"   // ShmData 정의가 들어있는 헤더로 바꾸십시오.
+#include "shared_memory.hpp"
 
 class Joystick
 {
@@ -51,11 +51,13 @@ public:
 
 public:
     Joystick(const char* device_id, ShmData* shared_memory);
+    ~Joystick() { stop(); join(); }
 
     void initialize();
     void start();
     void stop();
     void join();
+    bool isRunning() const { return running_.load(); }
 
     float getAxis(uint8_t axis_number) const;
     bool getButton(uint8_t button_number) const;
@@ -65,8 +67,7 @@ private:
     void* loop();
 
     void processEvent_(const js_event& event);
-    void applyAxisMappings_();
-    void applyButtonMappings_();
+    void Publish();
 
     static float mapAxisValue_(int16_t value);
     static float applyDeadband_(float value, float deadband);
@@ -76,7 +77,7 @@ private:
     ShmData* shared_memory_;
 
     int js_ = -1;
-    pthread_t thread_;
+    pthread_t thread_ = 0;
     std::atomic<bool> running_{false};
 
     static constexpr size_t kMaxAxes = 32;

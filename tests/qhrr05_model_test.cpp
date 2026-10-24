@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
         Require(model != nullptr, std::string("Model load failed: ") + error);
         const mjModel* m = model.get();
         Require(m->nq == 3 && m->nv == 3 && m->nu == 3, "Expected nq=nv=nu=3");
-        Require(m->njnt == 3 && m->nbody == 5, "Expected torso and FL links only");
+        Require(m->njnt == 3 && m->nbody == 5+m->nmocap, "Expected torso and FL links only");
         Require(m->nsensor == 0, "Unexpected sensor hardware");
         const int base = mj_name2id(m, mjOBJ_BODY, "base");
         Require(base > 0 && m->body_parentid[base] == 0 && m->body_jntnum[base] == 0,
