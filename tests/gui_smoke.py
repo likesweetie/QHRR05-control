@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-gui-') as tmp:
         deadline=time.monotonic()+25
         while time.monotonic()<deadline:
             if process.poll() is not None:raise AssertionError(contents())
-            found=subprocess.run(['xdotool','search','--name','qhrr-05.*Homing control'],capture_output=True,text=True)
+            found=subprocess.run(['xdotool','search','--name','MuJoCo simulate.*qhrr-05'],capture_output=True,text=True)
             if found.returncode==0:
                 window=found.stdout.splitlines()[-1]
             if window and 'HOLD:' in contents():break

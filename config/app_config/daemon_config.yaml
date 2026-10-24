@@ -4,8 +4,10 @@ robots:
     model_path: "../../models/qhrr-05/scene.xml"
     control_config_path: "../control_config/control_config.yaml"
 
-# The simulator and homing controller share one physics loop and one window.
+# Separate simulator GUI/physics and control-only superloop processes.
 # exec_path is relative to the daemon executable, independent of the working directory.
 processes:
   - name: task_controller
     exec_path: task_controller
+  - name: mujoco_simulate
+    exec_path: mujoco_simulate

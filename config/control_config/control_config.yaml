@@ -1,5 +1,4 @@
 robot: qhrr-05
-joint_names: [FL_hip_joint, FL_thigh_joint, FL_calf_joint]
 
 # Joint order: FL hip roll, thigh pitch, calf pitch.
 # kp: N*m/rad, kd: N*m*s/rad. A scalar or three joint values are accepted.

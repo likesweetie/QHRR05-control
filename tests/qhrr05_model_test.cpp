@@ -1,5 +1,4 @@
 #include <mujoco/mujoco.h>
-#include "qhrr05_model.hpp"
 
 #include <array>
 #include <cmath>
@@ -22,30 +21,6 @@ int main(int argc, char** argv) {
             mj_loadXML(argv[1], nullptr, error, sizeof(error)), mj_deleteModel);
         Require(model != nullptr, std::string("Model load failed: ") + error);
         const mjModel* m = model.get();
-        qhrr05::ValidateModel(m);
-        const auto rejects = [](const mjModel* candidate) {
-            try {
-                qhrr05::ValidateModel(candidate);
-                return false;
-            } catch (const std::runtime_error&) {
-                return true;
-            }
-        };
-        std::unique_ptr<mjModel, decltype(&mj_deleteModel)> other(
-            mj_copyModel(nullptr, m), mj_deleteModel);
-        Require(other != nullptr, "Could not copy model for rejection checks");
-        other->nq = 10;
-        other->nv = 9;
-        Require(rejects(other.get()), "Floating-base dimensions must be rejected");
-        other->nq = m->nq;
-        other->nv = m->nv;
-        const int name_offset = other->name_jntadr[0];
-        const char original_name = other->names[name_offset];
-        other->names[name_offset] = 'X';
-        Require(rejects(other.get()), "Unknown joints with three DOFs must be rejected");
-        other->names[name_offset] = original_name;
-        other->actuator_trnid[0] = 1;
-        Require(rejects(other.get()), "Wrong actuator transmission must be rejected");
         Require(m->nq == 3 && m->nv == 3 && m->nu == 3, "Expected nq=nv=nu=3");
         Require(m->njnt == 3 && m->nbody == 5, "Expected torso and FL links only");
         Require(m->nsensor == 0, "Unexpected sensor hardware");

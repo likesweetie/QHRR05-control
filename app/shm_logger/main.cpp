@@ -1,5 +1,4 @@
 #include "shm_utils.hpp"
-#include "qhrr05_platform.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -77,14 +76,14 @@ int main(int argc, char** argv) {
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    if (shm->state_seq == 0 || !qhrr05::HasDimensions(shm->nq, shm->nv, shm->nu)) {
+    if (shm->state_seq == 0 || (shm->nq != 3 || shm->nv != 3 || shm->nu != 3)) {
         std::cerr << "[shm_logger] expected published qhrr-05 state with nq=nv=nu=3" << std::endl;
         shm_utils::CloseShm(shm);
         return 1;
     }
-    constexpr int nq = qhrr05::kJointCount;
-    constexpr int nv = qhrr05::kJointCount;
-    constexpr int nu = qhrr05::kJointCount;
+    constexpr int nq = 3;
+    constexpr int nv = 3;
+    constexpr int nu = 3;
 
     std::ofstream out(csv_path, std::ios::out | std::ios::trunc);
     if (!out.is_open()) {
@@ -104,7 +103,7 @@ int main(int argc, char** argv) {
 
     while (g_run.load(std::memory_order_relaxed)) {
         next_tick += period;
-        if (!qhrr05::HasDimensions(shm->nq, shm->nv, shm->nu)) {
+        if ((shm->nq != 3 || shm->nv != 3 || shm->nu != 3)) {
             std::cerr << "[shm_logger] qhrr-05 state dimensions changed" << std::endl;
             exit_code = 1;
             break;

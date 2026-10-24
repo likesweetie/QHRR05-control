@@ -1,4 +1,6 @@
-#include "homing_controller.hpp"
+#include <array>
+#include "motion_controllers/homing_controller.hpp"
+#include "mujoco_simulate/simulation.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -15,29 +17,35 @@ int main(int argc, char** argv) {
         std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
             mj_loadXML(argv[1], nullptr, error, sizeof(error)), mj_deleteModel);
         Require(model != nullptr, error);
-        auto config = qhrr05::LoadControlConfig(argv[2]);
-        qhrr05::ValidateControlConfig(config, model.get());
-        auto invalid = config;
-        invalid.home_position[1] = 100;
+        auto config = YAML::LoadFile(argv[2]);
+        const auto initial = qhrr05::ReadPosition(config["homing"]["initial_position_rad"], model.get());
+        auto invalid = YAML::Load("[0,100,-1.8]");
         bool rejected = false;
-        try { qhrr05::ValidateControlConfig(invalid, model.get()); }
+        try { qhrr05::ReadPosition(invalid, model.get()); }
         catch (const std::runtime_error&) { rejected = true; }
         Require(rejected, "home outside joint limits must be rejected");
+        const double duration = config["homing"]["duration_sec"].as<double>();
         for (int scenario = 0; scenario < 2; ++scenario) {
-            if (scenario == 1) config.home_position = {.1, .6, -1.5};
+            if (scenario == 1) config["homing"]["position_rad"] = YAML::Load("[.1,.6,-1.5]");
+            const auto home = qhrr05::ReadPosition(config["homing"]["position_rad"], model.get());
             qhrr05::HomingController controller(config);
             std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(model.get()), mj_deleteData);
-            controller.Reset(model.get(), data.get());
+            qhrr05::ResetSimulation(initial, model.get(), data.get());
             const auto start = controller.Reference(0);
-            const auto finish = controller.Reference(config.duration_sec);
+            const auto finish = controller.Reference(duration);
             for (int i = 0; i < 3; ++i) {
-                Require(start.position[i] == config.initial_position[i], "trajectory starts at wrong pose");
-                Require(std::abs(finish.position[i]-config.home_position[i]) < 1e-12, "trajectory ends at wrong pose");
+                Require(start.position[i] == initial[i], "trajectory starts at wrong pose");
+                Require(std::abs(finish.position[i]-home[i]) < 1e-12, "trajectory ends at wrong pose");
                 Require(start.velocity[i] == 0 && finish.velocity[i] == 0, "endpoint velocity must be zero");
             }
             double max_torque = 0;
-            while (data->time < config.duration_sec + 4) {
-                controller.Apply(model.get(), data.get());
+            while (data->time < duration + 4) {
+                mj_forward(model.get(), data.get());
+                std::array<double, 3> reference;
+                controller.Compute(data->time, data->qpos, data->qvel, data->qfrc_bias,
+                                   data->ctrl, reference.data());
+                for (int i = 0; i < 3; ++i)
+                    data->ctrl[i] = std::clamp(data->ctrl[i], model->actuator_ctrlrange[2*i], model->actuator_ctrlrange[2*i+1]);
                 mj_step(model.get(), data.get());
                 mj_forward(model.get(), data.get());
                 for (int i = 0; i < 3; ++i) {
@@ -49,7 +57,7 @@ int main(int argc, char** argv) {
             }
             double max_error = 0;
             for (int i = 0; i < 3; ++i) {
-                max_error = std::max(max_error, std::abs(data->qpos[i]-config.home_position[i]));
+                max_error = std::max(max_error, std::abs(data->qpos[i]-home[i]));
                 Require(std::abs(data->qvel[i]) < .01, "home pose has not settled");
             }
             std::cout << "scenario=" << scenario << " home_error=" << max_error << " peak_torque=" << max_torque << '\n';

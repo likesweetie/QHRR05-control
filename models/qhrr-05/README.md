@@ -43,14 +43,14 @@ cmake --build build --parallel 2
 ./build/daemon
 ```
 
-데몬이 MuJoCo 기반 `task_controller` 창을 엽니다. 로봇은 초기 자세에서 3초 동안 호밍 목표로 이동하고, 이후 해당 자세를 계속 유지합니다. 제어와 시각화는 같은 프로세스에서 실행하며, 제어 계산은 1 ms 물리 스텝에 맞춥니다.
+데몬이 `third_party/mujoco/simulate`를 복사한 MuJoCo 뷰어 창을 엽니다. 로봇은 초기 자세에서 3초 동안 호밍 목표로 이동하고, 이후 해당 자세를 계속 유지합니다. 데몬은 `task_controller`와 `mujoco_simulate` 두 프로세스를 실행합니다. 태스크 컨트롤러가 호밍 인스턴스 핸들을 소유하고 IO 읽기 → 제어 계산 → IO 쓰기 수퍼루프를 실행하며, 뷰어가 물리·GUI·그래프·CSV를 담당합니다. 각 1 ms 물리 스텝의 상태·토크를 전용 로컬 소켓으로 주고받습니다.
 
 설정은 **[config/control_config/control_config.yaml](../../config/control_config/control_config.yaml) 하나**에서 관리합니다. 설정 변경 후 데몬을 다시 실행하면 적용됩니다.
 
 | 설정 | 기본값 | 의미 |
 | --- | --- | --- |
-| `kp` | `[80, 80, 80]` | 위치 게인 [N·m/rad], 스칼라 또는 3개 값 |
-| `kd` | `[4, 4, 4]` | 속도 게인 [N·m·s/rad], 스칼라 또는 3개 값 |
+| `kp` | `[40, 80, 40]` | 위치 게인 [N·m/rad], 스칼라 또는 3개 값 |
+| `kd` | `[1, 1, 1]` | 속도 게인 [N·m·s/rad], 스칼라 또는 3개 값 |
 | `homing.initial_position_rad` | `[0, 0.3, -1.0]` | 시뮬레이션 시작 자세 |
 | `homing.position_rad` | `[0, 0.9, -1.8]` | 호밍·유지 목표 자세 |
 | `homing.duration_sec` | `3.0` | 호밍 이동 시간 [시뮬레이션 초] |
@@ -58,7 +58,7 @@ cmake --build build --parallel 2
 | `plots.history_sec` | `10.0` | 그래프의 최근 표시 구간 [초] |
 | `plots.sample_hz` | `100.0` | 그래프·CSV 수집 주기 [Hz] |
 
-관절 순서는 항상 FL hip → thigh → calf입니다. 초기·목표 자세가 관절 한계를 벗어나거나, 게인·설정 이름·로봇·순서가 잘못되면 실행을 실패시킵니다. 이전 `robot_config/.../pd_config.yaml`은 삭제했습니다. XML `home` keyframe은 모델 자산 정보이며, 현재 실행 프로그램의 시작·목표 자세는 YAML이 결정합니다.
+관절 순서는 항상 FL hip → thigh → calf입니다. YAML의 필수 값은 바로 타입 변환하며, 3관절 크기·유한값·게인 부호·이동 시간과 모델의 관절 한계만 검사합니다. 별도 설정 스키마나 기본값 대체는 없습니다. 이전 `robot_config/.../pd_config.yaml`은 삭제했습니다. XML `home` keyframe은 모델 자산 정보이며, 현재 실행 프로그램의 시작·목표 자세는 YAML이 결정합니다.
 
 목표 궤적은 양 끝의 속도·가속도가 0인 5차 보간입니다. 제어식은 `tau = kp*(q_ref-q) + kd*(dq_ref-dq) + bias`이며, 계산한 토크는 원본 모델의 구동기 제한 안으로 제한합니다. 일시 정지는 물리 시간과 호밍 진행을 함께 멈춥니다.
 
@@ -82,7 +82,7 @@ cmake --build build --parallel 2
 ./build/daemon --csv /tmp/qhrr05-new-run.csv
 ```
 
-CSV에는 실행 구간 `run_id`, 시뮬레이션 시간, 실제·목표 관절각, 실제 모터 토크가 들어갑니다. `R`을 누르면 `run_id`가 증가합니다. 이번 호밍 경로에는 SHM을 사용하지 않으며, 이전 `shm_logger`·조이스틱 도구는 기본 실행에 포함되지 않습니다.
+CSV에는 실행 구간 `run_id`, 시뮬레이션 시간, 실제·목표 관절각, 실제 모터 토크가 들어갑니다. `R`을 누르면 `run_id`가 증가합니다. 이번 경로는 SHM 대신 데몬이 만든 전용 `SOCK_SEQPACKET` 소켓을 사용합니다. 소수 관절용 고정 배열을 직접 송수신하며 별도 메시지 타입·번호·버전 계약은 두지 않습니다. 길이·유한값·응답 기한을 검사하고 뷰어에서 모델의 토크 한계를 적용합니다. 제어기 연결이 끊기면 뷰어가 실패하고 데몬이 종료 상태를 반영합니다. 이전 `shm_logger`·조이스틱 도구는 기본 실행에 포함되지 않습니다.
 
 자동 검사는 다음 명령으로 실행합니다. `--headless`는 사용자가 명시적으로 선택하는 검사 모드이며 같은 모델·제어 코드를 사용합니다.
 
@@ -91,6 +91,18 @@ ctest --test-dir build --output-on-failure
 ./build/daemon --headless --duration 7 --csv /tmp/qhrr05-headless-new-run.csv
 ```
 
-CTest는 모델·장면, 기본 및 변경된 호밍 목표 수렴, 설정 오류, 임의 작업 디렉터리에서 데몬 실행, exec 실패·자식 회수·다른 프로세스 보존을 확인합니다. 기본 목표는 7초 검사에서 최대 위치 오차 약 `9.91e-7 rad`, 변경 목표는 약 `1.06e-5 rad`였습니다. 이는 현재 시뮬레이션 모델·게인·보상 조건의 결과입니다.
+CTest는 모델·장면, 기본 및 변경된 호밍 목표 수렴, 설정 오류, 임의 작업 디렉터리에서 데몬 실행, exec 실패·자식 회수·다른 프로세스 보존을 확인합니다. 분리된 두 프로세스의 데몬 호밍 경로와 짧은 응답·비유한 출력·연결 단절의 거부와 모델 토크 제한도 검사합니다.
 
 Xvfb·xdotool·Pillow가 있는 환경에서는 `xvfb-run -a -s '-screen 0 1800x1000x24' python3 tests/gui_smoke.py`로 실제 데몬 GUI·그래프·일시 정지·재시작·종료를 검사할 수 있습니다. 해당 GUI 검사를 통과했고 위 화면을 저장했습니다. 실물 하드웨어와 강제 실시간성은 검증 범위에 포함하지 않습니다.
+
+### 코드 위치
+
+- `app/task_controller/`: 호밍 핸들 소유, 입력 읽기·제어 호출·출력 쓰기 함수와 수퍼루프.
+- `app/motion_controllers/`: GUI·MuJoCo에 의존하지 않는 호밍 제어기. 별도 설정 파서 없이 YAML 값을 읽습니다.
+- `app/mujoco_simulate/`: 물리·관절 접근·토크 제한·그래프·CSV와 복사한 `simulate` GUI.
+- `src`, `control_config.cpp`, `ControlIo`, `task_types.hpp`, `qhrr05_model.hpp`, `qhrr05_platform.hpp`는 제거했습니다.
+- [GUI 복사 출처·변경 범위](../../app/mujoco_simulate/SOURCE.md).
+
+MuJoCo의 패널·카메라·프로파일러 UI를 사용합니다. 기본 모델 교체·재로드는 거부하며, 모델·설정 변경은 데몬을 재시작하여 적용합니다. 이 도구 환경에서 소켓 조회 또는 X11 접근이 제한된 경우 검증에 별도 실행 권한이 필요합니다. 실패를 다른 IO나 화면 없는 모드로 대체하지 않습니다.
+
+모델 파일·메시·참조 오류는 MuJoCo 로더에 맡깁니다. 뷰어에는 로드 성공 여부와 고정 배열 접근에 필요한 `nq=nv=nu=3` 확인만 있으며, 몸체 수·센서 수·이름·연결 구조를 강제하는 별도 검사는 없습니다.
