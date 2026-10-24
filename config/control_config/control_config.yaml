@@ -1,0 +1,17 @@
+robot: qhrr-05
+joint_names: [FL_hip_joint, FL_thigh_joint, FL_calf_joint]
+
+# Joint order: FL hip roll, thigh pitch, calf pitch.
+# kp: N*m/rad, kd: N*m*s/rad. A scalar or three joint values are accepted.
+kp: [40.0, 80.0, 40.0]
+kd: [1.0, 1.0, 1.0]
+bias_compensation: true  # Compensate MuJoCo gravity and Coriolis terms.
+
+homing:
+  initial_position_rad: [0.0, 0.3, -1.0]
+  position_rad: [0.0, 0.9, -1.8]
+  duration_sec: 3.0
+
+plots:
+  history_sec: 10.0
+  sample_hz: 100.0

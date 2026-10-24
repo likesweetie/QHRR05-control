@@ -1,0 +1,61 @@
+#include "homing_controller.hpp"
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+
+void Require(bool value, const char* message) {
+    if (!value) throw std::runtime_error(message);
+}
+int main(int argc, char** argv) {
+    try {
+        Require(argc == 3, "expected model and control config");
+        char error[1024] = {};
+        std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
+            mj_loadXML(argv[1], nullptr, error, sizeof(error)), mj_deleteModel);
+        Require(model != nullptr, error);
+        auto config = qhrr05::LoadControlConfig(argv[2]);
+        qhrr05::ValidateControlConfig(config, model.get());
+        auto invalid = config;
+        invalid.home_position[1] = 100;
+        bool rejected = false;
+        try { qhrr05::ValidateControlConfig(invalid, model.get()); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected, "home outside joint limits must be rejected");
+        for (int scenario = 0; scenario < 2; ++scenario) {
+            if (scenario == 1) config.home_position = {.1, .6, -1.5};
+            qhrr05::HomingController controller(config);
+            std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(model.get()), mj_deleteData);
+            controller.Reset(model.get(), data.get());
+            const auto start = controller.Reference(0);
+            const auto finish = controller.Reference(config.duration_sec);
+            for (int i = 0; i < 3; ++i) {
+                Require(start.position[i] == config.initial_position[i], "trajectory starts at wrong pose");
+                Require(std::abs(finish.position[i]-config.home_position[i]) < 1e-12, "trajectory ends at wrong pose");
+                Require(start.velocity[i] == 0 && finish.velocity[i] == 0, "endpoint velocity must be zero");
+            }
+            double max_torque = 0;
+            while (data->time < config.duration_sec + 4) {
+                controller.Apply(model.get(), data.get());
+                mj_step(model.get(), data.get());
+                mj_forward(model.get(), data.get());
+                for (int i = 0; i < 3; ++i) {
+                    Require(std::isfinite(data->qpos[i]), "non-finite homing state");
+                    Require(data->ctrl[i] >= model->actuator_ctrlrange[2*i] &&
+                            data->ctrl[i] <= model->actuator_ctrlrange[2*i+1], "torque limit exceeded");
+                    max_torque = std::max(max_torque, std::abs(data->actuator_force[i]));
+                }
+            }
+            double max_error = 0;
+            for (int i = 0; i < 3; ++i) {
+                max_error = std::max(max_error, std::abs(data->qpos[i]-config.home_position[i]));
+                Require(std::abs(data->qvel[i]) < .01, "home pose has not settled");
+            }
+            std::cout << "scenario=" << scenario << " home_error=" << max_error << " peak_torque=" << max_torque << '\n';
+            Require(max_error < .01, "home pose error exceeds 0.01 rad");
+            for (int i = 0; i < mjNWARNING; ++i) Require(data->warning[i].number == 0, "MuJoCo warning");
+        }
+        return 0;
+    } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
+}

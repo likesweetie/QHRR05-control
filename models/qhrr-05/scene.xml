@@ -1,0 +1,21 @@
+<mujoco model="qhrr-05 scene">
+  <include file="qhrr-05.xml"/>
+
+  <statistic center="0.05 0.05 0.3" extent="0.65"/>
+  <visual>
+    <headlight diffuse="0.7 0.7 0.7" ambient="0.35 0.35 0.35" specular="0.1 0.1 0.1"/>
+    <rgba haze="0.12 0.15 0.18 1"/>
+    <global azimuth="135" elevation="-20" offwidth="1280" offheight="720"/>
+  </visual>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.25 0.3 0.35" rgb2="0.05 0.06 0.08"
+      width="512" height="3072"/>
+    <texture type="2d" name="ground" builtin="checker" rgb1="0.22 0.25 0.28"
+      rgb2="0.17 0.2 0.23" width="300" height="300"/>
+    <material name="ground" texture="ground" texrepeat="4 4" texuniform="true"/>
+  </asset>
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="ground"/>
+  </worldbody>
+</mujoco>

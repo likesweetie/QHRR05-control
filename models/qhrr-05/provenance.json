@@ -1,0 +1,62 @@
+{
+  "repository": "https://github.com/google-deepmind/mujoco_menagerie",
+  "commit": "6da8b971844845de6ab27315aacc3a3fea4ddb8e",
+  "source_xml": "unitree_go2/go2.xml",
+  "source_xml_sha256": "50adb09a4365293e2acdaf2010ae35a82b0f09fea18ae51806fef91e310ed04a",
+  "assets": {
+    "calf_0.obj": {
+      "upstream_file": "unitree_go2/assets/calf_0.obj",
+      "upstream_sha256": "4a818cd563c5b7e2a271504442d05fd777d38cbaa028d4a10ad29c9f87bb355e",
+      "local_sha256": "4a818cd563c5b7e2a271504442d05fd777d38cbaa028d4a10ad29c9f87bb355e",
+      "modification": "unchanged"
+    },
+    "calf_1.obj": {
+      "upstream_file": "unitree_go2/assets/calf_1.obj",
+      "upstream_sha256": "51950c3a153ae3208592df86ea11c9d6756f8f645ebca5caf6910c61aeb03817",
+      "local_sha256": "51950c3a153ae3208592df86ea11c9d6756f8f645ebca5caf6910c61aeb03817",
+      "modification": "unchanged"
+    },
+    "foot.obj": {
+      "upstream_file": "unitree_go2/assets/foot.obj",
+      "upstream_sha256": "df9e78a7c0110d02557439010f2a5f11f0ec4fd907b32704145dbd6aa7affc0b",
+      "local_sha256": "df9e78a7c0110d02557439010f2a5f11f0ec4fd907b32704145dbd6aa7affc0b",
+      "modification": "unchanged"
+    },
+    "hip_0.obj": {
+      "upstream_file": "unitree_go2/assets/hip_0.obj",
+      "upstream_sha256": "cc29932ab4d251ce3f72389ec4c1f757e44eee138b87e772b648c2bc76b506cd",
+      "local_sha256": "cc29932ab4d251ce3f72389ec4c1f757e44eee138b87e772b648c2bc76b506cd",
+      "modification": "unchanged"
+    },
+    "hip_1.obj": {
+      "upstream_file": "unitree_go2/assets/hip_1.obj",
+      "upstream_sha256": "3fd5bd9b2ef6abe622c0739d3c67eaa1679b19b47132951972c4892a779ea7cf",
+      "local_sha256": "3fd5bd9b2ef6abe622c0739d3c67eaa1679b19b47132951972c4892a779ea7cf",
+      "modification": "unchanged"
+    },
+    "thigh_0.obj": {
+      "upstream_file": "unitree_go2/assets/thigh_0.obj",
+      "upstream_sha256": "bb3edfe6a7b04f4f4dff1ce7b05d426ddce941e276cc6372fb542055893c71ec",
+      "local_sha256": "bb3edfe6a7b04f4f4dff1ce7b05d426ddce941e276cc6372fb542055893c71ec",
+      "modification": "unchanged"
+    },
+    "thigh_1.obj": {
+      "upstream_file": "unitree_go2/assets/thigh_1.obj",
+      "upstream_sha256": "3a631822f9f7d2114b1b79dcdff5abf95103630abb7d91d1f3b8b18117132ed2",
+      "local_sha256": "3a631822f9f7d2114b1b79dcdff5abf95103630abb7d91d1f3b8b18117132ed2",
+      "modification": "unchanged"
+    },
+    "torso_3.obj": {
+      "upstream_file": "unitree_go2/assets/base_3.obj",
+      "upstream_sha256": "f51ba43bf300e68957a0c1aa83eaf3e4926f4ac7e64a0d6c33ae5d21fcbcf5f6",
+      "local_sha256": "937da2370ba784fc9f8578c08cf0356f2d7e642b733379f82f21a12b3b3d2e5e",
+      "modification": "visual crop x<=0.1881,z<=0.057; no collision/inertia derived from mesh"
+    },
+    "torso_4.obj": {
+      "upstream_file": "unitree_go2/assets/base_4.obj",
+      "upstream_sha256": "49ddec0129546e5dd2075d5beacf7f207baa2860aeff7626818e64d2efbf3821",
+      "local_sha256": "f40ed417fe611edd05827f59965988754d165771e6efeb953b95bd2ecc651474",
+      "modification": "visual crop x<=0.1881,z<=0.057; no collision/inertia derived from mesh"
+    }
+  }
+}

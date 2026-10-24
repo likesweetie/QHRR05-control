@@ -1,0 +1,6 @@
+/build/
+__pycache__/
+/.aws/
+/.codex/
+/.agents/
+MUJOCO_LOG.TXT
