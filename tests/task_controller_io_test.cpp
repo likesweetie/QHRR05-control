@@ -23,12 +23,16 @@ ShmCommand Latest(ShmData& shm) {
 
 template <class Predicate> ShmCommand WaitCommand(ShmData& shm, Predicate predicate) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+
     while (std::chrono::steady_clock::now() < deadline) {
         const auto command = Latest(shm);
+
         if (command.sequence && predicate(command))
             return command;
+
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+
     throw std::runtime_error("test did not observe expected independent controller output");
 }
 
@@ -38,19 +42,23 @@ std::uint64_t Request(ShmData& shm, int mode) {
     shm.requests[sequence % 2] = {sequence, mode, 3.0, sequence};
     shm.request_sequence = sequence;
     shm_utils::Notify(shm);
+
     return sequence;
 }
 
 void WaitExit(pid_t child, int expected) {
     int status = 0;
+
     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
     }
+
     Require(WIFEXITED(status) && WEXITSTATUS(status) == expected, "controller process failed");
 }
 
 int main(int argc, char** argv) {
     pid_t worker = -1;
     std::string temporary_directory;
+
     try {
         Require(argc == 4, "expected config, model and controller executable");
         char directory[] = "/tmp/qhrr05-independent-XXXXXX";
@@ -66,6 +74,7 @@ int main(int argc, char** argv) {
             output.close();
             Require(!output.fail(), "test config write failed");
         };
+
         save();
         char error[1024] = {};
         std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
@@ -82,11 +91,13 @@ int main(int argc, char** argv) {
         const auto launch = [&](const std::string& name) {
             worker = ::fork();
             Require(worker >= 0, "fork failed");
+
             if (worker == 0) {
                 ::execl(argv[3], argv[3], path.c_str(), name.c_str(), static_cast<char*>(nullptr));
                 ::_exit(127);
             }
         };
+
         {
             shm_utils::Mapping mapping(prefix, true);
             auto& shm = *mapping.get();
@@ -94,6 +105,7 @@ int main(int argc, char** argv) {
             auto before = WaitCommand(shm, [](const ShmCommand&) {
                 return true;
             });
+
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
             auto after = Latest(shm);
             const auto cycles = after.sequence - before.sequence;
@@ -105,6 +117,7 @@ int main(int argc, char** argv) {
                 shm_utils::Lock lock(shm);
                 shm.simulation_finished = true;
             }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
             Require(Latest(shm).sequence > after.sequence,
                 "controller depends on simulator completion status");
@@ -121,46 +134,56 @@ int main(int argc, char** argv) {
             before = WaitCommand(shm, [&](const ShmCommand& cmd) {
                 return cmd.request_sequence == request;
             });
+
             for (int i = 0; i < 3; ++i)
                 Require(std::abs(before.reference[i] - initial[i]) < .02,
                     "explicit restart did not capture current position");
+
             after = WaitCommand(shm, [&](const ShmCommand& cmd) {
                 return cmd.request_sequence == request && cmd.holding;
             });
+
             Require(after.state_sequence == 1, "unchanged measurement was not reused");
             Require(after.control_time - before.control_time >= .1,
                 "homing did not use controller elapsed time");
+
             for (int i = 0; i < 3; ++i)
                 Require(std::abs(after.reference[i] - home[i]) < 1e-12,
                     "homing stopped with a frozen simulator");
 
             for (int i = 0; i < 3; ++i)
                 data->qvel[i] = .2 * (i + 1);
+
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
             const auto gravity_request = Request(shm, 1);
             after = WaitCommand(shm, [&](const ShmCommand& cmd) {
                 return cmd.request_sequence == gravity_request && cmd.state_sequence == 2;
             });
+
             for (int i = 0; i < 3; ++i) {
                 const double damping = config["gravity_compensation"]["kd_motor"][i].as<double>();
                 Require(std::abs(after.torque[i] -
                                  (gravity->qfrc_bias[i] - damping * data->qvel[i])) < 1e-10,
                     "gravity torque is wrong with frozen input");
             }
+
             const auto home_request = Request(shm, 0);
             WaitCommand(shm, [&](const ShmCommand& cmd) {
                 return cmd.request_sequence == home_request && cmd.holding;
             });
+
             qhrr05::ResetSimulation(initial, model.get(), data.get());
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
             after = WaitCommand(shm, [](const ShmCommand& cmd) {
                 return cmd.state_sequence == 3;
             });
+
             Require(after.holding, "simulation time rewind restarted the independent controller");
             const auto magnetic_request = Request(shm, 2);
             auto magnetic = WaitCommand(shm, [&](const ShmCommand& cmd) {
                 return cmd.request_sequence == magnetic_request && cmd.mode == 2;
             });
+
             Require(magnetic.magnetic.phase == MagneticPhase::Free,
                 "magnetic mode without measurements did not remain free");
             const auto event = magnetic.magnetic.event_sequence;
@@ -172,9 +195,11 @@ int main(int argc, char** argv) {
                 shm.requests[request.sequence % 2] = request;
                 shm_utils::Notify(shm);
             }
+
             magnetic = WaitCommand(shm, [&](const ShmCommand& cmd) {
                 return cmd.magnetic.target_force == 4;
             });
+
             Require(magnetic.request_sequence == magnetic_request &&
                         magnetic.magnetic.event_sequence == event,
                 "live force update restarted the magnetic state machine");
@@ -185,6 +210,7 @@ int main(int argc, char** argv) {
                 "commands were not published to double buffers");
             std::cout << "observed 100 Hz cycles in 150ms=" << cycles << '\n';
         }
+
         // A very slow configured period must still allow ordinary process shutdown.
         config["task_controller"]["frequency_hz"] = .1;
         save();
@@ -194,6 +220,7 @@ int main(int argc, char** argv) {
             WaitCommand(*mapping.get(), [](const ShmCommand&) {
                 return true;
             });
+
             const auto start = std::chrono::steady_clock::now();
             shm_utils::Stop(*mapping.get());
             WaitExit(worker, 0);
@@ -201,6 +228,7 @@ int main(int argc, char** argv) {
             Require(std::chrono::steady_clock::now() - start < std::chrono::seconds(1),
                 "scheduler ignored stop request");
         }
+
         for (double frequency : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
             config["task_controller"]["frequency_hz"] = frequency;
             save();
@@ -209,6 +237,7 @@ int main(int argc, char** argv) {
             WaitExit(worker, 1);
             worker = -1;
         }
+
         // The simulator never waits for a controller, and holds any latest command
         // independently of how many states it has published.
         {
@@ -225,6 +254,7 @@ int main(int argc, char** argv) {
                 shm.commands[1].sequence = 7;
                 shm.commands[1].torque[0] = 1000;
             }
+
             const auto command =
                 qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
             Require(command.sequence == 7 && shm.state_sequence == 2,
@@ -234,14 +264,18 @@ int main(int argc, char** argv) {
                 shm_utils::Lock lock(shm);
                 shm.commands[1].torque[0] = std::numeric_limits<double>::quiet_NaN();
             }
+
             bool rejected = false;
+
             try {
                 qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
             } catch (const std::runtime_error&) {
                 rejected = true;
             }
+
             Require(rejected, "non-finite torque was accepted");
         }
+
         std::filesystem::remove_all(temporary_directory);
         std::cout
             << "PASS: configured independent loop without simulator, frozen feedback, independent clock/counters, explicit requests, no simulator wait\n";
@@ -249,12 +283,16 @@ int main(int argc, char** argv) {
     } catch (const std::exception& error) {
         if (worker > 0) {
             ::kill(worker, SIGKILL);
+
             while (::waitpid(worker, nullptr, 0) < 0 && errno == EINTR) {
             }
         }
+
         if (!temporary_directory.empty())
             std::filesystem::remove_all(temporary_directory);
+
         std::cerr << error.what() << '\n';
+
         return 1;
     }
 }

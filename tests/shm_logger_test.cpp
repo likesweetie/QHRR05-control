@@ -16,27 +16,34 @@ std::vector<std::string> Fields(const std::string& line) {
     std::vector<std::string> values;
     std::istringstream stream(line);
     std::string value;
+
     while (std::getline(stream, value, ','))
         values.push_back(value);
+
     return values;
 }
 
 int Run(const char* logger, const std::string& name, const std::string& csv) {
     const pid_t child = ::fork();
     Require(child >= 0, "fork failed");
+
     if (child == 0) {
         ::execl(logger, logger, name.c_str(), csv.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
+
     int status = 0;
+
     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
     }
+
     Require(WIFEXITED(status), "logger did not exit normally");
     return WEXITSTATUS(status);
 }
 
 int main(int argc, char** argv) {
     char directory[] = "/tmp/qhrr05-logger-XXXXXX";
+
     try {
         Require(argc == 2, "expected shm_logger executable");
         Require(::mkdtemp(directory) != nullptr, "temporary directory failed");
@@ -62,6 +69,7 @@ int main(int argc, char** argv) {
             sample.published_ns = now;
             shm.simulation_finished = true;
         }
+
         Require(Run(argv[1], name, csv) == 0, "logger failed");
         std::ifstream input(csv);
         std::string header, row, extra;
@@ -71,8 +79,10 @@ int main(int argc, char** argv) {
         const auto keys = Fields(header), values = Fields(row);
         Require(keys.size() == values.size() && extra.empty(), "wrong CSV shape");
         std::map<std::string, std::string> data;
+
         for (std::size_t i = 0; i < keys.size(); ++i)
             data[keys[i]] = values[i];
+
         Require(
             data["controller"] == "gravity" && data["run_id"] == "7", "wrong telemetry metadata");
         Require(

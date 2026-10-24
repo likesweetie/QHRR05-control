@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
         const std::array<const char*, 3> joints = {
             "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"};
         const std::array<double, 3> limits = {23.7, 23.7, 45.43};
+
         for (int i = 0; i < 3; ++i) {
             const int j = mj_name2id(m, mjOBJ_JOINT, joints[i]);
             Require(j == i && m->jnt_type[j] == mjJNT_HINGE, "Unexpected joint order/type");
@@ -43,17 +44,20 @@ int main(int argc, char** argv) {
                         std::abs(m->actuator_ctrlrange[2 * i + 1] - limits[i]) < 1e-10,
                 "Upstream motor limits changed");
         }
+
         const int home = mj_name2id(m, mjOBJ_KEY, "home");
         Require(home >= 0, "Missing home keyframe");
         std::unique_ptr<mjData, decltype(&mj_deleteData)> data(mj_makeData(m), mj_deleteData);
         Require(data != nullptr, "Could not allocate simulation data");
         mjData* d = data.get();
         mj_resetDataKeyframe(m, d, home);
+
         for (int i = 0; i < 3; ++i) {
             Require(d->ctrl[i] == 0, "Home keyframe must not command motor torque");
             Require(d->qpos[i] >= m->jnt_range[2 * i] && d->qpos[i] <= m->jnt_range[2 * i + 1],
                 "Home pose is outside joint limits");
         }
+
         mj_forward(m, d);
         const std::array<double, 3> base_position = {
             d->xpos[3 * base], d->xpos[3 * base + 1], d->xpos[3 * base + 2]};
@@ -61,26 +65,33 @@ int main(int argc, char** argv) {
             d->xquat[4 * base + 1],
             d->xquat[4 * base + 2],
             d->xquat[4 * base + 3]};
+
         for (int step = 0; step < 2000; ++step) {
             for (int i = 0; i < 3; ++i)
                 d->ctrl[i] = 0.2 * std::sin(d->time + i);
+
             d->xfrc_applied[6 * base] = 100;
             mj_step(m, d);
+
             for (int i = 0; i < 3; ++i) {
                 Require(std::isfinite(d->qpos[i]) && std::isfinite(d->qvel[i]),
                     "Non-finite state during stepping");
                 Require(std::abs(d->xpos[3 * base + i] - base_position[i]) < 1e-12,
                     "Fixed torso translated");
             }
+
             for (int i = 0; i < 4; ++i) {
                 Require(std::abs(d->xquat[4 * base + i] - base_quaternion[i]) < 1e-12,
                     "Fixed torso rotated");
             }
         }
+
         Require(std::abs(d->time - 2.0) < 1e-9, "Simulation time reset or timestep changed");
+
         for (int i = 0; i < mjNWARNING; ++i) {
             Require(d->warning[i].number == 0, "MuJoCo reported a dynamics warning");
         }
+
         std::cout << "PASS: " << argv[1]
                   << " (3 FL joints, fixed torso, motor limits, 2000 steps)\n";
         return 0;

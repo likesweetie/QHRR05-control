@@ -8,10 +8,13 @@
 struct ShmState {
     std::uint64_t sequence = 0;
     std::uint64_t published_ns = 0;
+
     std::array<double, 3> position{}, velocity{}, gravity_torque{};
+
     // Generic, time-aligned model/encoder feedback. No contact/constraint truth.
     std::uint64_t measurement_sequence = 0;
     double measurement_dt = 0;
+
     std::array<double, 3> acceleration{}, motor_torque{}, bias_torque{}, passive_torque{},
         friction_limit{};
     std::array<double, 9> mass{}, jacobian{};  // Row-major, J maps dq to world toe velocity.
@@ -40,6 +43,7 @@ inline const char* MagneticPhaseName(MagneticPhase phase) {
     case MagneticPhase::Releasing:
         return "RELEASE PENDING";
     }
+
     return "INVALID PHASE";
 }
 
@@ -60,6 +64,7 @@ inline const char* MagneticReasonName(MagneticReason reason) {
     case MagneticReason::ContactLost:
         return "contact lost";
     }
+
     return "invalid reason";
 }
 
@@ -116,10 +121,12 @@ struct ShmJoystick {
 struct ShmData {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
+
     bool stopping = false, failed = false, simulation_finished = false;
     std::uint64_t request_sequence = 0;
     std::uint64_t state_sequence = 0, command_sequence = 0, sample_sequence = 0,
                   joystick_sequence = 0;
+
     // Writers fill the other slot, then publish its sequence under the shared mutex.
     // Readers copy the selected slot under the same mutex, so an old slot cannot
     // be overwritten while a slower reader is still copying it.

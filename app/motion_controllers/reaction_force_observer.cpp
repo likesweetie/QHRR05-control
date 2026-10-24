@@ -10,24 +10,29 @@ double MinimumEigenvalue(std::array<double, 9> a) {
     // Jacobi diagonalization of the symmetric 3x3 J*J^T.
     for (int sweep = 0; sweep < 12; ++sweep) {
         int p = 0, q = 1;
+
         if (std::abs(a[2]) > std::abs(a[1]))
             q = 2;
+
         if (std::abs(a[5]) > std::abs(a[3 * p + q])) {
             p = 1;
             q = 2;
         }
+
         if (std::abs(a[3 * p + q]) < 1e-14)
             break;
 
         const double angle = .5 * std::atan2(2 * a[3 * p + q], a[3 * q + q] - a[3 * p + p]);
         const double c = std::cos(angle), s = std::sin(angle);
         const double pp = a[3 * p + p], qq = a[3 * q + q], pq = a[3 * p + q];
+
         for (int k = 0; k < 3; ++k)
             if (k != p && k != q) {
                 const double kp = a[3 * k + p], kq = a[3 * k + q];
                 a[3 * k + p] = a[3 * p + k] = c * kp - s * kq;
                 a[3 * k + q] = a[3 * q + k] = s * kp + c * kq;
             }
+
         a[3 * p + p] = c * c * pp - 2 * c * s * pq + s * s * qq;
         a[3 * q + q] = s * s * pp + 2 * c * s * pq + c * c * qq;
         a[3 * p + q] = a[3 * q + p] = 0;
@@ -39,14 +44,18 @@ double MinimumEigenvalue(std::array<double, 9> a) {
 std::array<double, 3> Solve(std::array<double, 9> a, std::array<double, 3> b) {
     // Positive definite due to damped least squares; small Cholesky solve.
     double l[9] = {};
+
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j <= i; ++j) {
             double v = a[3 * i + j];
+
             for (int k = 0; k < j; ++k)
                 v -= l[3 * i + k] * l[3 * j + k];
+
             if (i == j) {
                 if (v <= 0)
                     throw std::runtime_error("RFOB matrix is not positive definite");
+
                 l[3 * i + j] = std::sqrt(v);
             } else
                 l[3 * i + j] = v / l[3 * j + j];
@@ -55,12 +64,14 @@ std::array<double, 3> Solve(std::array<double, 9> a, std::array<double, 3> b) {
     for (int i = 0; i < 3; ++i) {
         for (int k = 0; k < i; ++k)
             b[i] -= l[3 * i + k] * b[k];
+
         b[i] /= l[3 * i + i];
     }
 
     for (int i = 2; i >= 0; --i) {
         for (int k = i + 1; k < 3; ++k)
             b[i] -= l[3 * k + i] * b[k];
+
         b[i] /= l[3 * i + i];
     }
 
@@ -110,12 +121,14 @@ void ReactionForceObserver::Update(const ShmState& f) {
             }
 
     std::array<double, 9> jjt{};
+
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
             for (int k = 0; k < 3; ++k)
                 jjt[3 * i + j] += f.jacobian[3 * i + k] * f.jacobian[3 * j + k];
 
     minimum_singular_value_ = std::sqrt(std::max(0.0, MinimumEigenvalue(jjt)));
+
     if (minimum_singular_value_ < singular_limit_) {
         valid_ = false;
         return;
@@ -125,8 +138,10 @@ void ReactionForceObserver::Update(const ShmState& f) {
         valid_ = false;
         return;
     }
+
     if (f.measurement_sequence == measurement_)
         return;  // No duplicate differentiation/filter update.
+
     if (f.measurement_sequence < measurement_)
         Reset();
 
@@ -136,25 +151,32 @@ void ReactionForceObserver::Update(const ShmState& f) {
 
     for (int i = 0; i < 3; ++i) {
         double residual = f.bias_torque[i] - f.motor_torque[i] - f.passive_torque[i];
+
         for (int j = 0; j < 3; ++j)
             residual += f.mass[3 * i + j] * f.acceleration[j];
+
         // Explicit smooth dry-friction MODEL, never actual constraint force.
         residual += f.friction_limit[i] * std::tanh(f.velocity[i] / friction_velocity_);
         filtered_torque_[i] += alpha * (residual - filtered_torque_[i]);
     }
+
     measurement_ = f.measurement_sequence;
 
     std::array<double, 3> rhs{};
+
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j)
             rhs[i] += f.jacobian[3 * i + j] * filtered_torque_[j];
+
         jjt[3 * i + i] += regularization_ * regularization_;
     }
 
     force_ = Solve(jjt, rhs);
     double squared = 0;
+
     for (double value : force_)
         squared += value * value;
+
     valid_ = std::isfinite(squared) && squared <= force_limit_ * force_limit_;
 }
 }  // namespace qhrr05

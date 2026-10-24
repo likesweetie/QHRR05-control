@@ -21,6 +21,7 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
     with tempfile.TemporaryDirectory(prefix='qhrr05-drag-') as tmp:
         log = Path(tmp) / 'daemon.log'
         csv_path = Path(tmp) / 'drag.csv'
+
         with log.open('w') as stream:
             process = subprocess.Popen(
                 [
@@ -34,9 +35,11 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
                 stderr=subprocess.STDOUT,
                 cwd='/tmp',
             )
+
         try:
             window = None
             deadline = time.monotonic() + 25
+
             while time.monotonic() < deadline:
                 assert process.poll() is None, log.read_text()
                 found = subprocess.run(
@@ -44,11 +47,15 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
                     capture_output=True,
                     text=True,
                 )
+
                 if found.returncode == 0:
                     window = found.stdout.splitlines()[-1]
+
                 if window and 'HOLD:' in log.read_text():
                     break
+
                 time.sleep(0.1)
+
             assert window and 'HOLD:' in log.read_text(), log.read_text()
             event('key', '--window', window, 'space')
             event('key', '--window', window, 'g')
@@ -76,17 +83,21 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
             event('keydown', 'Control_L')
             time.sleep(0.1)
             event('mousedown', button)
+
             for step in range(12):
                 event('mousemove', '--window', window, calf_x + step * 5, calf_y - step * 8)
                 time.sleep(0.05)
+
             time.sleep(0.2)
             event('mouseup', button)
             event('keyup', 'Control_L')
             time.sleep(0.5)
             event('key', '--window', window, 'Escape')
             assert process.wait(timeout=8) == 0, log.read_text()
+
             with csv_path.open() as stream:
                 rows = [row for row in csv.DictReader(stream) if row['controller'] == 'gravity']
+
             assert len(rows) > 50, log.read_text()
             joints = ['FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint']
             before_drag = [
@@ -100,6 +111,7 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
             displacement = max(
                 abs(float(row['q_' + j]) - float(rows[0]['q_' + j])) for row in rows for j in joints
             )
+
             assert baseline < 0.005, ('leg was moving before drag', baseline)
             assert displacement > 0.03, ('Ctrl+drag did not perturb the leg', button, displacement)
             assert 'task_controller exited code=0' in log.read_text(), log.read_text()
@@ -109,8 +121,10 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
         finally:
             event('mouseup', button)
             event('keyup', 'Control_L')
+
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
+
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:

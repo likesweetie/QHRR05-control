@@ -12,8 +12,10 @@ import time
 from PIL import ImageGrab
 
 root = Path(__file__).resolve().parents[1]
+
 with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
     log, csv_path = Path(tmp) / 'daemon.log', Path(tmp) / 'telemetry.csv'
+
     with log.open('w') as stream:
         process = subprocess.Popen(
             [
@@ -26,6 +28,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
             stdout=stream,
             stderr=subprocess.STDOUT,
         )
+
     window = None
 
     def event(*args):
@@ -34,7 +37,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
     def rows():
         if not csv_path.exists():
             return []
+
         text = csv_path.read_text()
+
         return list(csv.DictReader(io.StringIO(text[: text.rfind('\n') + 1])))
 
     def magnetic_rows():
@@ -42,11 +47,15 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
 
     def wait_for(predicate, timeout=12):
         deadline = time.monotonic() + timeout
+
         while time.monotonic() < deadline:
             assert process.poll() is None, log.read_text()
+
             if predicate():
                 return
+
             time.sleep(0.05)
+
         raise AssertionError(log.read_text())
 
     def key(value):
@@ -57,6 +66,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
 
     try:
         deadline = time.monotonic() + 25
+
         while time.monotonic() < deadline:
             assert process.poll() is None, log.read_text()
             found = subprocess.run(
@@ -64,20 +74,26 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
                 capture_output=True,
                 text=True,
             )
+
             if found.returncode == 0:
                 window = found.stdout.splitlines()[-1]
+
             if window and 'HOLD:' in log.read_text():
                 break
+
             time.sleep(0.1)
+
         assert window and 'HOLD:' in log.read_text(), log.read_text()
         time.sleep(0.3)
         click(65, 765)  # Actual native Magnetic button.
         wait_for(lambda: len(magnetic_rows()) > 20)
         before = magnetic_rows()[-1]
+
         assert before['observer_valid'] == '1', before
         click(225, 795)  # Actual live force slider.
         wait_for(lambda: float(magnetic_rows()[-1]['force_target_n']) > 3.5)
         after = magnetic_rows()[-1]
+
         assert after['event_seq'] == before['event_seq'], 'force slider restarted the FSM'
         initial_object = [float(after['object_' + axis]) for axis in 'xyz']
         screenshot = ImageGrab.grab()
@@ -91,9 +107,11 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
             and pixels[x, y][2] < 90
             and pixels[x, y][0] > 1.4 * pixels[x, y][1]
         ]
+
         assert len(orange) > 30, 'interactive object is not visible'
         x = (min(p[0] for p in orange) + max(p[0] for p in orange)) // 2
         y = (min(p[1] for p in orange) + max(p[1] for p in orange)) // 2
+
         event('mousemove', '--window', window, x, y, 'click', '--repeat', 2, '--delay', 120, 1)
         time.sleep(0.3)
         event('windowfocus', window)
@@ -101,19 +119,23 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
         time.sleep(0.1)
         event('mousedown', 3)
         preview_saved = False
+
         for step in range(1, 51):
             event('mousemove', '--window', window, x - 4 * step, y)
             time.sleep(0.04)
+
             if not preview_saved and magnetic_rows()[-1]['magnetic_phase'] == 'FORCE FOLLOWING':
                 geometry = subprocess.check_output(
                     ['xdotool', 'getwindowgeometry', '--shell', window], text=True
                 )
                 fields = dict(line.split('=', 1) for line in geometry.splitlines() if '=' in line)
                 wx, wy, ww, wh = (int(fields[k]) for k in ('X', 'Y', 'WIDTH', 'HEIGHT'))
+
                 ImageGrab.grab().crop((wx, wy, wx + ww, wy + wh)).save(
                     root / 'docs/magnetic_touch_preview.png'
                 )
                 preview_saved = True
+
         event('mouseup', 3)
         event('keyup', 'Control_L', 'Shift_L')
         time.sleep(0.5)
@@ -124,6 +146,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
                 for i, axis in enumerate('xyz')
             )
         )
+
         assert displacement > 0.005, ('Ctrl+drag did not move mocap object', displacement)
         assert preview_saved, 'mouse contact did not enter FORCE FOLLOWING'
         key('g')
@@ -135,6 +158,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
         key('Escape')
         assert process.wait(timeout=8) == 0, log.read_text()
         data = magnetic_rows()
+
         assert any(row['magnetic_phase'] == 'FORCE FOLLOWING' for row in data)
         assert all(0 <= float(row['force_command_n']) <= 5 for row in data)
         assert all(abs(float(row['displacement_m'])) <= 0.015001 for row in data)
@@ -153,8 +177,10 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
     finally:
         event('mouseup', 3)
         event('keyup', 'Control_L', 'Shift_L')
+
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)
+
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:

@@ -15,6 +15,7 @@ void Require(bool value, const char* message) {
 
 int main() {
     std::string temporary_directory;
+
     try {
         char directory[] = "/tmp/qhrr05-config-XXXXXX";
         Require(::mkdtemp(directory) != nullptr, "temporary directory failed");
@@ -26,13 +27,16 @@ int main() {
             output.close();
             Require(!output.fail(), "config write failed");
         };
+
         const auto reject = [](auto construct) {
             bool rejected = false;
+
             try {
                 construct();
             } catch (const std::exception&) {
                 rejected = true;
             }
+
             Require(rejected, "controller accepted invalid or missing own settings");
         };
         auto homing = YAML::Load(R"(
@@ -49,15 +53,18 @@ homing:
         double q[] = {0, .3, -1}, dq[] = {.1, .2, .3}, torque[3], reference[3];
         home.Compute(2, q, dq, torque, reference);
         const double expected_home[] = {-.2, 11.6, -24.6};
+
         for (int i = 0; i < 3; ++i)
             Require(std::abs(torque[i] - expected_home[i]) < 1e-10,
                 "homing file parameters were not applied");
+
         homing["kp"] = 999;
         homing["homing"].remove("kp");
         save(homing);
         reject([&] {
             qhrr05::HomingController invalid(path);
         });  // No old root-gain fallback.
+
         homing["homing"]["kp"] = 10;
         homing["homing"]["duration_sec"] = 0;
         save(homing);
@@ -79,26 +86,32 @@ gravity_compensation:
         compensation.Start(desired);
         compensation.Compute(position, dq, g, torque, reference);
         const double expected_gravity[] = {.2, -.2, -1.2};
+
         for (int i = 0; i < 3; ++i)
             Require(std::abs(torque[i] - expected_gravity[i]) < 1e-10,
                 "gravity file parameters were not applied");
+
         gravity["kd"] = 999;
         gravity["gravity_compensation"].remove("kd_motor");
         save(gravity);
         reject([&] {
             qhrr05::GravityCompensationController invalid(path);
         });
+
         gravity["gravity_compensation"]["kd_motor"] = YAML::Load("[1,2]");
         save(gravity);
         reject([&] {
             qhrr05::GravityCompensationController invalid(path);
         });
+
         reject([&] {
             qhrr05::HomingController missing(path + ".missing");
         });
+
         reject([&] {
             qhrr05::GravityCompensationController missing(path + ".missing");
         });
+
         std::filesystem::remove_all(temporary_directory);
         std::cout
             << "PASS: path constructors, independent sections/gains, controller-owned validation, no fallback\n";
@@ -106,7 +119,9 @@ gravity_compensation:
     } catch (const std::exception& error) {
         if (!temporary_directory.empty())
             std::filesystem::remove_all(temporary_directory);
+
         std::cerr << error.what() << '\n';
+
         return 1;
     }
 }
