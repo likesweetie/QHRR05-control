@@ -1,0 +1,142 @@
+<?xml version='1.0' encoding='utf-8'?>
+<root>
+  <use_relative_time_offset enabled="1" />
+  <tabbed_widget name="Main Window" parent="main_window">
+    <Tab tab_name="Motor Analysis" containers="1">
+      <Container>
+        <DockSplitter orientation="-" count="3" sizes="0.3333333333333333;0.3333333333333333;0.3333333333333333">
+          <DockArea name="Position [rad]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/motor/HR/position_rad" color="#1f77b4" />
+              <curve name="qhrr/state/motor/HR/command/position" color="#ff7f0e" />
+              <curve name="qhrr/state/motor/HP/position_rad" color="#2ca02c" />
+              <curve name="qhrr/state/motor/HP/command/position" color="#d62728" />
+              <curve name="qhrr/state/motor/KP/position_rad" color="#9467bd" />
+              <curve name="qhrr/state/motor/KP/command/position" color="#8c564b" />
+            </plot>
+          </DockArea>
+          <DockArea name="Velocity [rad/s]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/motor/HR/velocity_rad_s" color="#1f77b4" />
+              <curve name="qhrr/state/motor/HP/velocity_rad_s" color="#ff7f0e" />
+              <curve name="qhrr/state/motor/KP/velocity_rad_s" color="#2ca02c" />
+            </plot>
+          </DockArea>
+          <DockArea name="Measured torque [Nm]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/motor/HR/torque_nm" color="#1f77b4" />
+              <curve name="qhrr/state/motor/HP/torque_nm" color="#ff7f0e" />
+              <curve name="qhrr/state/motor/KP/torque_nm" color="#2ca02c" />
+            </plot>
+          </DockArea>
+        </DockSplitter>
+      </Container>
+    </Tab>
+    <Tab tab_name="Observer Analysis" containers="1">
+      <Container>
+        <DockSplitter orientation="-" count="2" sizes="0.5;0.5">
+          <DockArea name="RFOB and Ground Truth [N]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/control/magnetic/estimated_force[0]" color="#1f77b4" />
+              <curve name="qhrr/state/control/magnetic/estimated_force[1]" color="#ff7f0e" />
+              <curve name="qhrr/state/control/magnetic/estimated_force[2]" color="#2ca02c" />
+              <curve name="qhrr/state/simulation/ground_truth/contact_force[0]" color="#d62728" />
+              <curve name="qhrr/state/simulation/ground_truth/contact_force[1]" color="#9467bd" />
+              <curve name="qhrr/state/simulation/ground_truth/contact_force[2]" color="#8c564b" />
+            </plot>
+          </DockArea>
+          <DockArea name="Observer validity and singular value">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/control/magnetic/observer_valid" color="#1f77b4" />
+              <curve name="qhrr/state/control/magnetic/minimum_singular_value" color="#ff7f0e" />
+            </plot>
+          </DockArea>
+        </DockSplitter>
+      </Container>
+    </Tab>
+    <Tab tab_name="Magnetic Touch Analysis" containers="1">
+      <Container>
+        <DockSplitter orientation="-" count="3" sizes="0.3333333333333333;0.3333333333333333;0.3333333333333333">
+          <DockArea name="Normal force [N]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/control/magnetic/estimated_normal_force" color="#1f77b4" />
+              <curve name="qhrr/state/control/magnetic/target_force" color="#ff7f0e" />
+              <curve name="qhrr/state/control/magnetic/force_command" color="#2ca02c" />
+            </plot>
+          </DockArea>
+          <DockArea name="Contact, phase and mode">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/simulation/ground_truth/contact" color="#1f77b4" />
+              <curve name="qhrr/state/control/magnetic/phase" color="#ff7f0e" />
+              <curve name="qhrr/state/control/mode" color="#2ca02c" />
+            </plot>
+          </DockArea>
+          <DockArea name="Toe reference and actual [m]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/state/control/magnetic/toe_reference[0]" color="#1f77b4" />
+              <curve name="qhrr/state/control/magnetic/toe_reference[1]" color="#ff7f0e" />
+              <curve name="qhrr/state/control/magnetic/toe_reference[2]" color="#2ca02c" />
+              <curve name="qhrr/state/model/toe_position[0]" color="#d62728" />
+              <curve name="qhrr/state/model/toe_position[1]" color="#9467bd" />
+              <curve name="qhrr/state/model/toe_position[2]" color="#8c564b" />
+            </plot>
+          </DockArea>
+        </DockSplitter>
+      </Container>
+    </Tab>
+    <Tab tab_name="System Health" containers="1">
+      <Container>
+        <DockSplitter orientation="-" count="3" sizes="0.3333333333333333;0.3333333333333333;0.3333333333333333">
+          <DockArea name="Logger mutex timing [us]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/health/logger/mutex_wait_average_us" color="#1f77b4" />
+              <curve name="qhrr/health/logger/mutex_wait_max_us" color="#ff7f0e" />
+              <curve name="qhrr/health/logger/mutex_hold_average_us" color="#2ca02c" />
+              <curve name="qhrr/health/logger/mutex_hold_max_us" color="#d62728" />
+            </plot>
+          </DockArea>
+          <DockArea name="Source age [ms]">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/health/logger/source_age_ms[0]" color="#1f77b4" />
+              <curve name="qhrr/health/logger/source_age_ms[1]" color="#ff7f0e" />
+              <curve name="qhrr/health/logger/source_age_ms[2]" color="#2ca02c" />
+              <curve name="qhrr/health/logger/source_age_ms[3]" color="#d62728" />
+            </plot>
+          </DockArea>
+          <DockArea name="Recording quality">
+            <plot mode="TimeSeries" style="Lines" flip_x="false" flip_y="false" line_width="1.0">
+              <range left="0" right="10" top="-5" bottom="5" />
+              <limitY />
+              <curve name="qhrr/health/logger/shm_lock_misses" color="#1f77b4" />
+              <curve name="qhrr/health/logger/pool_exhausted" color="#ff7f0e" />
+              <curve name="qhrr/health/logger/sink_errors" color="#2ca02c" />
+              <curve name="qhrr/health/logger/flight_dump_failures" color="#d62728" />
+            </plot>
+          </DockArea>
+        </DockSplitter>
+      </Container>
+    </Tab>
+    <currentTabIndex index="0" />
+  </tabbed_widget>
+  <Plugins />
+</root>

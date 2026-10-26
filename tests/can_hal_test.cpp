@@ -1,5 +1,5 @@
-#include "motor_can/openrobot_protocol.hpp"
-#include "shm_utils.hpp"
+#include "motor_can_protocol/openrobot_protocol.hpp"
+#include "ipc/shm_utils.hpp"
 
 #include <chrono>
 #include <cmath>

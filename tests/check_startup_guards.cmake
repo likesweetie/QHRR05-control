@@ -14,7 +14,7 @@ endfunction()
 function(write_manifest path control)
     file(WRITE "${path}" "shm_name: /qhrr05-startup-${shm_suffix}\nmonitoring: {display_interval_sec: 2, window_sec: 10, sample_hz: 100}\ndebug_processes:\n  - name: simulator\n    exec_path: '${SIMULATOR}'\n    wait_ready: true\n    args: ['--without-can', '--model', '${MODEL}', '--control-config', '${control}', '--shm-name', '{shm_name}', '--headless', '--duration', '4']\n  - name: controller\n    exec_path: '${CONTROLLER}'\n    args: ['${control}', '{shm_name}', '--without-can']\n")
 endfunction()
-expect_result(1 "usage: task_controller CONTROL_CONFIG SHM_NAME" "${CONTROLLER}")
+expect_result(1 "usage: control CONTROL_CONFIG SHM_NAME" "${CONTROLLER}")
 expect_result(1 "--simulation-config is required" "${SIMULATOR}"
     --model "${MODEL}" --control-config "${CONTROL_CONFIG}"
     --shm-name /qhrr05-iq-missing-config --hal-config unused.yaml)

@@ -1,0 +1,697 @@
+#include "data_tamer_v2/sinks/mcap_ring_sink.hpp"
+
+// The MCAP implementation is compiled in mcap_sink.cpp.
+#include "data_tamer_v2/sinks/mcap_encoding.hpp"
+#include "data_tamer_v2/sinks/mcap_sink.hpp"  // details::NumberedPath
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <condition_variable>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+namespace DataTamer2
+{
+namespace
+{
+using std::chrono::nanoseconds;
+
+// requestDump() word: the top bit means "pending", the other bits hold the
+// post-trigger delay in nanoseconds. Zero means no active request.
+constexpr uint64_t kPending = uint64_t{ 1 } << 63;
+constexpr uint64_t kMaxDelay = kPending - 1;
+constexpr nanoseconds kMinTime(std::numeric_limits<nanoseconds::rep>::min());
+
+nanoseconds saturatingAdd(nanoseconds a, nanoseconds b)
+{
+  const auto max = std::numeric_limits<nanoseconds::rep>::max();
+  return (b.count() > 0 && a.count() > max - b.count()) ? nanoseconds(max) : a + b;
+}
+
+nanoseconds saturatingSub(nanoseconds a, nanoseconds b)
+{
+  const auto min = std::numeric_limits<nanoseconds::rep>::min();
+  return (b.count() > 0 && a.count() < min + b.count()) ? nanoseconds(min) : a - b;
+}
+
+// Each stored snapshot is this header followed by mask and payload bytes.
+// Records are packed back to back and copied with memcpy, so no alignment.
+struct RecordHeader
+{
+  uint64_t schema_hash;
+  int64_t timestamp;
+  uint32_t mask_size;
+  uint32_t payload_size;
+
+  size_t recordSize() const { return sizeof(RecordHeader) + mask_size + payload_size; }
+};
+
+// Byte ring of records. A record may wrap around the end of the buffer.
+class ByteRing
+{
+public:
+  explicit ByteRing(size_t capacity) : buffer_(capacity) {}
+
+  size_t capacity() const { return buffer_.size(); }
+  size_t used() const { return used_; }
+  size_t count() const { return count_; }
+  // Timestamp of the record pushed last; meaningful while count() > 0.
+  int64_t backTimestamp() const { return back_timestamp_; }
+
+  RecordHeader front() const
+  {
+    RecordHeader header;
+    read(head_, &header, sizeof(header));
+    return header;
+  }
+
+  void popFront()
+  {
+    const size_t size = front().recordSize();
+    head_ = (head_ + size) % capacity();
+    used_ -= size;
+    --count_;
+  }
+
+  // The caller has made room: used() + header.recordSize() <= capacity().
+  void push(const RecordHeader& header, const uint8_t* mask, const uint8_t* payload)
+  {
+    size_t pos = (head_ + used_) % capacity();
+    pos = write(pos, &header, sizeof(header));
+    pos = write(pos, mask, header.mask_size);
+    write(pos, payload, header.payload_size);
+    used_ += header.recordSize();
+    ++count_;
+    back_timestamp_ = header.timestamp;
+  }
+
+  // Copy the records whose timestamp is in [first, last], oldest first, into
+  // `out` (at least used() bytes). Returns the number of bytes copied.
+  size_t copyRange(nanoseconds first, nanoseconds last, uint8_t* out) const
+  {
+    size_t copied = 0;
+    size_t pos = head_;
+    for(size_t i = 0; i < count_; ++i)
+    {
+      RecordHeader header;
+      read(pos, &header, sizeof(header));
+      const size_t size = header.recordSize();
+      const nanoseconds timestamp(header.timestamp);
+      if(timestamp >= first && timestamp <= last)
+      {
+        read(pos, out + copied, size);
+        copied += size;
+      }
+      pos = (pos + size) % capacity();
+    }
+    return copied;
+  }
+
+private:
+  size_t write(size_t pos, const void* src, size_t size)
+  {
+    if(size == 0)
+    {
+      return pos;
+    }
+    const auto* bytes = static_cast<const uint8_t*>(src);
+    const size_t first = std::min(size, capacity() - pos);
+    std::memcpy(buffer_.data() + pos, bytes, first);
+    std::memcpy(buffer_.data(), bytes + first, size - first);
+    return (pos + size) % capacity();
+  }
+
+  void read(size_t pos, void* dst, size_t size) const
+  {
+    if(size == 0)
+    {
+      return;
+    }
+    auto* bytes = static_cast<uint8_t*>(dst);
+    const size_t first = std::min(size, capacity() - pos);
+    std::memcpy(bytes, buffer_.data() + pos, first);
+    std::memcpy(bytes + first, buffer_.data(), size - first);
+  }
+
+  std::vector<uint8_t> buffer_;
+  size_t head_ = 0;
+  size_t used_ = 0;
+  size_t count_ = 0;
+  int64_t back_timestamp_ = 0;
+};
+
+}  // namespace
+
+struct MCAPRingSink::Pimpl
+{
+  explicit Pimpl(MCAPRingOptions opt)
+    : options(std::move(opt))
+    , ring(options.capacity_bytes)
+    , dump_buffer(options.capacity_bytes)
+  {}
+
+  // Ring side, guarded by ring_mutex: touched by onSnapshot(), flushPendingDump()
+  // and the stats getters, which may run on different threads at the same time.
+  enum class Phase
+  {
+    Idle,        // no request triggered yet
+    Collecting,  // triggered, waiting for the post-trigger interval
+    Ready        // complete, waiting for the writer
+  };
+
+  const MCAPRingOptions options;
+  std::atomic<uint64_t> request{ 0 };
+
+  mutable std::mutex ring_mutex;
+  ByteRing ring;
+  Phase phase = Phase::Idle;
+  bool retry_counted = false;  // the active dump already found the writer busy
+  nanoseconds trigger_time{ 0 }, dump_start{ 0 }, dump_end{ 0 };
+  bool has_snapshot = false;
+  nanoseconds max_timestamp = kMinTime;  // newest timestamp seen
+  // Timestamp of the last snapshot of each channel, added by onSchema() so that
+  // onSnapshot() does not allocate. When one channel's clock steps back by more than
+  // the window (a simulation reset) a new run starts, and run_max restarts from that
+  // snapshot. A smaller step back stays in the run: snapshots of one channel taken by
+  // several threads can arrive slightly out of order.
+  struct ChannelClock
+  {
+    uint64_t schema_hash;
+    nanoseconds last;
+  };
+  std::vector<ChannelClock> clocks;
+  nanoseconds run_max = kMinTime;  // newest timestamp of the current run
+  // Newest timestamp evicted by capacity: a dump starting at or before it lost data.
+  nanoseconds capacity_evicted_until = kMinTime;
+  // The active dump lost a record of [dump_start, dump_end] to capacity
+  // eviction after its trigger, e.g. while waiting for a busy writer.
+  bool dump_lost_records = false;
+  uint64_t writer_busy_retries = 0;
+  uint64_t evicted_by_capacity = 0;
+  uint64_t dropped_oversize = 0;
+  // Dumps handed to the writer so far: flushPendingDump() uses it to notice
+  // that a snapshot handed off the request it is flushing.
+  uint64_t handoffs = 0;
+
+  // Schemas, inserted by onSchema() and read by the writer thread. Entries are
+  // never modified once inserted, so the writer uses them outside the lock.
+  std::mutex schema_mutex;
+  std::map<uint64_t, Schema> schemas;
+
+  // dump_buffer and dump_size are written by the ring_mutex holder while
+  // !writer_busy and read by the writer thread while writer_busy; `job` is
+  // owned by the writer thread while writer_busy.
+  std::vector<uint8_t> dump_buffer;
+  size_t dump_size = 0;
+
+  mutable std::mutex writer_mutex;
+  std::condition_variable writer_cv;
+  bool writer_busy = false;
+  bool writer_stop = false;
+  MCAPRingDump job;
+  size_t dump_counter = 0;  // writer thread only
+  uint64_t dumps_written = 0;
+  uint64_t dumps_failed = 0;
+  std::function<void(const MCAPRingDump&)> callback;
+  std::thread writer_thread;
+
+  void store(const Snapshot& snapshot);
+  void trackClock(const Snapshot& snapshot);
+  bool tryHandOff();
+  void writerLoop();
+  void writeDump(MCAPRingDump& dump);
+  void throwIfWriterThread(const char* function) const
+  {
+    if(std::this_thread::get_id() == writer_thread.get_id())
+    {
+      throw std::logic_error(std::string("MCAPRingSink::") + function +
+                             " called from the dump callback");
+    }
+  }
+};
+
+// Caller holds ring_mutex.
+void MCAPRingSink::Pimpl::store(const Snapshot& snapshot)
+{
+  // Evict by age. While a dump is active, keep everything it may contain.
+  nanoseconds horizon = saturatingSub(snapshot.timestamp, options.window);
+  if(phase != Phase::Idle)
+  {
+    horizon = std::min(horizon, dump_start);
+  }
+  while(ring.count() > 0 && nanoseconds(ring.front().timestamp) < horizon)
+  {
+    ring.popFront();
+  }
+
+  const size_t size =
+      sizeof(RecordHeader) + snapshot.active_mask.size() + snapshot.payload.size();
+  if(size > ring.capacity() || snapshot.active_mask.size() > UINT32_MAX ||
+     snapshot.payload.size() > UINT32_MAX)
+  {
+    ++dropped_oversize;
+    return;
+  }
+  // Evict by capacity.
+  while(ring.used() + size > ring.capacity())
+  {
+    const nanoseconds evicted(ring.front().timestamp);
+    capacity_evicted_until = std::max(capacity_evicted_until, evicted);
+    if(phase != Phase::Idle && evicted >= dump_start && evicted <= dump_end)
+    {
+      dump_lost_records = true;
+    }
+    ring.popFront();
+    ++evicted_by_capacity;
+  }
+  const RecordHeader header{ snapshot.schema_hash, snapshot.timestamp.count(),
+                             static_cast<uint32_t>(snapshot.active_mask.size()),
+                             static_cast<uint32_t>(snapshot.payload.size()) };
+  ring.push(header, snapshot.active_mask.data(), snapshot.payload.data());
+}
+
+// Caller holds ring_mutex.
+void MCAPRingSink::Pimpl::trackClock(const Snapshot& snapshot)
+{
+  max_timestamp = std::max(max_timestamp, snapshot.timestamp);
+  const auto clock = std::find_if(clocks.begin(), clocks.end(), [&](const auto& entry) {
+    return entry.schema_hash == snapshot.schema_hash;
+  });
+  if(clock != clocks.end())
+  {
+    // Older than the window before the channel's last snapshot: age eviction treats
+    // such a snapshot as gone, so it belongs to a new run.
+    if(snapshot.timestamp < saturatingSub(clock->last, options.window))
+    {
+      run_max = kMinTime;
+    }
+    clock->last = snapshot.timestamp;
+  }
+  run_max = std::max(run_max, snapshot.timestamp);
+}
+
+// Caller holds ring_mutex and phase == Ready. Never waits: returns false if
+// the writer is busy. The copy runs under ring_mutex only; the writer does not
+// touch dump_buffer until writer_busy is set below.
+bool MCAPRingSink::Pimpl::tryHandOff()
+{
+  {
+    std::scoped_lock lock(writer_mutex);
+    if(writer_busy)
+    {
+      if(!retry_counted)
+      {
+        ++writer_busy_retries;
+        retry_counted = true;
+      }
+      return false;
+    }
+  }
+  dump_size = ring.copyRange(dump_start, dump_end, dump_buffer.data());
+  {
+    std::scoped_lock lock(writer_mutex);
+    // clear() keeps the capacity: the worker thread allocates nothing here.
+    job.path.clear();
+    job.error.clear();
+    job.trigger_time = trigger_time;
+    job.start = dump_start;
+    job.end = dump_end;
+    job.first_message = job.last_message = nanoseconds(0);
+    job.messages = 0;
+    job.truncated = dump_lost_records || (capacity_evicted_until >= dump_start &&
+                                          capacity_evicted_until <= dump_end);
+    job.ok = false;
+    writer_busy = true;
+  }
+  writer_cv.notify_all();
+  phase = Phase::Idle;
+  retry_counted = false;
+  dump_lost_records = false;
+  ++handoffs;
+  request.store(0, std::memory_order_release);
+  return true;
+}
+
+void MCAPRingSink::Pimpl::writerLoop()
+{
+  std::unique_lock lock(writer_mutex);
+  while(true)
+  {
+    writer_cv.wait(lock, [this] { return writer_busy || writer_stop; });
+    if(!writer_busy)
+    {
+      return;  // stop requested and nothing left to write
+    }
+    lock.unlock();
+    writeDump(job);
+    lock.lock();
+    ++(job.ok ? dumps_written : dumps_failed);  // before the callback reads stats()
+    // The callback runs without writer_mutex, so it may call stats() and
+    // requestDump(); writer_busy stays true until it returns.
+    std::function<void(const MCAPRingDump&)> notify;
+    try
+    {
+      notify = callback;
+    }
+    catch(...)
+    {}
+    lock.unlock();
+    if(notify)
+    {
+      try
+      {
+        notify(job);
+      }
+      catch(...)
+      {
+        // A throwing callback must not kill the writer thread.
+      }
+    }
+    lock.lock();
+    writer_busy = false;
+    writer_cv.notify_all();
+  }
+}
+
+// Runs on the writer thread, which owns dump_buffer and `dump`.
+void MCAPRingSink::Pimpl::writeDump(MCAPRingDump& dump)
+{
+  try
+  {
+    // Skip the names that exist already, e.g. dumps of a previous run.
+    std::error_code ec;
+    do
+    {
+      dump.path = details::NumberedPath(options.filepath, ++dump_counter);
+    } while(std::filesystem::exists(dump.path, ec));
+
+    // mcap::FileWriter ignores fwrite() and fclose() failures (disk full, I/O
+    // errors); a stream reports them.
+    std::ofstream file(dump.path, std::ios::binary | std::ios::trunc);
+    if(!file)
+    {
+      throw std::runtime_error("cannot open file: " + std::string(std::strerror(errno)));
+    }
+    mcap::StreamWriter stream(file);
+    mcap::McapWriter writer;
+    mcap::McapWriterOptions writer_options(mcap_encoding::kEncoding);
+    writer_options.compression =
+        options.compression ? mcap::Compression::Zstd : mcap::Compression::None;
+    writer.open(stream, writer_options);
+
+    struct Channel
+    {
+      mcap::ChannelId id;
+      uint32_t next_sequence;
+    };
+    std::unordered_map<uint64_t, Channel> channels;
+    std::vector<uint8_t> scratch;
+    for(size_t pos = 0; pos < dump_size;)
+    {
+      RecordHeader header;
+      std::memcpy(&header, dump_buffer.data() + pos, sizeof(header));
+      const uint8_t* mask = dump_buffer.data() + pos + sizeof(header);
+      const uint8_t* payload = mask + header.mask_size;
+      pos += header.recordSize();
+      auto it = channels.find(header.schema_hash);
+      if(it == channels.end())
+      {
+        const Schema* schema = nullptr;
+        {
+          std::scoped_lock lock(schema_mutex);
+          auto found = schemas.find(header.schema_hash);
+          schema = (found == schemas.end()) ? nullptr : &found->second;
+        }
+        if(!schema)
+        {
+          continue;  // cannot happen: onSchema() precedes the snapshots
+        }
+        it = channels
+                 .emplace(header.schema_hash,
+                          Channel{ mcap_encoding::AddChannel(writer, *schema), 1 })
+                 .first;
+      }
+      const nanoseconds timestamp(header.timestamp);
+      const auto status = mcap_encoding::WriteMessage(
+          writer, it->second.id, it->second.next_sequence++, timestamp,
+          { mask, header.mask_size }, { payload, header.payload_size }, scratch);
+      if(!status.ok())
+      {
+        throw std::runtime_error("MCAP write failed: " + status.message);
+      }
+      dump.first_message =
+          (dump.messages == 0) ? timestamp : std::min(dump.first_message, timestamp);
+      dump.last_message =
+          (dump.messages == 0) ? timestamp : std::max(dump.last_message, timestamp);
+      ++dump.messages;
+    }
+    writer.close();  // flushes the stream
+    file.close();
+    if(!file)
+    {
+      // The partial file is kept: `mcap recover` can salvage what it holds.
+      throw std::runtime_error("write failed: " + std::string(std::strerror(errno)));
+    }
+    dump.ok = true;
+  }
+  catch(const std::exception& e)
+  {
+    try
+    {
+      dump.error = e.what();
+    }
+    catch(...)
+    {}  // bad_alloc while reporting: ok stays false
+  }
+}
+
+//--------------------------------------------------
+
+MCAPRingSink::MCAPRingSink(MCAPRingOptions options)
+{
+  if(options.capacity_bytes == 0)
+  {
+    throw std::invalid_argument("MCAPRingSink: capacity_bytes must be > 0");
+  }
+  if(options.window.count() < 0)
+  {
+    throw std::invalid_argument("MCAPRingSink: window must not be negative");
+  }
+  _p = std::make_shared<Pimpl>(std::move(options));
+  _p->writer_thread = std::thread([p = _p] { p->writerLoop(); });
+}
+
+MCAPRingSink::~MCAPRingSink()
+{
+  {
+    std::scoped_lock lock(_p->writer_mutex);
+    _p->writer_stop = true;
+  }
+  _p->writer_cv.notify_all();
+  if(_p->writer_thread.get_id() == std::this_thread::get_id())
+  {
+    // Destroyed from the dump callback: joining would deadlock. The writer
+    // thread holds its own reference to the Pimpl and exits once the callback
+    // returns.
+    _p->writer_thread.detach();
+  }
+  else
+  {
+    _p->writer_thread.join();
+  }
+}
+
+bool MCAPRingSink::requestDump(std::chrono::nanoseconds post_trigger) noexcept
+    DATA_TAMER_NONBLOCKING
+{
+  const auto delay =
+      static_cast<uint64_t>(std::max<nanoseconds::rep>(post_trigger.count(), 0));
+  uint64_t expected = 0;
+  return _p->request.compare_exchange_strong(
+      expected, kPending | std::min(delay, kMaxDelay), std::memory_order_acq_rel,
+      std::memory_order_relaxed);
+}
+
+bool MCAPRingSink::dumpRequested() const noexcept
+{
+  return _p->request.load(std::memory_order_acquire) != 0;
+}
+
+void MCAPRingSink::onSchema(const Schema& schema)
+{
+  {
+    std::scoped_lock lock(_p->schema_mutex);
+    _p->schemas.try_emplace(schema.hash, schema);
+  }
+  std::scoped_lock lock(_p->ring_mutex);
+  const auto known =
+      std::any_of(_p->clocks.begin(), _p->clocks.end(),
+                  [&](const auto& entry) { return entry.schema_hash == schema.hash; });
+  if(!known)
+  {
+    _p->clocks.push_back({ schema.hash, kMinTime });
+  }
+}
+
+void MCAPRingSink::onSnapshot(const SnapshotRef& ref)
+{
+  const Snapshot& snapshot = *ref;
+  mcap_encoding::CheckTimestamp(snapshot.timestamp);  // refused before it is stored
+  auto& p = *_p;
+  std::scoped_lock lock(p.ring_mutex);
+  p.has_snapshot = true;
+  p.trackClock(snapshot);
+
+  if(p.phase == Pimpl::Phase::Idle)
+  {
+    const uint64_t word = p.request.load(std::memory_order_acquire);
+    if(word & kPending)
+    {
+      p.phase = Pimpl::Phase::Collecting;
+      p.trigger_time = snapshot.timestamp;
+      p.dump_start = saturatingSub(snapshot.timestamp, p.options.window);
+      p.dump_end = saturatingAdd(snapshot.timestamp, nanoseconds(word & kMaxDelay));
+    }
+  }
+  // Complete only once a snapshot is past the end: another channel may still
+  // deliver snapshots stamped at the end itself.
+  if(p.phase == Pimpl::Phase::Collecting && snapshot.timestamp > p.dump_end)
+  {
+    p.phase = Pimpl::Phase::Ready;
+  }
+  p.store(snapshot);
+  if(p.phase == Pimpl::Phase::Ready)
+  {
+    p.tryHandOff();  // writer busy: retried at the next snapshot
+  }
+}
+
+bool MCAPRingSink::flushPendingDump()
+{
+  auto& p = *_p;
+  p.throwIfWriterThread("flushPendingDump()");
+  // The worker may deliver snapshots meanwhile: onSnapshot() can trigger,
+  // complete or hand off the same request between two iterations. All the ring
+  // state is read and written under ring_mutex, and the dump buffer is filled
+  // only by a hand-off while the writer is idle, so each iteration re-reads the
+  // state under the lock.
+  bool active = false;
+  uint64_t target = 0;  // value of `handoffs` once the active request is handed off
+  while(true)
+  {
+    waitForWriter();  // never wait for the writer while holding ring_mutex
+    std::scoped_lock lock(p.ring_mutex);
+    if(!active)
+    {
+      active = p.phase != Pimpl::Phase::Idle ||
+               (p.has_snapshot && (p.request.load(std::memory_order_acquire) & kPending));
+      if(!active)
+      {
+        break;  // nothing to write
+      }
+      target = p.handoffs + 1;
+    }
+    if(p.handoffs >= target)
+    {
+      break;  // a snapshot handed it off since the previous iteration
+    }
+    if(p.phase == Pimpl::Phase::Idle)  // requested, not triggered yet
+    {
+      p.trigger_time = p.run_max;
+      p.dump_start = saturatingSub(p.run_max, p.options.window);
+      p.dump_end = p.run_max;
+    }
+    p.dump_end = std::min(p.dump_end, p.max_timestamp);
+    p.phase = Pimpl::Phase::Ready;
+    if(p.tryHandOff())
+    {
+      break;
+    }
+    // The writer took another dump between waitForWriter() and the lock.
+  }
+  waitForWriter();  // our dump, or one handed off earlier
+  return active;
+}
+
+void MCAPRingSink::onStop()
+{
+  (void)flushPendingDump();
+}
+
+void MCAPRingSink::waitForWriter()
+{
+  _p->throwIfWriterThread("waitForWriter()");
+  std::unique_lock lock(_p->writer_mutex);
+  _p->writer_cv.wait(lock, [this] { return !_p->writer_busy; });
+}
+
+void MCAPRingSink::setDumpCallback(std::function<void(const MCAPRingDump&)> callback)
+{
+  std::scoped_lock lock(_p->writer_mutex);
+  _p->callback = std::move(callback);
+}
+
+uint64_t MCAPRingSink::dumpsWritten() const
+{
+  std::scoped_lock lock(_p->writer_mutex);
+  return _p->dumps_written;
+}
+
+uint64_t MCAPRingSink::dumpsFailed() const
+{
+  std::scoped_lock lock(_p->writer_mutex);
+  return _p->dumps_failed;
+}
+
+uint64_t MCAPRingSink::writerBusyRetries() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->writer_busy_retries;
+}
+
+uint64_t MCAPRingSink::evictedByCapacity() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->evicted_by_capacity;
+}
+
+uint64_t MCAPRingSink::droppedOversize() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->dropped_oversize;
+}
+
+size_t MCAPRingSink::storedSnapshots() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.count();
+}
+
+size_t MCAPRingSink::storedBytes() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.used();
+}
+
+std::chrono::nanoseconds MCAPRingSink::oldestTimestamp() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.count() > 0 ? nanoseconds(_p->ring.front().timestamp) : nanoseconds(0);
+}
+
+std::chrono::nanoseconds MCAPRingSink::newestTimestamp() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.count() > 0 ? nanoseconds(_p->ring.backTimestamp()) : nanoseconds(0);
+}
+
+}  // namespace DataTamer2

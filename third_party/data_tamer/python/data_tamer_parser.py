@@ -1,0 +1,1176 @@
+"""Reference decoder for the Data Tamer wire format.
+
+Pure standard library. The format is specified in docs/wire_format.md. The
+schema parser and _parse_snapshot_reference(), which walks a schema value by
+value, are kept deliberately literal so they can be ported to another language
+line by line. parse_snapshot() gives the same result and raises the same errors,
+5 to 15 times faster: it compiles each schema and active mask once into
+struct formats, kept on the Schema (python/benchmark_decode.py in the repository
+measures it), so do not modify a Schema after decoding with it. Usage:
+
+    schema = parse_schema(schema_text)
+    values = parse_snapshot(schema, active_mask, payload)   # {"pose/position/x": 1.0, ...}
+
+A "string" value (a std::string or std::string_view in the writer) is one str,
+its bytes read as UTF-8 with invalid ones replaced by U+FFFD: {"label": "text"}.
+A "char" is a str of one character, also in a "char[]" (std::vector<char>).
+
+To build columns (pandas, numpy), parse_snapshot_values() returns the names and
+the values as two tuples in payload order, tuple(d) and tuple(d.values()) of
+d = parse_snapshot(...), and is faster still. Consecutive snapshots of one layout
+(the active mask and the length of every dynamic vector) return the same names
+tuple object:
+
+    names, values = parse_snapshot_values(schema, active_mask, payload)
+
+For an MCAP message body written by MCAPSink use split_mcap_message() first.
+parse_schema() reads both schema renderings: the line format (versions 4 and 5) and
+YAML (version 5); to_text() renders a schema back to the line format.
+For the ROS 2 messages of ROS2PublisherSink (data_tamer_msgs Schemas, Snapshot,
+SnapshotBatch) use SchemaRegistry, parse_snapshot_msg() and
+iter_snapshot_batch(); they only read message attributes, so they need no ROS
+import:
+
+    registry = SchemaRegistry()
+    registry.add_schemas(schemas_msg)            # optional if the batch embeds them
+    for schema, timestamp_nsec, values in iter_snapshot_batch(registry, batch_msg):
+        ...
+
+Schema.field_names() lists the flattened names from the schema alone, and
+iter_mcap(path) reads a whole MCAP file (needs the optional `mcap` package):
+
+    for timestamp_nsec, topic, values in iter_mcap("log.mcap"):
+        ...
+"""
+from __future__ import annotations
+
+__version__ = "2.0.0"
+
+import struct
+from bisect import bisect_right
+from dataclasses import dataclass, field
+from functools import lru_cache
+from itertools import chain, groupby
+from operator import itemgetter
+
+SCHEMA_VERSION = 5  # of the line format and of the YAML rendering (spec section 2.1)
+_READABLE_VERSIONS = (4, 5)  # 4 differs only in how its hash was computed
+# A type section starts with a line of "=": the writer emits _SEPARATOR_WIDTH of them and
+# the reader accepts _MIN_SEPARATOR_WIDTH or more.
+_SEPARATOR_WIDTH = 59
+_MIN_SEPARATOR_WIDTH = 30
+_TRIM = " \r"  # all a line or a value loses at its ends (spec section 2): a tab stays
+
+# Basic type name -> little-endian struct; the order is the BasicType id order.
+_STRUCT = {
+    "bool": struct.Struct("<?"), "char": struct.Struct("<c"),
+    "int8": struct.Struct("<b"), "uint8": struct.Struct("<B"),
+    "int16": struct.Struct("<h"), "uint16": struct.Struct("<H"),
+    "int32": struct.Struct("<i"), "uint32": struct.Struct("<I"),
+    "int64": struct.Struct("<q"), "uint64": struct.Struct("<Q"),
+    "float32": struct.Struct("<f"), "float64": struct.Struct("<d"),
+}
+
+
+@dataclass
+class Field:
+    """Mirrors TypeField in the C++ headers."""
+    field_name: str
+    type_name: str           # one of _STRUCT, "string", or a custom type name
+    is_vector: bool = False  # true for "T[]" and "T[N]"
+    array_size: int = 0      # N for "T[N]", 0 for "T[]" (count prefix on the wire)
+
+    @property
+    def is_basic(self) -> bool:
+        """A fixed-size basic type: one of _STRUCT."""
+        return self.type_name in _STRUCT
+
+    @property
+    def is_text(self) -> bool:
+        """The basic type "string": a uint32 byte count, then the bytes (section 1)."""
+        return self.type_name == "string"
+
+    @property
+    def is_custom(self) -> bool:
+        return not self.is_basic and not self.is_text
+
+
+@dataclass
+class Schema:
+    channel_name: str = ""
+    hash: int = 0
+    fields: list[Field] = field(default_factory=list)
+    custom_types: dict[str, list[Field]] = field(default_factory=dict)
+    # opaque custom encodings: type name -> (encoding, schema text)
+    custom_schemas: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Caches of the decoders, only right while the schema is left alone. They are not
+        # fields, so ==, repr() and asdict() skip them, and __getstate__() leaves them out
+        # of a copy or a pickle (a plan holds struct.Struct objects, which do neither).
+        self._min_sizes: dict = {}  # custom type -> (fewest bytes, nesting height)
+        self._plans: dict = {}  # normalized active mask -> _Plan, at most _MAX_PLANS
+        self._masks: dict = {}  # active mask as received -> _Plan, see _plan()
+
+    def __getstate__(self):
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__post_init__()
+
+    def field_names(self) -> list[str]:
+        """The flattened names parse_snapshot() can produce, in payload order,
+        computed from the schema alone (no message, so disabled fields are listed too).
+
+        Names are built as in the decoder: "pose/position/x", "arr[3]". The
+        length of a dynamic vector ("T[]") is only known per message, so its
+        elements are listed once with empty brackets: "vec[]", "points[]/x"
+        (the decoder emits "vec[0]", "points[1]/x", ...). "[]" is a placeholder:
+        a field whose own name ends in "[]" would be listed the same way. A field of an opaque
+        custom type is listed under its own name; its content is not described
+        by the schema, and parse_snapshot() raises ValueError when it is enabled,
+        unless it is a dynamic vector with no element.
+
+        Raises ValueError for an undefined or cyclic custom type, for nesting
+        deeper than parse_snapshot() accepts (MAX_SCHEMA_DEPTH), and when the
+        schema would expand to more than MAX_FIELD_NAMES names.
+        """
+        counts: dict[str, tuple[int, int]] = {}
+        total = sum(_names_count(f, self, counts, 0) for f in self.fields)
+        if total > MAX_FIELD_NAMES:
+            raise ValueError(f"schema expands to {total} names, more than {MAX_FIELD_NAMES}")
+        out: list[str] = []
+        for f in self.fields:
+            _field_names(f, self, "", out)
+        return out
+
+
+def _parse_type_spec(spec: str, name: str) -> Field:
+    """`T`, `T[]` or `T[N]` with N in 1..65535 (spec section 2)."""
+    bracket = spec.find("[")
+    type_name = spec if bracket < 0 else spec[:bracket]
+    if not type_name:
+        raise ValueError(f"empty type in {spec!r}")
+    if bracket < 0:
+        return Field(name, type_name)
+    inner = spec[bracket + 1:-1]
+    if not spec.endswith("]") or not all(c in "0123456789" for c in inner):
+        raise ValueError(f"invalid type {spec!r}")
+    if inner and not 1 <= int(inner) <= 65535:
+        raise ValueError(f"array size out of range (1..65535) in {spec!r}")
+    return Field(name, type_name, True, int(inner) if inner else 0)
+
+
+def _valid_name(name: str) -> bool:
+    """A field name is not empty and holds no character up to the space and no DEL
+    (spec section 2); characters above 0x7f are fine."""
+    return bool(name) and all(c > " " and c != "\x7f" for c in name)
+
+
+def _parse_field_line(line: str) -> Field:
+    type_part, _, name = line.partition(" ")
+    name = name.strip(_TRIM)
+    if not name:
+        raise ValueError(f"field line without a name: {line!r}")
+    if not _valid_name(name):
+        raise ValueError(f"invalid field name in {line!r}")
+    return _parse_type_spec(type_part, name)
+
+
+def _parse_uint(value: str, what: str) -> int:
+    if not value or len(value) > 20 or not all(c in "0123456789" for c in value):
+        raise ValueError(f"invalid {what} {value!r}")
+    number = int(value)
+    if number > 0xFFFFFFFFFFFFFFFF:  # as the C++ reader: it must fit in a uint64
+        raise ValueError(f"invalid {what} {value!r}")
+    return number
+
+
+def schema_hash(text: str) -> int:
+    """FNV-1a 64 of the schema text with its '### hash:' line removed (spec section 5)."""
+    lines = text.split("\n")
+    for i, l in enumerate(lines):  # exactly the header line, as the C++ writer does
+        if l.startswith("### hash:"):
+            del lines[i]
+            break
+    h = 0xCBF29CE484222325
+    for byte in "\n".join(lines).encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def parse_schema(text: str, verify_hash: bool = False) -> Schema:
+    """Parse the schema text stored in the MCAP schema record / Schema.msg.
+
+    Both renderings are accepted: the line format (versions 4 and 5) and YAML
+    (version 5), told apart by their first line. With verify_hash the declared
+    hash must equal the computed one (section 5). A version 4 hash (data_tamer
+    1.x) came from the writer's std::hash and cannot be recomputed here: the
+    declared value is accepted, verify_hash or not.
+    """
+    if _first_line(text).startswith("version:"):
+        return _parse_schema_yaml(text, verify_hash)
+    schema = Schema()
+    lines = text.split("\n")
+    target = schema.fields
+    version = 0  # until the version line
+    last_type = ""
+    seen_line = False
+    previous = ""  # the last non-blank line: "separator", "MSG" or "" for any other
+    for index, raw in enumerate(lines):
+        line = raw.strip(_TRIM)
+        if not line:
+            continue
+        seen_line = True
+        after_separator = previous == "separator"
+        if after_separator and not line.startswith("MSG: "):
+            raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
+        opens_section = previous == "MSG"
+        previous = ""
+        if len(line) >= _MIN_SEPARATOR_WIDTH and not line.strip("="):
+            previous = "separator"
+            continue
+        key, colon, value = line.partition(":")  # a header is "### key: value"
+        value = value.strip(_TRIM)
+        if colon and key == "### version":
+            version = _parse_uint(value, "version")
+            if version not in _READABLE_VERSIONS:
+                raise ValueError(f"unsupported schema version in {line!r}")
+        elif colon and key == "### hash":
+            schema.hash = _parse_uint(value, "hash")
+        elif colon and key == "### channel_name":
+            schema.channel_name = value
+        elif line.startswith("MSG: "):
+            if not after_separator:
+                raise ValueError(f'"MSG: " not right after a separator, in {line!r}')
+            last_type = line[5:].strip(_TRIM)
+            target = schema.custom_types.setdefault(last_type, [])
+            previous = "MSG"
+        elif line.startswith("ENCODING: "):
+            # Opaque sections come last and own the rest of the text (spec section 2), one
+            # final newline (which the writer adds) apart.
+            if not opens_section:
+                raise ValueError(f"ENCODING: outside the start of a section, in {line!r}")
+            foreign = "\n".join(lines[index + 1:])
+            schema.custom_schemas[last_type] = (line[10:].strip(_TRIM), foreign.removesuffix("\n"))
+            del schema.custom_types[last_type]
+            break
+        else:
+            if not version:
+                raise _missing_version_error()
+            target.append(_parse_field_line(line))
+    if not seen_line:
+        raise ValueError("empty schema text")
+    if not version:
+        raise _missing_version_error()
+    if previous == "separator":
+        raise ValueError('expected "MSG: <type name>" after the last separator')
+    if verify_hash and version != 4 and schema.hash != schema_hash(text):
+        raise ValueError("schema hash does not match its text")
+    return schema
+
+
+def _missing_version_error() -> ValueError:
+    """A line format text without a version line before its fields, such as the texts of
+    data_tamer releases before 0.7.0 (spec section 2)."""
+    return ValueError('no "### version:" line before the fields; the supported schema '
+                      "versions are 4 and 5, so texts written before data_tamer 0.7.0 "
+                      "are not readable")
+
+
+def _first_line(text: str) -> str:
+    """The first line that is not blank or a YAML comment. A line that starts with "###"
+    is a header of the line format, not a comment (spec section 2.1)."""
+    for raw in text.split("\n"):
+        line = raw.strip(_TRIM)
+        if line and (not line.startswith("#") or line.startswith("###")):
+            return line
+    return ""
+
+
+def _field_line(f: Field) -> str:
+    if not f.is_vector:
+        return f"{f.type_name} {f.field_name}"
+    return f"{f.type_name}[{f.array_size or ''}] {f.field_name}"
+
+
+def to_text(schema: Schema) -> str:
+    """Render a schema in the version 5 line format, byte for byte as the C++
+    writer does; schema_hash() of the result is the schema hash (section 5)."""
+    sep = "=" * _SEPARATOR_WIDTH + "\n"
+    out = [f"### version: {SCHEMA_VERSION}\n### hash: {schema.hash}\n"
+           f"### channel_name: {schema.channel_name}\n\n"]
+    out += [_field_line(f) + "\n" for f in schema.fields]
+    for name in sorted(schema.custom_types):
+        out.append(f"{sep}MSG: {name}\n")
+        out += [_field_line(f) + "\n" for f in schema.custom_types[name]]
+    for name in sorted(schema.custom_schemas):
+        encoding, body = schema.custom_schemas[name]
+        out.append(f"{sep}MSG: {name}\nENCODING: {encoding}\n{body}\n")
+    return "".join(out)
+
+
+# ---- YAML rendering (spec section 2.1) ----------------------------------------
+# Only the subset the writer emits is accepted: block mappings indented with
+# spaces, plain or double-quoted scalars, "{}" for an empty mapping and
+# full-line comments.
+
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t", "r": "\r", "0": "\0"}
+_HEX_ESCAPES = {"x": 2, "u": 4, "U": 8}
+
+
+def _read_quoted(s: str, line: str) -> tuple[str, str]:
+    """Decode the double-quoted scalar at the start of s; return (value, rest)."""
+    out, i = [], 1
+    while i < len(s):
+        c = s[i]
+        if c == '"':
+            return "".join(out), s[i + 1:]
+        if c == "\\":
+            e = s[i + 1:i + 2]
+            if e in _ESCAPES:
+                out.append(_ESCAPES[e])
+                i += 2
+            elif e in _HEX_ESCAPES:
+                n = _HEX_ESCAPES[e]
+                digits = s[i + 2:i + 2 + n]
+                if len(digits) != n or not all(c in "0123456789abcdefABCDEF" for c in digits):
+                    raise ValueError(f"bad escape in {line!r}")
+                cp = int(digits, 16)
+                if cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+                    raise ValueError(f"bad escape in {line!r}")
+                out.append(chr(cp))
+                i += 2 + n
+            else:
+                raise ValueError(f"bad escape in {line!r}")
+        else:
+            out.append(c)
+            i += 1
+    raise ValueError(f"unterminated string in {line!r}")
+
+
+def _scalar(s: str, line: str) -> str:
+    if s.startswith('"'):
+        value, rest = _read_quoted(s, line)
+        if rest.strip():
+            raise ValueError(f"unexpected text after string in {line!r}")
+        return value
+    if s.startswith(("'", "[", "{", "&", "*", "!", "|", ">", "-", "?")) or " #" in s:
+        raise ValueError(f"unsupported YAML in {line!r}")
+    return s
+
+
+def _split_entry(content: str, line: str) -> tuple[str, str]:
+    """Split "key: value" / "key:" into (key, value text)."""
+    if content.startswith('"'):
+        key, rest = _read_quoted(content, line)
+        if not rest.startswith(":"):
+            raise ValueError(f"expected ':' after key in {line!r}")
+        rest = rest[1:]
+    else:
+        colon = content.find(": ")
+        if colon < 0:
+            if not content.endswith(":"):
+                raise ValueError(f"expected 'key: value' in {line!r}")
+            colon = len(content) - 1
+        key, rest = _scalar(content[:colon], line), content[colon + 1:]
+    if rest and not rest.startswith(" "):
+        raise ValueError(f"expected a space after ':' in {line!r}")
+    return key, rest.strip(" ")  # only spaces, as the C++ reader
+
+
+@dataclass
+class _YamlLevel:
+    parent_indent: int
+    indent: int | None  # indentation of the mapping's entries; None if not seen yet
+    entries: list
+    keys: set = field(default_factory=set)
+
+
+# A node is (key, scalar, children); children is None for a scalar entry.
+def _parse_yaml_tree(text: str) -> list:
+    root: list = []
+    stack = [_YamlLevel(-1, 0, root)]  # top level starts at column 0
+    for raw in text.split("\n"):
+        line = raw.rstrip(" \r")
+        content = line.lstrip(" ")
+        if not content or content.startswith("#"):
+            continue
+        if content.startswith("\t"):
+            raise ValueError(f"tab indentation in {line!r}")
+        indent = len(line) - len(content)
+        while indent <= stack[-1].parent_indent:
+            stack.pop()
+        level = stack[-1]
+        if level.indent is None:
+            level.indent = indent
+        elif indent != level.indent:
+            raise ValueError(f"bad indentation in {line!r}")
+        key, rest = _split_entry(content, line)
+        if key in level.keys:
+            raise ValueError(f"duplicate key {key!r}")
+        level.keys.add(key)
+        if rest == "":
+            if len(stack) > MAX_SCHEMA_DEPTH:
+                raise ValueError(f"nesting too deep in {line!r}")
+            children: list = []
+            level.entries.append((key, None, children))
+            stack.append(_YamlLevel(indent, None, children))
+        elif rest == "{}":
+            level.entries.append((key, None, []))
+        else:
+            level.entries.append((key, _scalar(rest, line), None))
+    return root
+
+
+def _flatten(nodes: list, prefix: str, out: list[Field]) -> None:
+    for key, value, children in nodes:
+        if children is None:
+            name = prefix + key
+            if not _valid_name(name):
+                raise ValueError(f"YAML schema: invalid field name {name!r}")
+            out.append(_parse_type_spec(value, name))
+        else:
+            _flatten(children, prefix + key + "/", out)
+
+
+def _mapping(nodes: list) -> dict:
+    return {key: (value, children) for key, value, children in nodes}
+
+
+def _parse_schema_yaml(text: str, verify_hash: bool) -> Schema:
+    top = _mapping(_parse_yaml_tree(text))
+
+    def scalar(key: str) -> str:
+        if key not in top or top[key][0] is None:
+            raise ValueError(f"YAML schema: missing {key!r}")
+        return top[key][0]
+
+    def mapping(key: str, required: bool) -> list:
+        if key not in top:
+            if required:
+                raise ValueError(f"YAML schema: missing {key!r}")
+            return []
+        if top[key][1] is None:
+            raise ValueError(f"YAML schema: {key!r} must be a mapping")
+        return top[key][1]
+
+    version = scalar("version")
+    if _parse_uint(version, "version") != SCHEMA_VERSION:
+        raise ValueError(f"unsupported YAML schema version {version!r}")
+    schema = Schema(channel_name=scalar("channel_name"),
+                    hash=_parse_uint(scalar("hash"), "hash"))
+    _flatten(mapping("fields", True), "", schema.fields)
+    for type_name, value, children in mapping("types", False):
+        if children is None:
+            raise ValueError(f"YAML schema: type {type_name!r} must be a mapping")
+        _flatten(children, "", schema.custom_types.setdefault(type_name, []))
+    for type_name, value, children in mapping("opaque_types", False):
+        entry = _mapping(children or [])
+        encoding, body = entry.get("encoding", (None,))[0], entry.get("schema", (None,))[0]
+        if encoding is None or body is None:
+            raise ValueError(f"YAML schema: opaque type {type_name!r} needs encoding and schema")
+        schema.custom_schemas[type_name] = (encoding, body)
+    if verify_hash and schema.hash != schema_hash(to_text(schema)):
+        raise ValueError("schema hash does not match its text")
+    return schema
+
+
+MAX_SCHEMA_DEPTH = 64  # deeper nesting is treated as a malformed (cyclic) schema
+
+
+# The two functions below build the errors, and the callers test the depth and look the
+# fields up themselves: a call per field would cost a flat snapshot about 5%.
+def _nesting_error() -> ValueError:
+    return ValueError("custom types nested too deeply (cyclic schema?)")
+
+
+def _undecodable_error(schema: Schema, type_name: str) -> ValueError:
+    """The error for a custom type the schema does not describe field by field."""
+    if type_name in schema.custom_schemas:
+        return ValueError(f"type {type_name!r} has an opaque encoding; cannot continue")
+    return ValueError(f"unknown type {type_name!r}")
+
+
+def get_bit(mask: bytes, index: int) -> bool:
+    if (index >> 3) >= len(mask):
+        raise ValueError("active mask shorter than the schema")
+    return bool(mask[index >> 3] & (1 << (index & 7)))
+
+
+class _Reader:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos = 0
+
+    def remaining(self) -> int:
+        return len(self.data) - self.pos
+
+    def number(self, type_name: str):
+        fmt = _STRUCT[type_name]
+        if self.pos + fmt.size > len(self.data):
+            raise ValueError("payload truncated")
+        (value,) = fmt.unpack_from(self.data, self.pos)
+        self.pos += fmt.size
+        return value.decode("latin-1") if type_name == "char" else value
+
+    def text(self) -> str:
+        value, self.pos = _read_text(self.data, self.pos)
+        return value
+
+
+def _read_text(data, pos: int) -> tuple:
+    """The "string" at `pos`, its byte count then that many bytes, and the position after
+    it. The format gives no charset: UTF-8, invalid bytes replaced by U+FFFD."""
+    if pos + 4 > len(data):
+        raise ValueError("payload truncated")
+    (count,) = _U32.unpack_from(data, pos)
+    pos += 4
+    end = pos + count
+    if end > len(data):
+        raise ValueError("payload truncated")
+    return str(data[pos:end], "utf-8", "replace"), end
+
+
+def _min_element_size(f: Field, schema: Schema, depth: int) -> int:
+    """Fewest payload bytes one element of `f` takes: the size of a basic type, or the
+    sum of the fewest bytes of each field of the custom type.
+
+    The schema keeps the size of each custom type with its nesting height (how many
+    custom types deep its fixed-size fields go), so that a type met again deeper raises as
+    it would have the first time: the depth limit does not depend on earlier calls.
+    """
+    if f.is_basic:
+        return _STRUCT[f.type_name].size
+    if f.is_text:
+        return 4  # the byte count of an empty string
+    memo = schema._min_sizes
+    known = memo.get(f.type_name)
+    if known is None:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
+        if depth > MAX_SCHEMA_DEPTH:
+            raise _nesting_error()
+        size = sum(_min_field_size(sub, schema, depth + 1) for sub in subs)
+        height = max((memo[sub.type_name][1] + 1 for sub in subs  # filled by the sum
+                      if sub.is_custom and (sub.array_size or not sub.is_vector)),
+                     default=0)
+        known = memo[f.type_name] = (size, height)
+    elif depth + known[1] > MAX_SCHEMA_DEPTH:
+        raise _nesting_error()
+    return known[0]
+
+
+def _min_field_size(f: Field, schema: Schema, depth: int) -> int:
+    """Fewest payload bytes `f` takes: its elements at their fewest bytes, or only the
+    4 byte count for a dynamic vector."""
+    if f.is_vector and not f.array_size:
+        return 4
+    return _min_element_size(f, schema, depth) * (f.array_size if f.is_vector else 1)
+
+
+def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict,
+                 depth: int = 0) -> None:
+    if depth > MAX_SCHEMA_DEPTH:
+        raise _nesting_error()
+    name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
+    if f.is_vector:
+        count = f.array_size or reader.number("uint32")  # dynamic vector: count prefix
+        if not count:
+            # Nothing to read: an opaque type has nothing to skip, but a type the schema
+            # does not define at all makes it malformed, whatever the count.
+            if (f.is_custom and f.type_name not in schema.custom_types
+                    and f.type_name not in schema.custom_schemas):
+                raise _undecodable_error(schema, f.type_name)
+            return
+        # An element takes at least `least` bytes: a count the payload cannot hold is
+        # rejected. Elements of no byte hold no value, however many there are.
+        least = (_STRUCT[f.type_name].size if f.is_basic
+                 else _min_element_size(f, schema, depth))
+        if least == 0:
+            return
+        if count * least > reader.remaining():
+            raise ValueError("payload truncated")
+        names = (f"{name}[{i}]" for i in range(count))  # lazy: the count is untrusted
+    else:
+        names = (name,)
+    if f.is_basic:
+        for n in names:
+            out[n] = reader.number(f.type_name)
+    elif f.is_text:
+        for n in names:
+            out[n] = reader.text()
+    else:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
+        for n in names:
+            for sub in subs:
+                _parse_field(sub, schema, reader, n, out, depth + 1)
+
+
+MAX_FIELD_NAMES = 1_000_000  # Schema.field_names() refuses to list more names
+
+
+def _names_count(f: Field, schema: Schema, memo: dict, depth: int) -> int:
+    """How many names `f` expands to, checking its types like _parse_field() does.
+
+    memo maps a custom type to (names per element, nesting height), or to None
+    while that type is being expanded (finding it then means a cycle). Work is
+    linear in the number of type references, whatever the array sizes.
+    """
+    if depth > MAX_SCHEMA_DEPTH:
+        raise _nesting_error()
+    per_element, height = 1, 0  # basic or opaque type: one name, no nesting
+    if f.is_custom and f.type_name not in schema.custom_schemas:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
+        if f.type_name in memo:
+            if memo[f.type_name] is None:
+                raise ValueError(f"custom type {f.type_name!r} contains itself (cyclic schema)")
+            per_element, height = memo[f.type_name]
+            if depth + height > MAX_SCHEMA_DEPTH:
+                raise _nesting_error()
+        else:
+            memo[f.type_name] = None
+            per_element = sum(_names_count(sub, schema, memo, depth + 1) for sub in subs)
+            height = 1 + max((memo[sub.type_name][1] for sub in subs
+                              if memo.get(sub.type_name)), default=0) if subs else 0
+            memo[f.type_name] = (per_element, height)
+    return per_element * (f.array_size or 1)
+
+
+def _field_names(f: Field, schema: Schema, prefix: str, out: list[str]) -> None:
+    """The names _parse_field() would produce for `f`; "[]" for a dynamic vector
+    element. The schema was checked by _names_count() first."""
+    name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
+    if not f.is_vector:
+        names = [name]
+    elif f.array_size:
+        names = [f"{name}[{i}]" for i in range(f.array_size)]
+    else:
+        names = [f"{name}[]"]
+    subs = schema.custom_types.get(f.type_name) if f.is_custom else None
+    if f.type_name in schema.custom_schemas:
+        subs = None
+    for n in names:
+        if subs is None:  # basic type, or opaque: not expandable from the schema
+            out.append(n)
+        else:
+            for sub in subs:
+                _field_names(sub, schema, n, out)
+
+
+def _parse_snapshot_reference(schema: Schema, active_mask: bytes,
+                              payload: bytes) -> dict[str, object]:
+    """The specification of parse_snapshot(): the schema walked value by value.
+
+    parse_snapshot() must return the same dict and raise the same errors, which the tests
+    check (test_fast_path.py). Keep this walker literal and change it only with the
+    format; make parse_snapshot() fast instead.
+    """
+    out: dict[str, object] = {}
+    reader = _Reader(payload)
+    for index, f in enumerate(schema.fields):
+        if get_bit(active_mask, index):
+            _parse_field(f, schema, reader, "", out)
+    if reader.pos != len(payload):
+        raise ValueError(f"{len(payload) - reader.pos} trailing bytes in payload")
+    return out
+
+
+# ---- Compiled plans: the fast path ---------------------------------------------
+# parse_snapshot() compiles (schema, active mask) once into a plan, which reads the bytes
+# the reference walker reads, in the same order, and raises the same errors:
+# - a run of fixed-size values, across fields and nested types, is one struct.Struct,
+#   unpacked in one call, with its names computed once;
+# - a dynamic vector of a basic type, or of a custom type made of fixed-size values,
+#   reads its count, checks it against the bytes left, then unpacks every element at once
+#   (_Vector);
+# - a "string" is one str (_TEXT); a dynamic vector of them is walked;
+# - a fixed array of a custom type that holds vectors first checks that the payload holds
+#   its fewest bytes, as the reference does (_CHECK);
+# - anything else (an undefined or opaque type, a vector of elements that hold vectors)
+#   is decoded by the reference walker, _parse_field(), from the node where the reference
+#   would be (_WALK), so its errors are the reference's. So is a whole top-level field
+#   nested too deeply or larger than the budget left (_Unplannable).
+# A Schema keeps at most _MAX_PLANS plans; the reference walker decodes the snapshots of
+# any further mask, so no mask is compiled twice. A plan holds at most _PLAN_BUDGET
+# values and keeps at most _MAX_CACHED_NAMES names for its vectors, and as many for its
+# last layout. Threads may share a Schema: caches get whole objects in single stores,
+# read once into a local, so a thread sees a whole plan or none.
+
+# The ops: (_FIXED, Struct, names, char positions), (_VECTOR, _Vector),
+# (_CHECK, fewest bytes), (_WALK, field, prefix, depth), (_TEXT, (name,)).
+_FIXED, _VECTOR, _CHECK, _WALK, _TEXT = range(5)
+_CODE = {name: s.format[1] for name, s in _STRUCT.items()}  # "float64" -> "d"
+_U32 = _STRUCT["uint32"]
+_MAX_PLANS = 16  # per schema: one per active mask, and masks are few
+_PLAN_BUDGET = 1 << 16  # fields visited plus values compiled into one plan
+_MAX_CACHED_NAMES = 1 << 16  # per plan: the names its vectors keep, and its last layout's
+_ELEMENT = "#"  # the prefix an element of a dynamic vector is compiled with
+
+
+class _Unplannable(Exception):
+    """A top-level field that the reference walker decodes whole."""
+
+
+def _compile(schema: Schema, mask: bytes) -> _Plan:
+    # items: (code, name) for each value, or an op (a tuple whose first item is an int)
+    items: list = []
+    budget = [_PLAN_BUDGET]
+    wasted = 0  # budget used by fields that did not fit, and given back
+    covered = min(len(schema.fields), len(mask) * 8)  # past the mask the reference raises
+    for index in range(covered):
+        if not get_bit(mask, index):
+            continue
+        f = schema.fields[index]
+        start, left = len(items), budget[0]
+        if wasted <= _PLAN_BUDGET:  # bounds the time spent on fields that do not fit
+            try:
+                _compile_field(f, schema, "", 0, items, budget)
+                continue
+            except _Unplannable:
+                del items[start:]
+                wasted += left - budget[0]
+                budget[0] = left
+        items.append((_WALK, f, "", 0))
+    return _Plan(items, covered < len(schema.fields))
+
+
+def _compile_field(f: Field, schema: Schema, prefix: str, depth: int, items: list,
+                   budget: list) -> None:
+    """Append what _parse_field(f, schema, reader, prefix, out, depth) reads, in order."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > MAX_SCHEMA_DEPTH:
+        raise _Unplannable
+    name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
+    if f.is_vector and not f.array_size:
+        items.append(_compile_vector(f, schema, prefix, name, depth, budget))
+        return
+    if f.is_vector:
+        try:
+            least = _min_element_size(f, schema, depth)
+        except ValueError:  # undefined, opaque or too deep: the reference raises it here
+            items.append((_WALK, f, prefix, depth))
+            return
+        if least == 0:
+            return
+        names = (f"{name}[{i}]" for i in range(f.array_size))
+    else:
+        names = (name,)
+    if f.is_basic or f.is_text:
+        if (f.array_size or 1) > budget[0]:
+            raise _Unplannable
+        budget[0] -= f.array_size or 1
+        if f.is_basic:
+            code = _CODE[f.type_name]
+            items.extend((code, n) for n in names)
+            return
+        if f.is_vector:  # the reference first checks that the payload holds the counts
+            items.append((_CHECK, f.array_size * least))
+        items.extend((_TEXT, (n,)) for n in names)  # (_TEXT, names of its one part)
+        return
+    subs = schema.custom_types.get(f.type_name)
+    if subs is None:
+        items.append((_WALK, f, prefix, depth))
+        return
+    first, left = len(items), budget[0]
+    for i, n in enumerate(names):
+        for sub in subs:
+            _compile_field(sub, schema, n, depth + 1, items, budget)
+        if i == 0 and f.is_vector and (left - budget[0]) * (f.array_size - 1) > budget[0]:
+            raise _Unplannable  # every element costs what the first one did
+    if f.is_vector and any(type(item[0]) is int for item in items[first:]):
+        # elements that read a count or are walked: the reference first checks that the
+        # payload holds their fewest bytes
+        items.insert(first, (_CHECK, f.array_size * least))
+
+
+def _compile_vector(f: Field, schema: Schema, prefix: str, name: str, depth: int,
+                    budget: list) -> tuple:
+    """A _Vector op if the elements are fixed-size values, else a _WALK op."""
+    if f.is_text:
+        return (_WALK, f, prefix, depth)
+    if f.is_basic:
+        return (_VECTOR, _Vector(name, [_CODE[f.type_name]], [""]))
+    subs = schema.custom_types.get(f.type_name)
+    if subs is not None:
+        element: list = []
+        for sub in subs:
+            _compile_field(sub, schema, _ELEMENT, depth + 1, element, budget)
+        if element and all(type(item[0]) is str for item in element):
+            return (_VECTOR, _Vector(name, [code for code, _ in element],
+                                     [n[len(_ELEMENT):] for _, n in element]))
+    return (_WALK, f, prefix, depth)
+
+
+def _decode_chars(values, positions) -> tuple:
+    """struct's "c" gives a bytes object; the decoder gives a str, as _Reader does."""
+    values = list(values)
+    for i in positions:
+        values[i] = values[i].decode("latin-1")
+    return tuple(values)
+
+
+@lru_cache(maxsize=256)
+def _array_struct(code: str, count: int) -> struct.Struct:
+    """"<3000d": as cheap to unpack as "<3d" per value."""
+    return struct.Struct(f"<{count}{code}")
+
+
+class _Vector:
+    """A dynamic vector whose elements are fixed-size values."""
+    __slots__ = ("name", "suffixes", "size", "code", "element", "chars", "names", "cap")
+
+    def __init__(self, name: str, codes: list[str], suffixes: list[str]):
+        self.name = name
+        self.suffixes = tuple(suffixes)  # of the values of one element: "", or "/x", ...
+        fmt = "<" + "".join(codes)
+        self.size = struct.calcsize(fmt)
+        # elements of one type of value are unpacked by one _array_struct()
+        self.code = codes[0] if all(c == codes[0] for c in codes) else None
+        self.element = None if self.code else struct.Struct(fmt)
+        self.chars = tuple(i for i, c in enumerate(codes) if c == "c")
+        self.names: tuple[str, ...] = ()  # those of the longest vector read, up to cap
+        self.cap = _MAX_CACHED_NAMES  # _Plan shares _MAX_CACHED_NAMES among its vectors
+
+    def read(self, payload, pos: int) -> tuple:
+        """((names, values), end); names may be longer than values: zip() stops."""
+        if pos + 4 > len(payload):
+            raise ValueError("payload truncated")
+        (count,) = _U32.unpack_from(payload, pos)
+        pos += 4
+        end = pos + count * self.size
+        if end > len(payload):  # before building anything as long as the untrusted count
+            raise ValueError("payload truncated")
+        k = len(self.suffixes)
+        if self.code is not None:
+            values = _array_struct(self.code, count * k).unpack_from(payload, pos)
+        else:
+            values = tuple(chain.from_iterable(self.element.iter_unpack(payload[pos:end])))
+        if self.chars:
+            values = _decode_chars(values, [e + i for e in range(0, len(values), k)
+                                            for i in self.chars])
+        names = self.names
+        if len(names) < len(values):
+            names = tuple(f"{self.name}[{i}]{suffix}" for i in range(count)
+                          for suffix in self.suffixes)
+            if len(names) <= self.cap:
+                self.names = names
+        return (names, values), end
+
+
+def _unique_names(ops: list) -> bool:
+    """Whether no snapshot of these ops can repeat a name.
+
+    A name repeats only where field names hold "/" or "[" or repeat (a field "a/b" next
+    to a field "a" whose type has a member "b"): a fixed name that repeats, one element
+    of a vector that repeats a name, or a name that starts with the name of a vector or
+    of a walked field, which make more names that start with theirs.
+    """
+    names: list[str] = []
+    more: set[str] = set()  # the names of vectors and walked fields
+    for op in ops:
+        if op[0] == _FIXED:
+            names += op[2]
+        elif op[0] == _TEXT:
+            names += op[1]
+        elif op[0] == _VECTOR:
+            if len(set(op[1].suffixes)) < len(op[1].suffixes):
+                return False
+            names.append(op[1].name)
+            more.add(op[1].name)
+        elif op[0] == _WALK:
+            name = op[1].field_name if not op[2] else f"{op[2]}/{op[1].field_name}"
+            names.append(name)
+            more.add(name)
+    if len(set(names)) < len(names):
+        return False
+    if more:
+        names.sort()  # the names that start with one of them come right after it
+    return not any(names[i].startswith(name) for name in more
+                   if (i := bisect_right(names, name)) < len(names))
+
+
+class _Plan:
+    """The ops that decode the snapshots of one schema and active mask."""
+    __slots__ = ("ops", "mask_short", "variable", "unique", "simple", "last")
+
+    def __init__(self, items: list, mask_short: bool):
+        self.ops: list = []
+        values: list = []  # the (code, name) items of the current fixed run
+        for item in items + [None]:
+            if item is not None and type(item[0]) is str:
+                values.append(item)
+                continue
+            if values or (item is None and not self.ops):  # no op at all: one empty run
+                codes = [code for code, _ in values]
+                fmt = "".join(f"{len(list(g))}{c}" for c, g in groupby(codes))
+                self.ops.append((_FIXED, struct.Struct("<" + fmt), tuple(n for _, n in values),
+                                 tuple(i for i, c in enumerate(codes) if c == "c")))
+                values = []
+            if item is not None:
+                self.ops.append(item)
+        self.mask_short = mask_short  # raise when the ops are done, as the reference does
+        # every op but _CHECK adds one part to run(); the layout depends on these ones
+        kinds = [op[0] for op in self.ops if op[0] != _CHECK]
+        # a _TEXT has one name, whatever its length
+        self.variable = tuple((i, kind == _VECTOR) for i, kind in enumerate(kinds)
+                              if kind not in (_FIXED, _TEXT))
+        vectors = [op[1] for op in self.ops if op[0] == _VECTOR]
+        for vector in vectors:
+            vector.cap = _MAX_CACHED_NAMES // len(vectors)
+        self.unique = _unique_names(self.ops)
+        # a single run of distinct names and no char: the payload is unpacked with it
+        op = self.ops[0]
+        self.simple = ((op[1].unpack, op[2]) if len(self.ops) == 1 and op[0] == _FIXED
+                       and not op[3] and not mask_short and self.unique else None)
+        self.last = None  # (layout key, layout) of the last snapshot, set by layout()
+
+    def run(self, schema: Schema, payload) -> list:
+        """(names, values) for each op but _CHECK, in payload order; the names of a vector
+        may be longer than its values."""
+        parts: list = []
+        pos = 0
+        size = len(payload)
+        for op in self.ops:
+            kind = op[0]
+            if kind == _FIXED:
+                end = pos + op[1].size
+                if end > size:
+                    raise ValueError("payload truncated")
+                values = op[1].unpack_from(payload, pos)
+                parts.append((op[2], _decode_chars(values, op[3]) if op[3] else values))
+                pos = end
+            elif kind == _VECTOR:
+                part, pos = op[1].read(payload, pos)
+                parts.append(part)
+            elif kind == _CHECK:
+                if op[1] > size - pos:
+                    raise ValueError("payload truncated")
+            elif kind == _TEXT:
+                value, pos = _read_text(payload, pos)
+                parts.append((op[1], (value,)))
+            else:
+                reader = _Reader(payload)
+                reader.pos = pos
+                walked: dict = {}
+                _parse_field(op[1], schema, reader, op[2], walked, op[3])
+                pos = reader.pos
+                parts.append((tuple(walked), tuple(walked.values())))
+        if self.mask_short:
+            raise ValueError("active mask shorter than the schema")
+        if pos != size:
+            raise ValueError(f"{size - pos} trailing bytes in payload")
+        return parts
+
+    def layout(self, parts: list, key: tuple) -> tuple:
+        """(names, all names) of the snapshot of `parts`, whose layout is `key`: all names
+        is None unless a name repeats. Kept for the next snapshot if not too long."""
+        joined: list = []  # a quarter faster than chain()
+        for names, values in parts:
+            joined += names[:len(values)]
+        every = tuple(joined)
+        layout = (every, None)
+        if not self.unique:
+            names = tuple(dict.fromkeys(every))
+            if len(names) < len(every):
+                layout = (names, every)
+        if len(every) <= _MAX_CACHED_NAMES:
+            self.last = (key, layout)
+        return layout
+
+
+def _plan(schema: Schema, active_mask: bytes) -> _Plan | None:
+    """The plan of a mask that schema._masks does not hold, compiled if new; None once
+    the schema has _MAX_PLANS plans: the reference walker decodes the snapshot then."""
+    mask = bytes(active_mask)
+    # the bits past the schema do not count: masks that differ only there share a plan
+    n = len(schema.fields)
+    key = mask[:(n + 7) >> 3]
+    if len(key) * 8 > n:
+        key = key[:-1] + bytes([key[-1] & ((1 << (n & 7)) - 1)])
+    plan = schema._plans.get(key)
+    if plan is None:
+        if len(schema._plans) >= _MAX_PLANS:
+            return None
+        plan = schema._plans[key] = _compile(schema, key)
+    if len(mask) == len(key):  # a longer mask is normalized on every call instead
+        if len(schema._masks) >= _MAX_PLANS:
+            schema._masks.clear()
+        schema._masks[mask] = plan
+    return plan
+
+
+def parse_snapshot(schema: Schema, active_mask: bytes, payload: bytes) -> dict[str, object]:
+    """Decode one snapshot into {"field/path[i]": value}. Disabled fields are absent.
+
+    A number is an int, float or bool, a "char" a str of one character, a "string" a str
+    (UTF-8, invalid bytes replaced by U+FFFD; "" when empty).
+
+    Malformed input raises ValueError. The schema keeps a decoding plan per active mask:
+    do not modify a schema after decoding with it.
+    """
+    plan = schema._masks.get(bytes(active_mask)) or _plan(schema, active_mask)
+    if plan is None:
+        return _parse_snapshot_reference(schema, active_mask, payload)
+    if plan.simple:
+        unpack, names = plan.simple
+        try:
+            return dict(zip(names, unpack(payload)))
+        except struct.error:  # another size: run() raises the error of the reference
+            pass
+    out: dict[str, object] = {}
+    for names, values in plan.run(schema, payload):
+        out.update(zip(names, values))
+    return out
+
+
+def parse_snapshot_values(schema: Schema, active_mask: bytes,
+                          payload: bytes) -> tuple[tuple[str, ...], tuple]:
+    """Decode one snapshot into (names, values), two tuples in payload order.
+
+    The same as `d = parse_snapshot(...)` then `(tuple(d), tuple(d.values()))`, faster.
+    Consecutive snapshots of one layout (the active mask and the length of every dynamic
+    vector) return the same `names` tuple object, so `names is previous` is a cheap test
+    that the columns did not change. A layout seen before another one, or of more than
+    _MAX_CACHED_NAMES (65536) names, comes back as another tuple: compare with == to be
+    sure.
+    """
+    plan = schema._masks.get(bytes(active_mask)) or _plan(schema, active_mask)
+    if plan is None:
+        d = _parse_snapshot_reference(schema, active_mask, payload)
+        return tuple(d), tuple(d.values())
+    if plan.simple:
+        unpack, names = plan.simple
+        try:
+            return names, unpack(payload)
+        except struct.error:  # another size: run() raises the error of the reference
+            pass
+    parts = plan.run(schema, payload)
+    key = tuple([len(parts[i][1]) if is_vector else parts[i][0]
+                 for i, is_vector in plan.variable])
+    last = plan.last
+    names, every = last[1] if last is not None and last[0] == key else plan.layout(parts, key)
+    values = parts[0][1] if len(parts) == 1 else tuple(
+        chain.from_iterable(map(itemgetter(1), parts)))
+    if every is not None:  # a name repeats: its last value, at its first place, as a dict
+        values = tuple(dict(zip(every, values)).values())
+    return names, values
+
+
+def split_mcap_message(data: bytes) -> tuple[bytes, bytes]:
+    """Split an MCAPSink message body into (active_mask, payload).
+
+    Raises ValueError if the body is shorter than the lengths it declares, or longer.
+    """
+    def length_at(pos: int) -> int:
+        if pos + 4 > len(data):
+            raise ValueError("MCAP message body truncated")
+        return struct.unpack_from("<I", data, pos)[0]
+
+    mask_end = 4 + length_at(0)
+    start = mask_end + 4
+    payload_end = start + length_at(mask_end)
+    if payload_end > len(data):
+        raise ValueError("MCAP message body truncated")
+    if payload_end < len(data):
+        raise ValueError("MCAP message body has trailing bytes")
+    return data[4:mask_end], data[start:payload_end]
+
+
+class SchemaRegistry:
+    """Schemas by hash, filled from the `schemas` topic and/or embedded schemas.
+
+    verify_hash is passed to parse_schema(): a version 4 hash is accepted unchecked.
+    """
+
+    def __init__(self, verify_hash: bool = False):
+        self.verify_hash = verify_hash
+        self._schemas: dict[int, Schema] = {}
+
+    def add(self, hash_value: int, schema_text: str) -> Schema:
+        """Parse and store `schema_text` under `hash_value`, unless already known."""
+        schema = self._schemas.get(hash_value)
+        if schema is None:
+            schema = parse_schema(schema_text, verify_hash=self.verify_hash)
+            if schema.hash != hash_value:
+                # snapshots carry hash_value: this schema would never match them
+                raise ValueError(f"schema text declares hash {schema.hash}, expected {hash_value}")
+            self._schemas[hash_value] = schema
+        return schema
+
+    def add_schemas(self, msg) -> None:
+        """Add every entry of `msg.schemas`: a Schemas or SnapshotBatch message."""
+        for schema_msg in msg.schemas:
+            self.add(schema_msg.hash, schema_msg.schema_text)
+
+    def find(self, hash_value: int) -> Schema | None:
+        return self._schemas.get(hash_value)
+
+    def __len__(self) -> int:
+        return len(self._schemas)
+
+
+def parse_snapshot_msg(schema: Schema, msg) -> dict[str, object]:
+    """Decode a data_tamer_msgs Snapshot (needs `active_mask` and `payload`)."""
+    return parse_snapshot(schema, bytes(msg.active_mask), bytes(msg.payload))
+
+
+def iter_snapshot_batch(registry: SchemaRegistry, batch):
+    """Iterate over (schema, timestamp_nsec, values) for each snapshot of a SnapshotBatch.
+
+    The schemas embedded in the batch are added to `registry` right away, when
+    this is called (a malformed one raises ValueError); snapshots whose schema
+    is still unknown are skipped.
+    """
+    registry.add_schemas(batch)
+    return ((schema, msg.timestamp_nsec, parse_snapshot_msg(schema, msg))
+            for msg in batch.snapshots
+            if (schema := registry.find(msg.schema_hash)) is not None)
+
+
+MCAP_ENCODING = "data_tamer"  # schema encoding and message encoding in MCAP (spec section 4.1)
+
+
+def iter_mcap(source, topics=None, verify_hash: bool = False):
+    """Iterate over (timestamp_nsec, topic, values) for each Data Tamer message of an MCAP file.
+
+    `source` is a path or a seekable binary file object; `topics` optionally
+    restricts the channels read. Messages come in log time order (the snapshot
+    timestamps); channels with another encoding are skipped. Needs the `mcap`
+    package (pip install "data-tamer-parser[mcap]"), imported by this call.
+
+    One call reads one file. MCAPSink can split a recording into numbered
+    files (run.mcap, run_1.mcap, ...); each is self-contained, so read them
+    one after the other. verify_hash is passed to parse_schema(): a version 4
+    hash (data_tamer 1.x) is accepted unchecked.
+    """
+    try:
+        from mcap.reader import make_reader
+    except ImportError as err:
+        raise ImportError('iter_mcap() needs the "mcap" package: '
+                          'pip install "data-tamer-parser[mcap]"') from err
+    return _iter_mcap(make_reader, source, topics, verify_hash)
+
+
+def _iter_mcap(make_reader, source, topics, verify_hash: bool):
+    if isinstance(source, (str, bytes)) or hasattr(source, "__fspath__"):
+        with open(source, "rb") as stream:
+            yield from _iter_mcap(make_reader, stream, topics, verify_hash)
+        return
+    schemas: dict[int, Schema] = {}  # by MCAP schema id
+    for mcap_schema, channel, message in make_reader(source).iter_messages(topics=topics):
+        if (mcap_schema is None or mcap_schema.encoding != MCAP_ENCODING
+                or channel.message_encoding != MCAP_ENCODING):
+            continue
+        schema = schemas.get(mcap_schema.id)
+        if schema is None:
+            schema = parse_schema(mcap_schema.data.decode("utf-8"), verify_hash=verify_hash)
+            schemas[mcap_schema.id] = schema
+        mask, payload = split_mcap_message(message.data)
+        yield message.log_time, channel.topic, parse_snapshot(schema, mask, payload)

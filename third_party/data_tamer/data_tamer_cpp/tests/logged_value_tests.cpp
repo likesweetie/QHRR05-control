@@ -1,0 +1,289 @@
+#include "data_tamer_v2/channel.hpp"
+#include "data_tamer_v2/data_tamer.hpp"
+#include "data_tamer_v2/sinks/dummy_sink.hpp"
+#include "test_sinks.hpp"
+#include "alloc_counter.hpp"
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <atomic>
+#include <cstring>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+using namespace DataTamer2;
+using DataTamerTest::AllocCounter;
+
+TEST(LoggedValue, IsNotMovableOrCopyable)
+{
+  static_assert(!std::is_copy_constructible_v<LoggedValue<double>>);
+  static_assert(!std::is_copy_assignable_v<LoggedValue<double>>);
+  static_assert(!std::is_move_constructible_v<LoggedValue<double>>, "moving a "
+                                                                    "LoggedValue would "
+                                                                    "leave the channel "
+                                                                    "with a dangling "
+                                                                    "pointer");
+  static_assert(!std::is_move_assignable_v<LoggedValue<double>>);
+}
+
+TEST(LoggedValue, SharedPtrHandleStillWorks)
+{
+  auto channel = LogChannel::create("chan");
+  auto v = channel->createLoggedValue<float>("f", 1.0f);
+  std::shared_ptr<LoggedValue<float>> moved = std::move(v);
+  ASSERT_FALSE(v);
+  ASSERT_EQ(moved->get(), 1.0f);
+}
+
+TEST(LoggedValue, ScalarTraitSelectsAtomics)
+{
+  static_assert(is_atomic_scalar_v<double>);
+  static_assert(is_atomic_scalar_v<int8_t>);
+  static_assert(is_atomic_scalar_v<bool>);
+  enum Color : uint8_t
+  {
+    RED
+  };
+  static_assert(is_atomic_scalar_v<Color>);
+  static_assert(!is_atomic_scalar_v<std::vector<double>>);
+  struct Big
+  {
+    double a, b;
+  };
+  static_assert(!is_atomic_scalar_v<Big>);
+}
+
+TEST(LoggedValue, ScalarSetIsSeenBySnapshotAndDoesNotAllocate)
+{
+  auto channel = LogChannel::create("chan");
+  DataTamerTest::Attached<DummySink> sink;
+  channel->addDataSink(sink);
+  auto v = channel->createLoggedValue<double>("v", 1.0);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+
+  {
+    AllocCounter::Scope scope;
+    for(int i = 0; i < 1000; i++)
+    {
+      v->set(double(i));
+    }
+    ASSERT_EQ(scope.allocations(), 0u);
+  }
+  ASSERT_EQ(v->get(), 999.0);
+
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  const auto snap = sink->latestSnapshot();
+  ASSERT_EQ(snap.payload.size(), sizeof(double));
+  double stored = 0;
+  std::memcpy(&stored, snap.payload.data(), sizeof(double));
+  ASSERT_EQ(stored, 999.0);
+}
+
+// setEnabled()/isEnabled() and the write transaction of a non-scalar set() are calls
+// into the library: none allocates.
+TEST(LoggedValue, SetEnabledAndNonScalarSetDoNotAllocate)
+{
+  auto channel = LogChannel::create("chan");
+  auto scalar = channel->createLoggedValue<double>("scalar");
+  auto pair = channel->createLoggedValue<std::array<double, 2>>("pair");
+  bool enabled = true;
+  {
+    AllocCounter::Scope scope;
+    for(int i = 0; i < 100; i++)
+    {
+      scalar->setEnabled(i % 2 == 0);
+      enabled = enabled && scalar->isEnabled() == (i % 2 == 0);
+      pair->set({ double(i), double(i) });
+    }
+    ASSERT_EQ(scope.allocations(), 0u);
+  }
+  ASSERT_TRUE(enabled);
+  ASSERT_EQ(pair->get()[0], 99.0);
+}
+
+TEST(LoggedValue, SetEnabledFromWriterThreadNeedsNoChannel)
+{
+  auto channel = LogChannel::create("chan");
+  auto v = channel->createLoggedValue<int32_t>("i", 1);
+  channel.reset();  // channel gone; the LoggedValue must still be usable
+  v->set(2);
+  v->setEnabled(false);
+  ASSERT_FALSE(v->isEnabled());
+  v->set(3);  // only stores
+  ASSERT_FALSE(v->isEnabled());
+  v->setEnabled(true);
+  ASSERT_TRUE(v->isEnabled());
+  ASSERT_EQ(v->get(), 3);
+}
+
+TEST(LoggedValue, SetDoesNotEnableADisabledValue)
+{
+  auto channel = LogChannel::create("chan");
+  DataTamerTest::Attached<DummySink> sink;
+  channel->addDataSink(sink);
+  auto v = channel->createLoggedValue<double>("v", 1.0);
+  v->setEnabled(false);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), 0u);
+
+  v->set(2.0);  // stays disabled
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), 0u);
+  v->setEnabled(true);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), sizeof(double));
+}
+
+// A writer thread hammering set() while the snapshot thread serializes. Must be clean
+// under TSAN, and every snapshot must decode to a value the writer actually wrote.
+namespace
+{
+// Every delivered 8-byte payload must have all bytes equal (see the writer below).
+class TearingSink : public DataSink
+{
+public:
+  std::atomic<size_t> checked{ 0 };
+  std::atomic<size_t> torn{ 0 };
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef& snapshot) override
+  {
+    uint64_t seen = 0;
+    if(snapshot->payload.size() != sizeof(seen))
+    {
+      torn++;
+      return;
+    }
+    std::memcpy(&seen, snapshot->payload.data(), sizeof(seen));
+    for(int b = 1; b < 8; b++)
+    {
+      if(((seen >> (8 * b)) & 0xFF) != (seen & 0xFF))
+      {
+        torn++;
+        return;
+      }
+    }
+    checked++;
+  }
+};
+}  // namespace
+
+TEST(LoggedValue, ScalarWriterRacesSnapshotCleanly)
+{
+  auto channel = LogChannel::create("chan");
+  DataTamerTest::Attached<TearingSink> sink;
+  channel->addDataSink(sink);
+  auto v = channel->createLoggedValue<uint64_t>("v", 0);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+
+  std::atomic_bool stop{ false };
+  std::thread writer([&] {
+    uint64_t x = 0;
+    while(!stop)
+    {
+      // Mask to a single byte before broadcasting: 0x0101..01 * x only
+      // replicates that byte across all 8 bytes while x < 256 (beyond that
+      // the multiplication carries between byte positions and legitimately
+      // produces non-uniform bytes, unrelated to any tearing). Masking keeps
+      // "every byte identical" true indefinitely, so any deviation seen by
+      // the snapshot thread can only come from a torn store/load.
+      const uint64_t byte_val = (++x) & 0xFFu;
+      v->set(byte_val * 0x0101010101010101ULL);
+    }
+  });
+  for(int i = 0; i < 2000; i++)
+  {
+    // A slow consumer may exhaust the pool; nothing else may go wrong.
+    const auto result = channel->takeSnapshot();
+    ASSERT_TRUE(result == SnapshotResult::ok || result == SnapshotResult::pool_exhausted);
+  }
+  stop = true;
+  writer.join();
+  sink.worker->stop();
+  ASSERT_EQ(sink->torn.load(), 0u);
+  ASSERT_GT(sink->checked.load(), 0u);  // a full queue may have dropped some
+}
+
+TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
+{
+  auto channel = LogChannel::create("chan");
+  DataTamerTest::Attached<DummySink> sink;
+  channel->addDataSink(sink);
+  auto v = channel->createLoggedValue<std::vector<double>>("vec", { 1.0, 2.0 });
+  channel->startLogging();
+  {
+    auto p = v->getMutablePtr();
+    p->push_back(3.0);
+    ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));  // held by p
+  }
+  ASSERT_FALSE(DataTamerTest::writeMutexHeld(*channel));
+  ASSERT_EQ(v->get().size(), 3u);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), sizeof(uint32_t) + 3 * sizeof(double));
+}
+
+// A writer thread growing a vector through getMutablePtr() while snapshots run.
+// Without the snapshot thread taking the shared write mutex this is a
+// use-after-free of the vector's buffer (TSAN/ASAN report).
+TEST(LoggedValue, NonScalarProxyExcludesSnapshot)
+{
+  auto channel = LogChannel::create("chan");
+  DataTamerTest::Attached<DummySink> sink;
+  channel->addDataSink(sink);
+  auto v = channel->createLoggedValue<std::vector<double>>("vec");
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  std::atomic_bool stop{ false };
+  std::thread writer([&] {
+    while(!stop)
+    {
+      auto p = v->getMutablePtr();
+      p->assign(size_t(1 + (p->size() % 64)),
+                1.0);  // size cycles 1..64, reallocating often
+    }
+  });
+  for(int i = 0; i < 3000; i++)
+  {
+    const auto result = channel->takeSnapshot();
+    ASSERT_TRUE(result == SnapshotResult::ok || result == SnapshotResult::pool_exhausted);
+  }
+  stop = true;
+  writer.join();
+}
+
+// get() is const; a const reference must be able to take a read guard too.
+TEST(LoggedValueApi, ConstReferenceReadsThroughAGuard)
+{
+  auto channel = LogChannel::create("chan");
+  auto logged = channel->createLoggedValue<std::vector<double>>(
+      "values", std::vector<double>{ 1.0, 2.0, 3.0 });
+  const LoggedValue<std::vector<double>>& view = *logged;
+
+  auto guard = view.getConstPtr();
+  ASSERT_EQ(guard->size(), 3u);
+  EXPECT_EQ((*guard)[1], 2.0);
+  EXPECT_EQ(view.get().back(), 3.0);  // nests inside the guard
+}
+
+// Real-time threads toggle values through these: none of them can throw, and the
+// type says so.
+TEST(LoggedValueApi, EnableAccessorsAreNoexcept)
+{
+  using Registration = const RegistrationID&;
+  static_assert(noexcept(
+      std::declval<LogChannel&>().trySetEnabled(std::declval<Registration>(), true)));
+  static_assert(noexcept(
+      std::declval<const LogChannel&>().isEnabled(std::declval<Registration>())));
+  static_assert(noexcept(std::declval<LoggedValue<double>&>().setEnabled(true)));
+  static_assert(noexcept(std::declval<const LoggedValue<double>&>().isEnabled()));
+  using Vector = LoggedValue<std::vector<double>>;
+  static_assert(noexcept(std::declval<Vector&>().setEnabled(true)));
+  static_assert(noexcept(std::declval<const Vector&>().isEnabled()));
+}

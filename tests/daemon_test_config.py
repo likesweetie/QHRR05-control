@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def simulation_command(directory, shm_name, csv_path=None, duration=None, control=None):
-    control = Path(control) if control else ROOT / 'tests/fixtures/control_config.yaml'
+    control = Path(control) if control else ROOT / 'tests/fixtures/control.yaml'
     args = [
         '--without-can',
         '--model',
@@ -30,12 +30,12 @@ def simulation_command(directory, shm_name, csv_path=None, duration=None, contro
         }
 
     processes = [
-        process('mujoco_simulate', args, True),
-        process('task_controller', [str(control), '{shm_name}', '--without-can']),
+        process('simulation', args, True),
+        process('control', [str(control), '{shm_name}', '--without-can']),
     ]
 
     if csv_path:
-        processes.append(process('shm_logger', ['{shm_name}', str(csv_path)]))
+        processes.append(process('shm_logger', ['--csv', '{shm_name}', str(csv_path)]))
 
     path = Path(directory) / 'processes.json'
     path.write_text(

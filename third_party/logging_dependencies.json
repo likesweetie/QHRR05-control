@@ -1,0 +1,19 @@
+{
+  "data_tamer": {
+    "version": "2.0.0",
+    "repository": "https://github.com/facontidavide/data_tamer",
+    "commit": "0c48ed05536699ca761bea9b46365c6fe805358d",
+    "archive_sha256": "2e6d572f47da138f51e9a79363cffa0210bfc1222e127f3a1c470b3a918fac7e",
+    "license": "data_tamer/LICENSE",
+    "cmake_source": "data_tamer/data_tamer_cpp",
+    "python_parser": "data_tamer/python/data_tamer_parser.py"
+  },
+  "mcap": {
+    "version": "2.1.3",
+    "repository": "https://github.com/foxglove/mcap",
+    "tag": "releases/cpp/v2.1.3",
+    "archive_sha256": "181a7c52cc982444cdef533087b321538b025fcc5eec258e0489d68b9ce53ded",
+    "license": "mcap/LICENSE"
+  },
+  "policy": "Vendored source archives, no configure/build-time network fetch or latest-branch tracking. Upstream licenses retained."
+}
