@@ -1,5 +1,5 @@
 #include "daemon/statistics.hpp"
-#include "shm_utils.hpp"
+#include "ipc/shm_utils.hpp"
 #include <cmath>
 #include <iostream>
 #include <sstream>
@@ -37,6 +37,7 @@ int main() {
         Require(summary.count == 2 && summary.minimum == 1 && summary.maximum == 3 &&
                     summary.mean == 2 && summary.standard_deviation == 1,
             "window min/max/mean/population deviation is wrong");
+        Require(summary.latest == 3 && summary.trend.size() == 10, "latest/trend summary is wrong");
         summary = window.Read(2000000000, 2000000000);
         Require(summary.count == 1 && summary.mean == 3 && summary.standard_deviation == 0,
             "expired observations remain in the window");

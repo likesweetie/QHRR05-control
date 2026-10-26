@@ -1,5 +1,5 @@
 #include "motion_controllers/magnetic_touch_controller.hpp"
-#include "mujoco_simulate/simulation.hpp"
+#include "simulation/simulation.hpp"
 #include <cmath>
 #include <fstream>
 #include <iostream>
