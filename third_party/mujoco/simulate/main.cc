@@ -34,7 +34,6 @@
 #include "array_safety.h"
 #include "shared_memory.hpp"
 #include "shm_utils.hpp"
-#include "qhrr05_model.hpp"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 
@@ -120,7 +119,7 @@ bool LoadPdConfig() {
                 << explicit_path << '\n';
       return false;
     }
-    if (cfg["robot"].as<std::string>() != qhrr05::kRobotName) {
+    if (cfg["robot"].as<std::string>() != "qhrr-05") {
       std::cerr << "[simulate] PD config supports only qhrr-05\n";
       return false;
     }
@@ -130,7 +129,7 @@ bool LoadPdConfig() {
     parsed.kd = cfg["kd"].as<double>();
     parsed.num_joint = cfg["num_joint"].as<int>();
     if (!std::isfinite(parsed.kp) || !std::isfinite(parsed.kd) ||
-        parsed.kp < 0 || parsed.kd < 0 || parsed.num_joint != qhrr05::kJointCount) {
+        parsed.kp < 0 || parsed.kd < 0 || parsed.num_joint != 3) {
       std::cerr << "[simulate] PD config contains invalid gains or joint count: "
                 << explicit_path << '\n';
       return false;
@@ -155,8 +154,8 @@ void ApplyControlFromShm(const mjModel* model, mjData* data) {
     return;
   }
 
-  // ValidateModel fixes the joint and actuator order to FL hip/thigh/calf.
-  for (int i = 0; i < qhrr05::kJointCount; ++i) {
+  // The selected fixed-base model exposes three joint coordinates.
+  for (int i = 0; i < 3; ++i) {
     const mjtNum target = static_cast<mjtNum>(g_shm->q_target[i]);
     data->ctrl[i] = g_pd.kp * (target - data->qpos[i]) - g_pd.kd * data->qvel[i];
   }
@@ -173,13 +172,13 @@ void PublishStateToShm(const mjModel* model, const mjData* data) {
   // Only the validated, fixed-base FL joint state is published.
   g_shm->counter++;
   g_shm->sim_time = data->time;
-  g_shm->nq = qhrr05::kJointCount;
-  g_shm->nv = qhrr05::kJointCount;
-  g_shm->nu = qhrr05::kJointCount;
+  g_shm->nq = 3;
+  g_shm->nv = 3;
+  g_shm->nu = 3;
   g_shm->nsensordata = 0;
-  std::memcpy(g_shm->qpos, data->qpos, sizeof(double) * qhrr05::kJointCount);
-  std::memcpy(g_shm->qvel, data->qvel, sizeof(double) * qhrr05::kJointCount);
-  std::memcpy(g_shm->ctrl_applied, data->actuator_force, sizeof(double) * qhrr05::kJointCount);
+  std::memcpy(g_shm->qpos, data->qpos, sizeof(double) * 3);
+  std::memcpy(g_shm->qvel, data->qvel, sizeof(double) * 3);
+  std::memcpy(g_shm->ctrl_applied, data->actuator_force, sizeof(double) * 3);
 
   g_shm->state_seq++;
 }
@@ -394,10 +393,8 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
 
 // This platform starts from an explicit, valid home pose with zero motor torque.
 mjData* MakePlatformData(const mjModel* model) {
-  try {
-    qhrr05::ValidateModel(model);
-  } catch (const std::exception& e) {
-    std::cerr << "[simulate] rejected model: " << e.what() << '\n';
+  if (!model || model->nq != 3 || model->nv != 3 || model->nu != 3) {
+    std::cerr << "[simulate] expected three joint positions, velocities and motor inputs\n";
     return nullptr;
   }
   const int home = mj_name2id(model, mjOBJ_KEY, "home");
@@ -653,7 +650,7 @@ int main(int argc, char** argv) {
   // scan for libraries in the plugin directory to load additional plugins
   scanPluginLibraries();
   const char* selected_robot = std::getenv("ROBOT_NAME");
-  if (selected_robot && std::string(selected_robot) != qhrr05::kRobotName) {
+  if (selected_robot && std::string(selected_robot) != "qhrr-05") {
     std::cerr << "[simulate] only qhrr-05 is supported\n";
     return 1;
   }

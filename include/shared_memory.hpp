@@ -1,60 +1,137 @@
 #pragma once
 
-#include <cstddef>
+#include <array>
 #include <cstdint>
+#include <pthread.h>
+#include "motor_can/openrobot_protocol.hpp"
 
-inline constexpr std::size_t kShmNameBytes = 32;
-inline constexpr std::size_t kShmMaxQpos = 64;
-inline constexpr std::size_t kShmMaxQvel = 64;
-inline constexpr std::size_t kShmMaxCtrl = 64;
-inline constexpr std::size_t kShmMaxSensorData = 512;
+enum class MagneticPhase : int { Free, Candidate, Following, Releasing };
+enum class MagneticReason : int {
+    None,
+    NoMeasurement,
+    ObserverInvalid,
+    Workspace,
+    JointLimit,
+    StrokeLimit,
+    ContactLost
+};
 
-struct ShmData
-{
-    char name[kShmNameBytes] = {0};
-    std::uint64_t counter{0};
+inline const char* MagneticPhaseName(MagneticPhase phase) {
+    switch (phase) {
+    case MagneticPhase::Free:
+        return "FREE";
+    case MagneticPhase::Candidate:
+        return "CONTACT CANDIDATE";
+    case MagneticPhase::Following:
+        return "FORCE FOLLOWING";
+    case MagneticPhase::Releasing:
+        return "RELEASE PENDING";
+    }
 
-    // Monotonic sequence numbers for best-effort sync across processes.
-    std::uint64_t state_seq{0};
-    std::uint64_t command_seq{0};
-    std::uint64_t applied_command_seq{0};
+    return "INVALID PHASE";
+}
 
-    // Current model dimensions and sim time.
-    double sim_time{0.0};
-    std::int32_t nq{0};
-    std::int32_t nv{0};
-    std::int32_t nu{0};
-    std::int32_t nsensordata{0};
+inline const char* MagneticReasonName(MagneticReason reason) {
+    switch (reason) {
+    case MagneticReason::None:
+        return "none";
+    case MagneticReason::NoMeasurement:
+        return "no measurement";
+    case MagneticReason::ObserverInvalid:
+        return "observer invalid/singular";
+    case MagneticReason::Workspace:
+        return "workspace limit";
+    case MagneticReason::JointLimit:
+        return "joint limit";
+    case MagneticReason::StrokeLimit:
+        return "following distance limit";
+    case MagneticReason::ContactLost:
+        return "contact lost";
+    }
 
-    // State written by MuJoCo simulate process.
-    double qpos[kShmMaxQpos] = {0.0};
-    double qvel[kShmMaxQvel] = {0.0};
-    // Reserved ABI fields: qhrr-05 does not publish IMU measurements here.
-    double quat[4] = {1.0, 0.0, 0.0, 0.0};  // w, x, y, z
-    double ang_vel[3] = {0.0, 0.0, 0.0};    // wx, wy, wz
-    double sensordata[kShmMaxSensorData] = {0.0};
-    double ctrl_applied[kShmMaxCtrl] = {0.0};  // MuJoCo actuator_force, not constraint force.
+    return "invalid reason";
+}
 
-    // Joint-space target written by external controller process.
-    double q_target[kShmMaxCtrl] = {0.0};
+struct MagneticTelemetry {
+    MagneticPhase phase = MagneticPhase::Free;
+    MagneticReason reason = MagneticReason::None;
+    bool observer_valid = false, torque_saturated = false;
+    std::uint64_t event_sequence = 0;
+    double estimated_normal_force = 0, target_force = 0, force_command = 0;
+    double displacement = 0, minimum_singular_value = 0, event_time = 0;
+    std::array<double, 3> estimated_force{}, external_torque{}, normal{}, toe_reference{};
+};
 
-    // Command channels for high-level velocity targets (e.g. joystick).
-    double lin_vel_target[3] = {0.0, 0.0, 0.0};
-    double ang_vel_target[3] = {0.0, 0.0, 0.0};
+// Canonical motor data for HR / HP / KP; every array follows that axis order.
+struct MotorData {
+    // Controller-owned outputs.
+    std::array<openrobot::PositionTarget, 3> command{};
+    std::array<double, 3> reference{}, debug_torque{};
 
-    bool a_button=false;
-    bool b_button=false;
-    bool x_button=false;
-    bool y_button=false;
+    // HAL-owned feedback and per-axis CAN status.
+    std::array<openrobot::Feedback, 3> feedback{};
+    std::array<std::uint64_t, 3> received_ns{}, received_sequence{};
+    std::array<std::uint64_t, 3> tx_frames{}, rx_frames{}, invalid_frames{};
+    std::array<bool, 3> profile_verified{}, enable_requested{}, enabled{};
 
-    bool lb_button=false;
-    bool rb_button=false;
+    // Simulation bootstrap, then runtime calibration.
+    std::array<double, 3> position_offset{};
 
-    bool back_button=false;
-    bool start_button=false;
-    bool guide_button=false;
+    openrobot::MitProfile profile{};
+    std::uint64_t command_sequence = 0, command_published_ns = 0;  // Controller
+    std::uint64_t feedback_sequence = 0, feedback_published_ns = 0;  // HAL (sim in debug)
+    std::uint64_t consumed_command_sequence = 0, last_tx_ns = 0, cycles = 0, socket_errors = 0;
+    double sample_dt = .001;
+    bool running = false;
+};
 
-    bool l3_button=false;
-    bool r3_button=false;
+// Simulator-owned model information, evaluated at decoded joint positions.
+struct ModelData {
+    std::uint64_t published_ns = 0;
+    std::array<double, 3> gravity_torque{}, bias_torque{}, passive_torque{}, friction_limit{};
+    std::array<double, 9> mass{}, jacobian{};
+    std::array<double, 3> toe_position{}, joint_min{}, joint_max{};
+};
 
+struct ControlData {
+    int requested_mode = 0;  // GUI owns requests. Slider edits preserve motion_sequence.
+    double target_force = 3;
+    std::uint64_t motion_sequence = 0;
+
+    int mode = 0;  // Controller owns status and observer output.
+    bool holding = false;
+    double control_time = 0;
+    std::uint64_t command_sequence = 0, published_ns = 0, active_motion_sequence = 0;
+    std::uint64_t input_model_sequence = 0, input_model_published_ns = 0;  // Logger trace
+    MagneticTelemetry magnetic{};
+
+    std::array<double, 3> joystick_axes{};  // Optional aux_reader owns these fields only.
+    std::array<bool, 11> joystick_buttons{};
+    std::uint64_t joystick_sequence = 0, joystick_published_ns = 0;
+};
+
+// Physical truth and object/contact events stay on the simulation SHM path.
+struct SimulationData {
+    std::uint64_t published_ns = 0, run_id = 0;
+    double time = 0;
+    std::array<double, 3> position_gt{}, torque_gt{}, toe_position{};
+    std::array<double, 3> contact_force{}, contact_torque{}, object_position{};
+    bool contact = false;
+    std::uint64_t contact_event_sequence = 0;
+    double contact_event_time = 0;
+};
+
+struct ShmData {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    bool stopping = false, failed = false, simulation_finished = false, can_enabled = false;
+
+    // All copies/publications hold mutex. Multiwriter channels copy the CURRENT
+    // published slot before updating their own fields; never publish a stale bank.
+    std::uint64_t motor_sequence = 0, model_sequence = 0, control_sequence = 0,
+                  simulation_sequence = 0;
+    std::array<MotorData, 2> motors{};
+    std::array<ModelData, 2> model{};
+    std::array<ControlData, 2> control{};
+    std::array<SimulationData, 2> simulation{};
 };

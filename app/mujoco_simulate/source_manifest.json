@@ -1,0 +1,57 @@
+{
+  "source": "third_party/mujoco/simulate",
+  "baseline_commit": "6c93a08",
+  "excluded": [
+    "main.cc"
+  ],
+  "files": {
+    "README.md": {
+      "source_sha256": "160844f521c7abe4d09b8d62d94a49c84eb023bcab052993bff6978e05d2b7ab",
+      "copy_sha256": "160844f521c7abe4d09b8d62d94a49c84eb023bcab052993bff6978e05d2b7ab"
+    },
+    "array_safety.h": {
+      "source_sha256": "048e5543d556a1db33230f0b6b1a33b71a952b0c8581c9600cd190315f7fd620",
+      "copy_sha256": "048e5543d556a1db33230f0b6b1a33b71a952b0c8581c9600cd190315f7fd620"
+    },
+    "glfw_adapter.cc": {
+      "source_sha256": "a315043dd702fd80e1c8f890e8aff9e9f394f4dc3c5889be64cf01f57375e9db",
+      "copy_sha256": "bbde95d681eb329a254dc97a09b74cafde84816555bbdfe2256566d803446ec0"
+    },
+    "glfw_adapter.h": {
+      "source_sha256": "cfddb35d909d19dbd7a7871b2065f92321003352a07e6d59f008e6a7709938b3",
+      "copy_sha256": "cfddb35d909d19dbd7a7871b2065f92321003352a07e6d59f008e6a7709938b3"
+    },
+    "glfw_corevideo.h": {
+      "source_sha256": "7b834e24e32e8c0dcbf17e6ff1651b358b7d70c5460e88b2b3b30fdb40fc3ab9",
+      "copy_sha256": "7b834e24e32e8c0dcbf17e6ff1651b358b7d70c5460e88b2b3b30fdb40fc3ab9"
+    },
+    "glfw_corevideo.mm": {
+      "source_sha256": "609fd62b00b7cb0d4ac923bed8a03a8aefa687b6ec07f7dd78f42247b40a5a1b",
+      "copy_sha256": "609fd62b00b7cb0d4ac923bed8a03a8aefa687b6ec07f7dd78f42247b40a5a1b"
+    },
+    "glfw_dispatch.cc": {
+      "source_sha256": "29b20f75cf6ab5538e0af0bded91a46a40d80b8b28e2902d6e942506f057d7bf",
+      "copy_sha256": "29b20f75cf6ab5538e0af0bded91a46a40d80b8b28e2902d6e942506f057d7bf"
+    },
+    "glfw_dispatch.h": {
+      "source_sha256": "be9af6f598f39de760cd6e82e913521a8bfb1be310fcd99355af968ad1b945a7",
+      "copy_sha256": "be9af6f598f39de760cd6e82e913521a8bfb1be310fcd99355af968ad1b945a7"
+    },
+    "platform_ui_adapter.cc": {
+      "source_sha256": "69c707e6626d53b18785664846412c4036b0dbff30c20a802cd3b81957925542",
+      "copy_sha256": "69c707e6626d53b18785664846412c4036b0dbff30c20a802cd3b81957925542"
+    },
+    "platform_ui_adapter.h": {
+      "source_sha256": "995bcedda7769ca8e0083cc39b2ed671b98624e9b7588718c77f28b8c9255294",
+      "copy_sha256": "995bcedda7769ca8e0083cc39b2ed671b98624e9b7588718c77f28b8c9255294"
+    },
+    "simulate.cc": {
+      "source_sha256": "70c22c48c37a05456fcfed4b608992b820c32250b38fe8dc125d948336bc11a2",
+      "copy_sha256": "6ae77d5a2e23c61397225e31c327ae07bfcfc947e22c8ab6f0bdb32cfe980a1d"
+    },
+    "simulate.h": {
+      "source_sha256": "9ba0fb00f9bcdafb78c4dcdaa6780528fa549db45a4a9465049c54b3d40705a1",
+      "copy_sha256": "0a8dcce925d15b16824a4ebef7e1552ef461f280fdddadcfc84c5308c1a02d9a"
+    }
+  }
+}

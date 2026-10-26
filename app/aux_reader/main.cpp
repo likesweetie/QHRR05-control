@@ -1,67 +1,55 @@
 #include "joystick.hpp"
 #include "shm_utils.hpp"
-
-#include <atomic>
 #include <chrono>
 #include <csignal>
-#include <cstdlib>
 #include <iostream>
 #include <thread>
 
 namespace {
-std::atomic<bool> g_run{true};
+volatile std::sig_atomic_t stopped = 0;
 
-void HandleSignal(int) {
-    g_run.store(false, std::memory_order_relaxed);
+void OnSignal(int) {
+    stopped = 1;
 }
-
-const char* ResolveShmName() {
-    const char* name = std::getenv("SHM_NAME");
-    return (name && name[0]) ? name : "/shm0";
 }
-
-const char* ResolveJoystickDev(int argc, char** argv) {
-    if (argc > 1 && argv[1] && argv[1][0]) {
-        return argv[1];
-    }
-    const char* env = std::getenv("JOYSTICK_DEV");
-    return (env && env[0]) ? env : "/dev/input/js0";
-}
-}  // namespace
 
 int main(int argc, char** argv) {
-    std::signal(SIGINT, HandleSignal);
-    std::signal(SIGTERM, HandleSignal);
+    std::signal(SIGINT, OnSignal);
+    std::signal(SIGTERM, OnSignal);
 
-    const char* shm_name = ResolveShmName();
-    const char* joystick_dev = ResolveJoystickDev(argc, argv);
+    try {
+        if (argc != 3)
+            throw std::runtime_error("usage: aux_reader SHM_NAME JOYSTICK_DEVICE");
 
-    std::cout << "[aux_reader] waiting shm: " << shm_name << std::endl;
+        shm_utils::Mapping mapping(argv[1]);
+        auto& shm = *mapping.get();
+        Joystick joystick(argv[2], &shm);
+        joystick.initialize();
+        joystick.start();
+        bool finished = false;
 
-    ShmData* shm = nullptr;
-    while (g_run.load(std::memory_order_relaxed) && !shm) {
-        shm = shm_utils::OpenShm(shm_name);
-        if (!shm) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (!stopped && joystick.isRunning()) {
+            {
+                shm_utils::Lock lock(shm);
+                finished = shm.stopping || shm.simulation_finished;
+            }
+
+            if (finished)
+                break;
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-    }
 
-    if (!shm) {
-        std::cerr << "[aux_reader] failed to open shm" << std::endl;
+        const bool device_failed = !stopped && !finished && !joystick.isRunning();
+        joystick.stop();
+        joystick.join();
+
+        if (device_failed)
+            throw std::runtime_error("joystick reader stopped unexpectedly");
+
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "[aux_reader] " << error.what() << '\n';
         return 1;
     }
-
-    std::cout << "[aux_reader] joystick device: " << joystick_dev << std::endl;
-    Joystick joystick(joystick_dev, shm);
-    joystick.initialize();
-    joystick.start();
-
-    while (g_run.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    joystick.stop();
-    joystick.join();
-    shm_utils::CloseShm(shm);
-    return 0;
 }

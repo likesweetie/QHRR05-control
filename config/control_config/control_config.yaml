@@ -1,16 +1,54 @@
 robot: qhrr-05
-joint_names: [FL_hip_joint, FL_thigh_joint, FL_calf_joint]
+
+task_controller:
+  frequency_hz: 500.0  # Independent monotonic wall-clock control loop.
 
 # Joint order: FL hip roll, thigh pitch, calf pitch.
-# kp: N*m/rad, kd: N*m*s/rad. A scalar or three joint values are accepted.
-kp: [40.0, 80.0, 40.0]
-kd: [1.0, 1.0, 1.0]
-bias_compensation: true  # Compensate MuJoCo gravity and Coriolis terms.
-
+# Gains accept either a scalar or three joint values.
 homing:
+  kp: [40.0, 40.0, 40.0]  # N*m/rad
+  kd: [0.3, 0.3, 0.3]    # N*m*s/rad
   initial_position_rad: [0.0, 0.3, -1.0]
   position_rad: [0.0, 0.9, -1.8]
   duration_sec: 3.0
+
+gravity_compensation:
+  kp_motor: [2.0, 2.0, 2.0]  # Simulated inner position servo, N*m/rad.
+  kd_motor: [0.3, 0.3, 0.3]    # N*m*s/rad.
+  alpha: 1.0  # Gravity compensation ratio, 0..1.
+  # N*m/rad; desired pose is captured when entering gravity mode.
+  # Zero stiffness allows manual motion; kd_motor still damps velocity.
+  task_stiffness: [0.0, 0.0, 0.0]
+
+magnetic_touch:
+  kp_motor: [40.0, 40.0, 40.0]  # MIT inner position servo; other tuning is unchanged.
+  kd_motor: [0.3, 0.3, 0.3]
+  target_force_n: 10.0
+  maximum_force_n: 15.0
+  contact_on_n: 1.5
+  contact_cancel_n: 1.0
+  contact_off_n: 0.5
+  contact_recover_n: 0.8
+  contact_debounce_sec: 0.02
+  release_sec: 0.1
+  force_ramp_sec: 0.15
+  force_gain: 1.0
+  admittance_m_per_ns: 0.005
+  tracking_stiffness_n_m: 20.0
+  tracking_damping_ns_m: 2.5
+  maximum_velocity_m_s: 0.05
+  maximum_displacement_m: 0.15
+  joint_margin_rad: 0.025
+  joint_damping_nm_s_rad: [0.1, 0.1, 0.1]
+  torque_limit_nm: [23.7, 23.7, 45.43]
+  workspace_min_m: [-0.15, -0.15, 0.025]
+  workspace_max_m: [0.7, 0.5, 0.45]
+  observer:
+    bandwidth_hz: 20.0
+    regularization_m: 0.001
+    minimum_singular_value_m: 0.01
+    maximum_estimate_n: 50.0
+    friction_velocity_rad_s: 0.01
 
 plots:
   history_sec: 10.0

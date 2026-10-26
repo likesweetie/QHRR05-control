@@ -1,0 +1,7 @@
+[tool.black]
+required-version = "24.10.0"
+line-length = 100
+target-version = ["py310"]
+skip-string-normalization = true
+include = '\.py$'
+extend-exclude = '/(third_party|build)/'
