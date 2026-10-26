@@ -1,0 +1,48 @@
+# Daemon owns process lifetimes and SHM. Exact {shm_name} arguments use this value.
+# exec_path is relative to the daemon binary; working_directory to this YAML.
+shm_name: /qhrr05
+terminal_exec: /usr/bin/gnome-terminal.real
+log_directory: ../../logs
+terminal_layout:
+  monitor: auto  # Secondary monitor when present, otherwise primary; selection is logged.
+  columns: 2
+  gap_px: 12
+  margin_px: 12
+  zoom: 0.85
+  include_daemon: true  # Include the launching terminal when stdout is a GNOME/X11 terminal.
+monitoring:
+  display_interval_sec: 2.0  # Must be greater than 1 s; no periodic log scrolling.
+  window_sec: 10.0
+  sample_hz: 100.0  # Read-only daemon observer; busy mutex samples are skipped.
+
+processes:
+  - name: can_hal
+    exec_path: can_hal
+    working_directory: ../..
+    wait_ready: true
+    terminal_title: QHRR05-CAN-HAL
+    args: [config/can_hal/can_hal.yaml, "{shm_name}"]
+
+  - name: simulation
+    exec_path: simulation
+    working_directory: ../..
+    wait_ready: true
+    args: [--model, models/qhrr-05/scene.xml, --control-config, config/control/control.yaml, --shm-name, "{shm_name}", --hal-config, config/can_hal/can_hal.yaml, --simulation-config, config/simulation/simulation.yaml]
+
+  - name: control
+    exec_path: control
+    working_directory: ../..
+    args: [config/control/control.yaml, "{shm_name}"]
+
+# Selected only by daemon --without-can; never used after a CAN startup failure.
+debug_processes:
+  - name: simulation
+    exec_path: simulation
+    working_directory: ../..
+    wait_ready: true
+    args: [--model, models/qhrr-05/scene.xml, --control-config, config/control/control.yaml, --shm-name, "{shm_name}", --without-can]
+
+  - name: control
+    exec_path: control
+    working_directory: ../..
+    args: [config/control/control.yaml, "{shm_name}", --without-can]

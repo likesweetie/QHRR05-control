@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-launcher-') as directory:
     def run(*args, expected=0):
         marker.unlink(missing_ok=True)
         result = subprocess.run(
-            [str(launcher), '--process-config', str(config), '--no-terminals', *args],
+            [str(launcher), '--config', str(config), '--no-terminals', *args],
             capture_output=True,
             text=True,
             timeout=12,

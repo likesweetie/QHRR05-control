@@ -1,4 +1,4 @@
-#include "mujoco_simulate/simulation.hpp"
+#include "simulation/simulation.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>

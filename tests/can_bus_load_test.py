@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-bus-load-') as directory:
                     'statistics_hz': 20,
                     'bus_load_bitrate': bitrate,
                     'motor_ids': [1, 2, 3],
-                    'motor_config': str(root / 'config/motor_config/ak10_9_v3.yaml'),
+                    'motor_config': str(root / 'config/motor/ak10_9_v3.yaml'),
                 }
             )
         )
@@ -125,8 +125,12 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-bus-load-') as directory:
                 bar, percent, reference, suffix, window_ms, frames, bits, drops, errors = (
                     row.groups()
                 )
-                expected = 100 * int(bits) / (int(reference) * float(window_ms) / 1000)
-                assert abs(float(percent) - expected) < 0.2, row[0]
+                # Display rounds the window to 0.01 ms and load to 0.1 percent.
+                # At high load, the rounded window changes the reconstructed percentage.
+                factor = 100000 * int(bits) / int(reference)
+                lower = factor / (float(window_ms) + 0.005) - 0.05
+                upper = factor / (float(window_ms) - 0.005) + 0.05
+                assert lower <= float(percent) <= upper, row[0]
                 filled = round(min(100, float(percent)) * 30 / 100)
                 assert abs(bar.count('#') - filled) <= 1, row[0]
                 assert int(reference) == bitrate and int(drops) == 0 and int(errors) == 0, row[0]

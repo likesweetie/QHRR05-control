@@ -1,7 +1,7 @@
 #include <yaml-cpp/yaml.h>
 #include <array>
 #include "motion_controllers/homing_controller.hpp"
-#include "mujoco_simulate/simulation.hpp"
+#include "simulation/simulation.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>

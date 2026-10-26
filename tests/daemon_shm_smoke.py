@@ -107,7 +107,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
         try:
             for line in process.stdout:
                 output.append(line)
-                match = re.search(r'task_controller started pid=(\d+)', line)
+                match = re.search(r'control started pid=(\d+)', line)
 
                 if match:
                     controller = int(match.group(1))

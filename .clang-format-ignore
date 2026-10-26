@@ -1,4 +1,3 @@
 # Preserve dependency sources and the copied MuJoCo simulate baseline.
 third_party/**
-app/mujoco_simulate/simulate/**
 build/**

@@ -1,7 +1,7 @@
 #include <yaml-cpp/yaml.h>
 #include "motion_controllers/gravity_compensation_controller.hpp"
 #include "motion_controllers/magnetic_touch_controller.hpp"
-#include "mujoco_simulate/simulation.hpp"
+#include "simulation/simulation.hpp"
 
 #include <algorithm>
 #include <cmath>

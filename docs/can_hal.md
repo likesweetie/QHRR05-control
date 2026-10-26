@@ -4,11 +4,11 @@
 
 ## 설정과 통신 경로
 
-- [daemon 설정](../config/app_config/daemon_config.yaml): 공유 영역 이름 `shm_name`과 자식 실행 인자. `"{shm_name}"`은 daemon이 치환합니다.
-- [HAL 설정](../config/hal_config/can_hal.yaml): 인터페이스·실행/통계 주기·점유율 기준 비트레이트·관절별 CAN ID와 모터 설정 경로.
-- [시뮬레이션 설정](../config/simulation_config/simulation_config.yaml): 실제 Kt·감속비·전기각과 Iq 센서 오차. 시뮬레이터의 `--simulation-config`로 전달하며 HAL은 읽지 않습니다.
-- [모터 규약](../config/motor_config/ak10_9_v3.yaml): V_MAX/T_MAX·Kt_out·감속비·Kd scale. `motor_config` 경로는 HAL YAML 디렉터리 기준입니다.
-- HAL은 `can_hal HAL_CONFIG.yaml SHM_NAME`, 가상 모터는 `mujoco_simulate --hal-config HAL_CONFIG.yaml`로 같은 설정을 받습니다. 각 생성자가 직접 읽고, 누락·불일치는 명시적으로 실패합니다.
+- [daemon 설정](../config/daemon/daemon.yaml): 공유 영역 이름 `shm_name`과 자식 실행 인자. `"{shm_name}"`은 daemon이 치환합니다.
+- [HAL 설정](../config/can_hal/can_hal.yaml): 인터페이스·실행/통계 주기·점유율 기준 비트레이트·관절별 CAN ID와 모터 설정 경로.
+- [시뮬레이션 설정](../config/simulation/simulation.yaml): 실제 Kt·감속비·전기각과 Iq 센서 오차. 시뮬레이터의 `--simulation-config`로 전달하며 HAL은 읽지 않습니다.
+- [모터 규약](../config/motor/ak10_9_v3.yaml): V_MAX/T_MAX·Kt_out·감속비·Kd scale. `motor_config` 경로는 HAL YAML 디렉터리 기준입니다.
+- HAL은 `can_hal HAL_CONFIG.yaml SHM_NAME`, 가상 모터는 `simulation --hal-config HAL_CONFIG.yaml`로 같은 설정을 받습니다. 각 생성자가 직접 읽고, 누락·불일치는 명시적으로 실패합니다.
 
 모터 명령·피드백은 Linux SocketCAN의 `PF_CAN/SOCK_RAW/CAN_RAW`를 통과합니다. 기본 런처는 호스트 vcan0를 준비하며 네임스페이스 생성은 명시적 `--isolated-vcan` 디버깅에서만 수행합니다. daemon은 공유 영역을 생성·초기화하고 모든 자식 종료 후 해제합니다. 각 프로그램에 별도 터미널을 열고 고정 통계 영역과 로그 영역을 나눕니다. 표시 주기·로그 저장·SHM 지표의 정의와 계측 한계는 [README의 관측 설명](../README.md#프로세스-터미널과-shm-통계)을 참고하십시오. HAL·가상 모터는 기존 영역에 연결하며 소켓은 각각 소유합니다. HAL 설정의 예전 `shm_name`은 오류로 거부합니다. 직접 HAL을 실행할 때도 daemon이 만든 영역 이름을 인자로 지정해야 합니다.
 
@@ -25,7 +25,7 @@
 
 ID 1/2/3은 SID 0x141/0x142/0x143에 대응합니다. 아직 검증되지 않은 C4와 미확인 C1은 100 HAL 주기마다 재요청합니다. 이는 준비 확인용 반복이며 응답 지연 감시가 아닙니다. 모터 응답이 없어도 제어 루프는 설정 주기로 계속 동작합니다.
 
-[control_types.hpp](../include/control_types.hpp)의 `MitCommand`는 position·velocity·kp·kd·tau_ff를 가집니다. enable 요청은 `MotorData.command_enabled[i]`로 분리합니다. SHM과 TaskController는 OpenRobot 코덱을 참조하지 않고, 코덱이 이 공통 타입을 참조합니다. position은 출력축 상대 좌표 rad입니다. Homing은 보간 q/dq와 자체 PD 게인을 보내며, Gravity/Magnetic은 계산한 토크를 다음 위치 목표로 환산합니다.
+[control_types.hpp](../src/ipc/control_types.hpp)의 `MitCommand`는 position·velocity·kp·kd·tau_ff를 가집니다. enable 요청은 `MotorData.command_enabled[i]`로 분리합니다. SHM과 TaskController는 OpenRobot 코덱을 참조하지 않고, 코덱이 이 공통 타입을 참조합니다. position은 출력축 상대 좌표 rad입니다. Homing은 보간 q/dq와 자체 PD 게인을 보내며, Gravity/Magnetic은 계산한 토크를 다음 위치 목표로 환산합니다.
 
 ```text
 q_motor_target = q_joint - position_offset + (tau + kd_motor * dq) / kp_motor
