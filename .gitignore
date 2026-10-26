@@ -1,6 +1,9 @@
 /build/
+/logs/
 __pycache__/
 /.aws/
 /.codex/
 /.agents/
 MUJOCO_LOG.TXT
+# Local IDE launch template; not a project run configuration.
+/.vscode/launch.json

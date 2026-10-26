@@ -1,75 +1,29 @@
 #pragma once
 
+#include "control_types.hpp"
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <pthread.h>
-#include "motor_can/openrobot_protocol.hpp"
+#include <time.h>
 
-enum class MagneticPhase : int { Free, Candidate, Following, Releasing };
-enum class MagneticReason : int {
-    None,
-    NoMeasurement,
-    ObserverInvalid,
-    Workspace,
-    JointLimit,
-    StrokeLimit,
-    ContactLost
-};
-
-inline const char* MagneticPhaseName(MagneticPhase phase) {
-    switch (phase) {
-    case MagneticPhase::Free:
-        return "FREE";
-    case MagneticPhase::Candidate:
-        return "CONTACT CANDIDATE";
-    case MagneticPhase::Following:
-        return "FORCE FOLLOWING";
-    case MagneticPhase::Releasing:
-        return "RELEASE PENDING";
-    }
-
-    return "INVALID PHASE";
-}
-
-inline const char* MagneticReasonName(MagneticReason reason) {
-    switch (reason) {
-    case MagneticReason::None:
-        return "none";
-    case MagneticReason::NoMeasurement:
-        return "no measurement";
-    case MagneticReason::ObserverInvalid:
-        return "observer invalid/singular";
-    case MagneticReason::Workspace:
-        return "workspace limit";
-    case MagneticReason::JointLimit:
-        return "joint limit";
-    case MagneticReason::StrokeLimit:
-        return "following distance limit";
-    case MagneticReason::ContactLost:
-        return "contact lost";
-    }
-
-    return "invalid reason";
-}
-
-struct MagneticTelemetry {
-    MagneticPhase phase = MagneticPhase::Free;
-    MagneticReason reason = MagneticReason::None;
-    bool observer_valid = false, torque_saturated = false;
-    std::uint64_t event_sequence = 0;
-    double estimated_normal_force = 0, target_force = 0, force_command = 0;
-    double displacement = 0, minimum_singular_value = 0, event_time = 0;
-    std::array<double, 3> estimated_force{}, external_torque{}, normal{}, toe_reference{};
-};
+// Shared-memory protocol. Increment the ABI version when layout or field semantics change.
+inline constexpr std::uint64_t kShmMagic = 0x5148525253484D31ULL;  // QHRRSHM1
+inline constexpr std::uint32_t kShmAbiVersion = 1;
+inline constexpr std::size_t kShmBufferCount = 2;
+inline constexpr unsigned kShmPermissions = 0600;
+inline constexpr clockid_t kShmClock = CLOCK_MONOTONIC;
 
 // Canonical motor data for HR / HP / KP; every array follows that axis order.
 struct MotorData {
     // Controller-owned outputs.
-    std::array<openrobot::PositionTarget, 3> command{};
+    std::array<MitCommand, 3> command{};
+    std::array<bool, 3> command_enabled{};
     std::array<double, 3> reference{}, debug_torque{};
 
     // HAL-owned feedback and per-axis CAN status.
-    std::array<openrobot::Feedback, 3> feedback{};
+    std::array<MotorFeedback, 3> feedback{};
+    std::array<double, 3> motor_torque{};  // Nm, converted by HAL using verified motor Kt.
     std::array<std::uint64_t, 3> received_ns{}, received_sequence{};
     std::array<std::uint64_t, 3> tx_frames{}, rx_frames{}, invalid_frames{};
     std::array<bool, 3> profile_verified{}, enable_requested{}, enabled{};
@@ -77,7 +31,6 @@ struct MotorData {
     // Simulation bootstrap, then runtime calibration.
     std::array<double, 3> position_offset{};
 
-    openrobot::MitProfile profile{};
     std::uint64_t command_sequence = 0, command_published_ns = 0;  // Controller
     std::uint64_t feedback_sequence = 0, feedback_published_ns = 0;  // HAL (sim in debug)
     std::uint64_t consumed_command_sequence = 0, last_tx_ns = 0, cycles = 0, socket_errors = 0;
@@ -122,6 +75,12 @@ struct SimulationData {
 };
 
 struct ShmData {
+    // The owner sets magic last, after initializing the process-shared synchronization.
+    std::uint64_t magic = 0;
+    std::uint32_t abi_version = kShmAbiVersion;
+    std::uint32_t buffer_count = kShmBufferCount;
+    std::uint64_t byte_size = 0;
+
     pthread_mutex_t mutex;
     pthread_cond_t changed;
     bool stopping = false, failed = false, simulation_finished = false, can_enabled = false;
@@ -130,8 +89,10 @@ struct ShmData {
     // published slot before updating their own fields; never publish a stale bank.
     std::uint64_t motor_sequence = 0, model_sequence = 0, control_sequence = 0,
                   simulation_sequence = 0;
-    std::array<MotorData, 2> motors{};
-    std::array<ModelData, 2> model{};
-    std::array<ControlData, 2> control{};
-    std::array<SimulationData, 2> simulation{};
+    std::array<MotorData, kShmBufferCount> motors{};
+    std::array<ModelData, kShmBufferCount> model{};
+    std::array<ControlData, kShmBufferCount> control{};
+    std::array<SimulationData, kShmBufferCount> simulation{};
 };
+
+inline constexpr std::size_t kShmByteSize = sizeof(ShmData);

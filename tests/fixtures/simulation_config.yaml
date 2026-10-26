@@ -1,0 +1,20 @@
+# Independent simulation truth. These values are never written to motor ROM or SHM.
+# Arrays follow HR / HP / KP; scalar sensor parameters apply to all three axes.
+motor:
+  kt_motor_nm_a: [0.16, 0.16, 0.16]  # Motor-shaft Kt; default 9 * 0.16 = 1.44 Nm/A.
+  gear_ratio: [9.0, 9.0, 9.0]
+  pole_pairs: [1, 1, 1]  # Simulation phase setting, not identified AK10-9 hardware data.
+  electrical_zero_rad: [0.0, 0.0, 0.0]
+
+iq_sensor:
+  enabled: false  # false restores the original ideal CAN current feedback.
+  gain: 1.0
+  offset_a: 0.0
+  noise_std_a: 0.02  # Gaussian noise per physics sample, before the low-pass filter.
+  ripple_amplitude_a: 0.01
+  ripple_harmonic: 6
+  ripple_phase_rad: 0.0
+  bandwidth_hz: 200.0  # 0 bypasses the sensor low-pass filter.
+  quantization_a: 0.005  # 0 bypasses sensor quantization; CAN quantization still applies.
+  current_limit_a: 40.0
+  random_seed: [12345, 12346, 12347]

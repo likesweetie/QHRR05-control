@@ -22,6 +22,44 @@ int main() {
 
     try {
         {
+            shm_utils::Mapping owner(name, true);
+            auto& shm = *owner.get();
+            Require(shm.magic == kShmMagic && shm.abi_version == kShmAbiVersion &&
+                        shm.byte_size == kShmByteSize && shm.buffer_count == kShmBufferCount,
+                "creator did not initialize the SHM protocol header");
+            {
+                shm_utils::Mapping reader(name);
+                Require(reader.get()->magic == kShmMagic, "valid SHM attach failed");
+            }
+
+            const auto reject = [&](const char* expected) {
+                bool rejected = false;
+
+                try {
+                    shm_utils::Mapping reader(name);
+                } catch (const std::runtime_error& error) {
+                    rejected = std::string(error.what()).find(expected) != std::string::npos;
+                }
+
+                Require(rejected, "incompatible SHM header was not explicitly rejected");
+                Require(shm.magic != 0, "attacher reinitialized the owner's header");
+            };
+
+            shm.magic ^= 1;
+            reject("magic mismatch");
+            shm.magic = kShmMagic;
+            ++shm.abi_version;
+            reject("ABI version mismatch");
+            shm.abi_version = kShmAbiVersion;
+            --shm.byte_size;
+            reject("header size mismatch");
+            shm.byte_size = kShmByteSize;
+            ++shm.buffer_count;
+            reject("buffer count mismatch");
+            shm.buffer_count = kShmBufferCount;
+        }
+
+        {
             shm_utils::Mapping mapping(name, true);
             auto& shm = *mapping.get();
             const auto launch = [&](bool feedback) {
@@ -39,10 +77,13 @@ int main() {
                             motors.command_sequence = sequence;
 
                         for (int i = 0; i < 3; ++i) {
-                            if (feedback)
+                            if (feedback) {
                                 motors.feedback[i].position = -double(sequence * (i + 1));
-                            else
+                                motors.motor_torque[i] = double(sequence * (i + 1));
+                            } else {
                                 motors.command[i].position = sequence * (i + 1);
+                                motors.command_enabled[i] = sequence % 2;
+                            }
                         }
 
                         ++shm.motor_sequence;
@@ -66,13 +107,18 @@ int main() {
                     while (shm.motor_sequence == seen)
                         lock.Wait();
 
-                    snapshot = shm.motors[shm.motor_sequence % 2];
+                    snapshot = shm.motors[shm.motor_sequence % kShmBufferCount];
                     seen = shm.motor_sequence;
                 }
 
                 for (int i = 0; i < 3; ++i) {
                     Require(snapshot.command[i].position == snapshot.command_sequence * (i + 1),
                         "torn command snapshot or feedback writer overwrote a command");
+                    Require(snapshot.command_enabled[i] == bool(snapshot.command_sequence % 2),
+                        "feedback writer overwrote the command enable request");
+                    Require(
+                        snapshot.motor_torque[i] == double(snapshot.feedback_sequence * (i + 1)),
+                        "command writer overwrote measured motor torque");
                     Require(snapshot.feedback[i].position ==
                                 -double(snapshot.feedback_sequence * (i + 1)),
                         "torn feedback snapshot or command writer overwrote feedback");

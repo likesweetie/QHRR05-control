@@ -21,16 +21,16 @@ inline void Check(int error, const char* operation) {
 inline std::uint64_t MonotonicNs() {
     timespec time{};
 
-    if (::clock_gettime(CLOCK_MONOTONIC, &time) != 0)
+    if (::clock_gettime(kShmClock, &time) != 0)
         Check(errno, "clock_gettime");
 
     return static_cast<std::uint64_t>(time.tv_sec) * 1000000000ULL + time.tv_nsec;
 }
 
 // Caller holds ShmData::mutex through the subsequent sequence increment.
-template <class T> T& Next(std::array<T, 2>& slots, std::uint64_t sequence) {
-    auto& next = slots[(sequence + 1) % 2];
-    next = slots[sequence % 2];
+template <class T> T& Next(std::array<T, kShmBufferCount>& slots, std::uint64_t sequence) {
+    auto& next = slots[(sequence + 1) % kShmBufferCount];
+    next = slots[sequence % kShmBufferCount];
     return next;
 }
 
@@ -106,13 +106,13 @@ public:
             throw std::runtime_error("SHM name must be / followed by a single name");
 
         const int flags = O_RDWR | O_CLOEXEC | (create ? O_CREAT | O_EXCL : 0);
-        const int fd = ::shm_open(name.c_str(), flags, 0600);
+        const int fd = ::shm_open(name.c_str(), flags, kShmPermissions);
 
         if (fd < 0)
             throw std::runtime_error("shm_open " + name + ": " + std::strerror(errno));
 
         try {
-            if (create && ::ftruncate(fd, sizeof(ShmData)) != 0)
+            if (create && ::ftruncate(fd, kShmByteSize) != 0)
                 Check(errno, "SHM size");
 
             struct stat stat {};
@@ -120,11 +120,11 @@ public:
             if (::fstat(fd, &stat) != 0)
                 Check(errno, "SHM stat");
 
-            if (stat.st_size != sizeof(ShmData))
+            if (stat.st_size != kShmByteSize)
                 throw std::runtime_error("SHM size mismatch: " + name);
 
             void* address =
-                ::mmap(nullptr, sizeof(ShmData), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                ::mmap(nullptr, kShmByteSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
             if (address == MAP_FAILED)
                 Check(errno, "SHM mmap");
@@ -146,11 +146,26 @@ public:
                 Check(::pthread_condattr_init(&cond_attr), "SHM condition attributes");
                 Check(::pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED),
                     "SHM condition sharing");
-                Check(::pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC),
-                    "SHM condition clock");
+                Check(::pthread_condattr_setclock(&cond_attr, kShmClock), "SHM condition clock");
                 const int cond_result = ::pthread_cond_init(&data_->changed, &cond_attr);
                 ::pthread_condattr_destroy(&cond_attr);
                 Check(cond_result, "SHM condition init");
+
+                data_->byte_size = kShmByteSize;
+                data_->magic = kShmMagic;
+            } else {
+                if (data_->magic != kShmMagic)
+                    throw std::runtime_error(
+                        "SHM magic mismatch or initialization incomplete: " + name);
+
+                if (data_->abi_version != kShmAbiVersion)
+                    throw std::runtime_error("SHM ABI version mismatch: " + name);
+
+                if (data_->byte_size != kShmByteSize)
+                    throw std::runtime_error("SHM header size mismatch: " + name);
+
+                if (data_->buffer_count != kShmBufferCount)
+                    throw std::runtime_error("SHM buffer count mismatch: " + name);
             }
 
             ::close(fd);
@@ -158,7 +173,7 @@ public:
             ::close(fd);
 
             if (data_)
-                ::munmap(data_, sizeof(ShmData));
+                ::munmap(data_, kShmByteSize);
 
             if (create)
                 ::shm_unlink(name.c_str());
@@ -168,7 +183,7 @@ public:
     }
 
     ~Mapping() {
-        ::munmap(data_, sizeof(ShmData));
+        ::munmap(data_, kShmByteSize);
 
         if (owner_)
             ::shm_unlink(name_.c_str());

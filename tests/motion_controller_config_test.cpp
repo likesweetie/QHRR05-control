@@ -75,6 +75,7 @@ homing:
         auto gravity = YAML::Load(R"(
 robot: qhrr-05
 gravity_compensation:
+  gravity_only: true
   kp_motor: 50
   kd_motor: [1,2,3]
   alpha: .5
@@ -84,13 +85,26 @@ gravity_compensation:
         qhrr05::GravityCompensationController compensation(path);
         const double desired[] = {.1, .2, .3}, position[] = {.2, .4, .6}, g[] = {1, 2, 3};
         compensation.Start(desired);
-        compensation.Compute(position, dq, g, torque, reference);
+        compensation.Compute(position, dq, g, g, torque, reference);
         const double expected_gravity[] = {.2, -.2, -1.2};
 
         for (int i = 0; i < 3; ++i)
             Require(std::abs(torque[i] - expected_gravity[i]) < 1e-10,
                 "gravity file parameters were not applied");
 
+        gravity["gravity_compensation"]["gravity_only"] = "invalid";
+        save(gravity);
+        reject([&] {
+            qhrr05::GravityCompensationController invalid(path);
+        });
+
+        gravity["gravity_compensation"].remove("gravity_only");
+        save(gravity);
+        reject([&] {
+            qhrr05::GravityCompensationController invalid(path);
+        });
+
+        gravity["gravity_compensation"]["gravity_only"] = true;
         gravity["kd"] = 999;
         gravity["gravity_compensation"].remove("kd_motor");
         save(gravity);

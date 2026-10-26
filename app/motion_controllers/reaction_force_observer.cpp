@@ -100,20 +100,29 @@ void ReactionForceObserver::Reset() {
     filtered_torque_.fill(0);
 }
 
-void ReactionForceObserver::Update(const MotionFeedback& f) {
-    for (const auto& values : {f.mass, f.jacobian})
+void ReactionForceObserver::Update(std::uint64_t measurement_sequence,
+    double measurement_dt,
+    const std::array<double, 3>& joint_velocity,
+    const std::array<double, 3>& joint_acceleration,
+    const std::array<double, 3>& motor_torque,
+    const std::array<double, 9>& mass_matrix,
+    const std::array<double, 9>& jacobian,
+    const std::array<double, 3>& bias_torque,
+    const std::array<double, 3>& passive_torque,
+    const std::array<double, 3>& friction_limit) {
+    for (const auto& values : {mass_matrix, jacobian})
         for (double value : values)
             if (!std::isfinite(value)) {
                 valid_ = false;
                 return;
             }
 
-    for (const auto& values : {f.acceleration,
-             f.motor_torque,
-             f.bias_torque,
-             f.passive_torque,
-             f.friction_limit,
-             f.velocity})
+    for (const auto& values : {joint_acceleration,
+             motor_torque,
+             bias_torque,
+             passive_torque,
+             friction_limit,
+             joint_velocity})
         for (double value : values)
             if (!std::isfinite(value)) {
                 valid_ = false;
@@ -125,7 +134,7 @@ void ReactionForceObserver::Update(const MotionFeedback& f) {
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
             for (int k = 0; k < 3; ++k)
-                jjt[3 * i + j] += f.jacobian[3 * i + k] * f.jacobian[3 * j + k];
+                jjt[3 * i + j] += jacobian[3 * i + k] * jacobian[3 * j + k];
 
     minimum_singular_value_ = std::sqrt(std::max(0.0, MinimumEigenvalue(jjt)));
 
@@ -134,39 +143,39 @@ void ReactionForceObserver::Update(const MotionFeedback& f) {
         return;
     }
 
-    if (!f.measurement_sequence || !std::isfinite(f.measurement_dt) || f.measurement_dt <= 0) {
+    if (!measurement_sequence || !std::isfinite(measurement_dt) || measurement_dt <= 0) {
         valid_ = false;
         return;
     }
 
-    if (f.measurement_sequence == measurement_)
+    if (measurement_sequence == measurement_)
         return;  // No duplicate differentiation/filter update.
 
-    if (f.measurement_sequence < measurement_)
+    if (measurement_sequence < measurement_)
         Reset();
 
-    const auto samples = measurement_ ? f.measurement_sequence - measurement_ : 1;
-    const double dt = f.measurement_dt * samples;
+    const auto samples = measurement_ ? measurement_sequence - measurement_ : 1;
+    const double dt = measurement_dt * samples;
     const double alpha = -std::expm1(-2 * 3.141592653589793 * bandwidth_ * dt);
 
     for (int i = 0; i < 3; ++i) {
-        double residual = f.bias_torque[i] - f.motor_torque[i] - f.passive_torque[i];
+        double residual = bias_torque[i] - motor_torque[i] - passive_torque[i];
 
         for (int j = 0; j < 3; ++j)
-            residual += f.mass[3 * i + j] * f.acceleration[j];
+            residual += mass_matrix[3 * i + j] * joint_acceleration[j];
 
         // Explicit smooth dry-friction MODEL, never actual constraint force.
-        residual += f.friction_limit[i] * std::tanh(f.velocity[i] / friction_velocity_);
+        residual += friction_limit[i] * std::tanh(joint_velocity[i] / friction_velocity_);
         filtered_torque_[i] += alpha * (residual - filtered_torque_[i]);
     }
 
-    measurement_ = f.measurement_sequence;
+    measurement_ = measurement_sequence;
 
     std::array<double, 3> rhs{};
 
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j)
-            rhs[i] += f.jacobian[3 * i + j] * filtered_torque_[j];
+            rhs[i] += jacobian[3 * i + j] * filtered_torque_[j];
 
         jjt[3 * i + i] += regularization_ * regularization_;
     }

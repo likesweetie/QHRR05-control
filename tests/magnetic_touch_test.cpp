@@ -14,26 +14,48 @@ int main(int argc, char** argv) {
     try {
         Require(argc == 3, "expected config and scene");
         qhrr05::ReactionForceObserver observer(argv[1]);
-        qhrr05::MotionFeedback feedback;
-        feedback.measurement_dt = .001;
-        feedback.jacobian = {.18, .02, -.01, .04, .25, .03, .01, -.02, .22};
-        feedback.mass = {.1, 0, 0, 0, .2, 0, 0, 0, .3};
-        feedback.bias_torque = {1, 2, 3};
-        feedback.acceleration = {.3, -.2, .1};
-        feedback.passive_torque = {-.2, .1, -.3};
+        std::array<double, 3> joint_position{};
+        std::array<double, 3> joint_velocity{};
+        std::array<double, 3> joint_acceleration{};
+        std::array<double, 3> motor_torque{};
+        std::array<double, 3> gravity_torque{};
+        std::array<double, 3> bias_torque{};
+        std::array<double, 3> passive_torque{};
+        std::array<double, 3> friction_limit{};
+        std::array<double, 9> mass_matrix{};
+        std::array<double, 9> jacobian{};
+        std::array<double, 3> toe_position{};
+        std::array<double, 3> joint_min{};
+        std::array<double, 3> joint_max{};
+        std::uint64_t measurement_sequence = 0;
+        double measurement_dt = .001;
+        jacobian = {.18, .02, -.01, .04, .25, .03, .01, -.02, .22};
+        mass_matrix = {.1, 0, 0, 0, .2, 0, 0, 0, .3};
+        bias_torque = {1, 2, 3};
+        joint_acceleration = {.3, -.2, .1};
+        passive_torque = {-.2, .1, -.3};
         const double expected[] = {2, -1, 3};
 
         for (int i = 0; i < 3; ++i) {
-            feedback.motor_torque[i] = feedback.mass[3 * i + i] * feedback.acceleration[i] +
-                                       feedback.bias_torque[i] - feedback.passive_torque[i];
+            motor_torque[i] =
+                mass_matrix[3 * i + i] * joint_acceleration[i] + bias_torque[i] - passive_torque[i];
 
             for (int j = 0; j < 3; ++j)
-                feedback.motor_torque[i] -= feedback.jacobian[3 * j + i] * expected[j];
+                motor_torque[i] -= jacobian[3 * j + i] * expected[j];
         }
 
         for (int i = 1; i <= 300; ++i) {
-            feedback.measurement_sequence = i;
-            observer.Update(feedback);
+            measurement_sequence = i;
+            observer.Update(measurement_sequence,
+                measurement_dt,
+                joint_velocity,
+                joint_acceleration,
+                motor_torque,
+                mass_matrix,
+                jacobian,
+                bias_torque,
+                passive_torque,
+                friction_limit);
         }
 
         Require(observer.valid(), "RFOB rejected a full-rank Jacobian");
@@ -43,33 +65,73 @@ int main(int argc, char** argv) {
                 "RFOB residual force/sign is wrong");
 
         const auto previous = observer.force();
-        feedback.motor_torque.fill(100);
-        observer.Update(feedback);
+        motor_torque.fill(100);
+        observer.Update(measurement_sequence,
+            measurement_dt,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            mass_matrix,
+            jacobian,
+            bias_torque,
+            passive_torque,
+            friction_limit);
         Require(observer.force() == previous, "RFOB processed a repeated measurement");
-        feedback.jacobian.fill(0);
-        observer.Update(feedback);
+        jacobian.fill(0);
+        observer.Update(measurement_sequence,
+            measurement_dt,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            mass_matrix,
+            jacobian,
+            bias_torque,
+            passive_torque,
+            friction_limit);
         Require(!observer.valid(), "RFOB accepted a singular pose");
 
         qhrr05::MagneticTouchController magnetic(argv[1]);
-        feedback = {};
-        feedback.measurement_dt = .001;
-        feedback.jacobian = {.2, 0, 0, 0, .2, 0, 0, 0, .2};
-        feedback.mass = {.1, 0, 0, 0, .1, 0, 0, 0, .1};
-        feedback.position = {0, .9, -1.8};
-        feedback.gravity_torque = feedback.bias_torque = {1, 2, -.5};
-        feedback.toe_position = {.2, .14, .18};
-        feedback.joint_min = {-1, -1, -3};
-        feedback.joint_max = {1, 3, -.5};
+        joint_position = joint_velocity = joint_acceleration = motor_torque = {};
+        gravity_torque = bias_torque = passive_torque = friction_limit = {};
+        mass_matrix = jacobian = {};
+        toe_position = joint_min = joint_max = {};
+        measurement_sequence = 0;
+        measurement_dt = .001;
+        jacobian = {.2, 0, 0, 0, .2, 0, 0, 0, .2};
+        mass_matrix = {.1, 0, 0, 0, .1, 0, 0, 0, .1};
+        joint_position = {0, .9, -1.8};
+        gravity_torque = bias_torque = {1, 2, -.5};
+        toe_position = {.2, .14, .18};
+        joint_min = {-1, -1, -3};
+        joint_max = {1, 3, -.5};
         std::array<double, 3> torque, reference;
-        magnetic.Start(0, feedback);
+        magnetic.Start(0, toe_position);
         double release_position = 0, release_start = -1;
 
         for (int i = 1; i <= 700; ++i) {
-            feedback.measurement_sequence = i;
+            measurement_sequence = i;
             const double external = i > 200 && i < 550 ? -2.0 : 0.0;
-            feedback.motor_torque = feedback.gravity_torque;
-            feedback.motor_torque[0] -= .2 * external;
-            magnetic.Compute(i * .001, feedback, 3, torque, reference);
+            motor_torque = gravity_torque;
+            motor_torque[0] -= .2 * external;
+            magnetic.Compute(i * .001,
+                joint_position,
+                joint_velocity,
+                joint_acceleration,
+                motor_torque,
+                gravity_torque,
+                bias_torque,
+                passive_torque,
+                friction_limit,
+                mass_matrix,
+                jacobian,
+                toe_position,
+                joint_min,
+                joint_max,
+                measurement_sequence,
+                measurement_dt,
+                3,
+                torque,
+                reference);
             const auto& telemetry = magnetic.telemetry();
 
             if (telemetry.phase == MagneticPhase::Releasing) {
@@ -96,8 +158,8 @@ int main(int argc, char** argv) {
             if (i == 500) {
                 Require(telemetry.phase == MagneticPhase::Following, "contact was not detected");
                 Require(telemetry.normal[0] > .99, "push direction sign is wrong");
-                Require(torque[0] > feedback.gravity_torque[0],
-                    "contact force did not affect torque target");
+                Require(
+                    torque[0] > gravity_torque[0], "contact force did not affect torque target");
             }
 
             if (i == 690)
@@ -106,47 +168,173 @@ int main(int argc, char** argv) {
                     "contact release failed");
         }
 
-        feedback.toe_position[0] = 1;
-        magnetic.Compute(.701, feedback, 3, torque, reference);
+        toe_position[0] = 1;
+        magnetic.Compute(.701,
+            joint_position,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            gravity_torque,
+            bias_torque,
+            passive_torque,
+            friction_limit,
+            mass_matrix,
+            jacobian,
+            toe_position,
+            joint_min,
+            joint_max,
+            measurement_sequence,
+            measurement_dt,
+            3,
+            torque,
+            reference);
         Require(magnetic.telemetry().reason == MagneticReason::Workspace,
             "workspace exit was not reported");
 
-        feedback.toe_position = {.2, .14, .18};
+        toe_position = {.2, .14, .18};
         qhrr05::MagneticTouchController bounded(argv[1]);
-        bounded.Start(1, feedback);
-        feedback.motor_torque = feedback.gravity_torque;
-        feedback.motor_torque[0] += .4;
+        bounded.Start(1, toe_position);
+        motor_torque = gravity_torque;
+        motor_torque[0] += .4;
 
         for (int i = 1; i <= 300; ++i) {
-            feedback.measurement_sequence = 800 + i;
-            bounded.Compute(1 + i * .001, feedback, 3, torque, reference);
+            measurement_sequence = 800 + i;
+            bounded.Compute(1 + i * .001,
+                joint_position,
+                joint_velocity,
+                joint_acceleration,
+                motor_torque,
+                gravity_torque,
+                bias_torque,
+                passive_torque,
+                friction_limit,
+                mass_matrix,
+                jacobian,
+                toe_position,
+                joint_min,
+                joint_max,
+                measurement_sequence,
+                measurement_dt,
+                3,
+                torque,
+                reference);
         }
 
         Require(bounded.telemetry().phase == MagneticPhase::Following,
             "bounded trial did not enter following");
-        feedback.toe_position[0] += .02;
-        bounded.Compute(1.301, feedback, 3, torque, reference);
+        toe_position[0] += .02;
+        bounded.Compute(1.301,
+            joint_position,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            gravity_torque,
+            bias_torque,
+            passive_torque,
+            friction_limit,
+            mass_matrix,
+            jacobian,
+            toe_position,
+            joint_min,
+            joint_max,
+            measurement_sequence,
+            measurement_dt,
+            3,
+            torque,
+            reference);
         Require(bounded.telemetry().phase == MagneticPhase::Free &&
                     bounded.telemetry().reason == MagneticReason::StrokeLimit,
             "actual following distance limit did not release");
-        feedback.toe_position = {.2, .14, .18};
-        feedback.position[0] = .99;
-        bounded.Compute(1.302, feedback, 3, torque, reference);
+        toe_position = {.2, .14, .18};
+        joint_position[0] = .99;
+        bounded.Compute(1.302,
+            joint_position,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            gravity_torque,
+            bias_torque,
+            passive_torque,
+            friction_limit,
+            mass_matrix,
+            jacobian,
+            toe_position,
+            joint_min,
+            joint_max,
+            measurement_sequence,
+            measurement_dt,
+            3,
+            torque,
+            reference);
         Require(bounded.telemetry().reason == MagneticReason::JointLimit,
             "joint limit was not reported");
-        feedback.position[0] = 0;
-        feedback.jacobian.fill(0);
-        bounded.Compute(1.303, feedback, 3, torque, reference);
+        joint_position[0] = 0;
+        jacobian.fill(0);
+        bounded.Compute(1.303,
+            joint_position,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            gravity_torque,
+            bias_torque,
+            passive_torque,
+            friction_limit,
+            mass_matrix,
+            jacobian,
+            toe_position,
+            joint_min,
+            joint_max,
+            measurement_sequence,
+            measurement_dt,
+            3,
+            torque,
+            reference);
         Require(bounded.telemetry().reason == MagneticReason::ObserverInvalid,
             "invalid observer did not disable following");
-        feedback.gravity_torque[0] = 1000;
-        bounded.Compute(1.304, feedback, 3, torque, reference);
+        gravity_torque[0] = 1000;
+        bounded.Compute(1.304,
+            joint_position,
+            joint_velocity,
+            joint_acceleration,
+            motor_torque,
+            gravity_torque,
+            bias_torque,
+            passive_torque,
+            friction_limit,
+            mass_matrix,
+            jacobian,
+            toe_position,
+            joint_min,
+            joint_max,
+            measurement_sequence,
+            measurement_dt,
+            3,
+            torque,
+            reference);
         Require(bounded.telemetry().torque_saturated && torque[0] == 23.7,
             "magnetic torque saturation failed");
         bool target_rejected = false;
 
         try {
-            bounded.Compute(1.305, feedback, 6, torque, reference);
+            bounded.Compute(1.305,
+                joint_position,
+                joint_velocity,
+                joint_acceleration,
+                motor_torque,
+                gravity_torque,
+                bias_torque,
+                passive_torque,
+                friction_limit,
+                mass_matrix,
+                jacobian,
+                toe_position,
+                joint_min,
+                joint_max,
+                measurement_sequence,
+                measurement_dt,
+                6,
+                torque,
+                reference);
         } catch (const std::exception&) {
             target_rejected = true;
         }
@@ -178,7 +366,7 @@ int main(int argc, char** argv) {
         shm_utils::Mapping mapping("/qhrr05-magnetic-test-" + std::to_string(getpid()), true);
         auto& shm = *mapping.get();
         qhrr05::MagneticTouchController controller(argv[1]);
-        controller.Start(0, feedback);
+        controller.Start(0, toe_position);
         std::array<double, 3> acceleration{};
         double sum_gt = 0, sum_est = 0, sum_squared = 0, peak = 0;
         int count = 0, following = 0;
@@ -198,19 +386,34 @@ int main(int argc, char** argv) {
                 center = toe_x + .09;
             data->mocap_pos[3 * mocap] = center;
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference, step);
-            qhrr05::MotionFeedback state;
-            static_cast<ModelData&>(state) = shm.model[shm.model_sequence % 2];
-            const auto motors = shm.motors[shm.motor_sequence % 2];
-            state.acceleration = acceleration;
-            state.measurement_sequence = step;
-            state.measurement_dt = model->opt.timestep;
+            const auto model_state = shm.model[shm.model_sequence % kShmBufferCount];
+            const auto motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+            std::array<double, 3> physical_position, physical_velocity;
 
             for (int i = 0; i < 3; ++i) {
-                state.position[i] = motors.position_offset[i] + motors.feedback[i].position;
-                state.velocity[i] = motors.feedback[i].velocity;
-                state.motor_torque[i] = motors.feedback[i].current * motors.profile.kt_output;
+                physical_position[i] = motors.position_offset[i] + motors.feedback[i].position;
+                physical_velocity[i] = motors.feedback[i].velocity;
             }
-            controller.Compute(time, state, 3, torque, reference);
+
+            controller.Compute(time,
+                physical_position,
+                physical_velocity,
+                acceleration,
+                motors.motor_torque,
+                model_state.gravity_torque,
+                model_state.bias_torque,
+                model_state.passive_torque,
+                model_state.friction_limit,
+                model_state.mass,
+                model_state.jacobian,
+                model_state.toe_position,
+                model_state.joint_min,
+                model_state.joint_max,
+                step,
+                model->opt.timestep,
+                3,
+                torque,
+                reference);
             {
                 shm_utils::Lock lock(shm);
                 auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);

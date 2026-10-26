@@ -28,6 +28,7 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
         throw std::runtime_error("only qhrr-05 is supported");
 
     const auto s = config["magnetic_touch"];
+    gravity_only_ = s["gravity_only"].as<bool>();
     const auto scalar = [&](const char* key) {
         const double value = s[key].as<double>();
 
@@ -111,12 +112,12 @@ void MagneticTouchController::Release(MagneticReason reason, double time) {
     armed_ = false;
 }
 
-void MagneticTouchController::Start(double time, const MotionFeedback& feedback) {
+void MagneticTouchController::Start(double time, const std::array<double, 3>& toe_position) {
     const auto event = telemetry_.event_sequence + 1;
     telemetry_ = {};
     telemetry_.event_sequence = event;
     telemetry_.event_time = time;
-    telemetry_.toe_reference = feedback.toe_position;
+    telemetry_.toe_reference = toe_position;
 
     observer_.Reset();
 
@@ -126,7 +127,21 @@ void MagneticTouchController::Start(double time, const MotionFeedback& feedback)
 }
 
 void MagneticTouchController::Compute(double time,
-    const MotionFeedback& f,
+    const std::array<double, 3>& joint_position,
+    const std::array<double, 3>& joint_velocity,
+    const std::array<double, 3>& joint_acceleration,
+    const std::array<double, 3>& motor_torque,
+    const std::array<double, 3>& gravity_torque,
+    const std::array<double, 3>& bias_torque,
+    const std::array<double, 3>& passive_torque,
+    const std::array<double, 3>& friction_limit,
+    const std::array<double, 9>& mass_matrix,
+    const std::array<double, 9>& jacobian,
+    const std::array<double, 3>& toe_position,
+    const std::array<double, 3>& joint_min,
+    const std::array<double, 3>& joint_max,
+    std::uint64_t measurement_sequence,
+    double measurement_dt,
     double target_force,
     std::array<double, 3>& torque,
     std::array<double, 3>& reference) {
@@ -137,7 +152,16 @@ void MagneticTouchController::Compute(double time,
     const double dt = time - previous_time_;
     previous_time_ = time;
 
-    observer_.Update(f);
+    observer_.Update(measurement_sequence,
+        measurement_dt,
+        joint_velocity,
+        joint_acceleration,
+        motor_torque,
+        mass_matrix,
+        jacobian,
+        bias_torque,
+        passive_torque,
+        friction_limit);
 
     telemetry_.observer_valid = observer_.valid();
     telemetry_.estimated_force = observer_.force();
@@ -147,10 +171,11 @@ void MagneticTouchController::Compute(double time,
     telemetry_.force_command = 0;
     telemetry_.torque_saturated = false;
 
-    reference = f.position;
+    reference = joint_position;
+    const auto& compensation = gravity_only_ ? gravity_torque : bias_torque;
 
     for (int i = 0; i < 3; ++i) {
-        torque[i] = f.gravity_torque[i] - damping_[i] * f.velocity[i];
+        torque[i] = compensation[i] - damping_[i] * joint_velocity[i];
 
         if (!std::isfinite(torque[i]))
             throw std::runtime_error("invalid magnetic joint feedback");
@@ -158,13 +183,13 @@ void MagneticTouchController::Compute(double time,
 
     const auto bounds = [&]() {
         for (int i = 0; i < 3; ++i) {
-            if (!std::isfinite(f.toe_position[i]) || f.toe_position[i] < workspace_min_[i] ||
-                f.toe_position[i] > workspace_max_[i])
+            if (!std::isfinite(toe_position[i]) || toe_position[i] < workspace_min_[i] ||
+                toe_position[i] > workspace_max_[i])
                 return MagneticReason::Workspace;
 
-            if (f.joint_max[i] > f.joint_min[i] &&
-                (f.position[i] < f.joint_min[i] + joint_margin_ ||
-                    f.position[i] > f.joint_max[i] - joint_margin_))
+            if (joint_max[i] > joint_min[i] &&
+                (joint_position[i] < joint_min[i] + joint_margin_ ||
+                    joint_position[i] > joint_max[i] - joint_margin_))
                 return MagneticReason::JointLimit;
         }
 
@@ -172,12 +197,12 @@ void MagneticTouchController::Compute(double time,
     };
 
     MagneticReason invalid =
-        !f.measurement_sequence ? MagneticReason::NoMeasurement
-                                : (!observer_.valid() ? MagneticReason::ObserverInvalid : bounds());
+        !measurement_sequence ? MagneticReason::NoMeasurement
+                              : (!observer_.valid() ? MagneticReason::ObserverInvalid : bounds());
 
     if (invalid != MagneticReason::None) {
         Release(invalid, time);
-        telemetry_.toe_reference = f.toe_position;
+        telemetry_.toe_reference = toe_position;
     } else {
         const double magnitude = Norm(telemetry_.estimated_force);
 
@@ -190,13 +215,13 @@ void MagneticTouchController::Compute(double time,
         }
 
         if (telemetry_.phase == MagneticPhase::Free) {
-            telemetry_.toe_reference = f.toe_position;
+            telemetry_.toe_reference = toe_position;
             telemetry_.estimated_normal_force = magnitude;
 
             if (armed_ && magnitude > contact_on_)
                 Transition(MagneticPhase::Candidate, MagneticReason::None, time);
         } else if (telemetry_.phase == MagneticPhase::Candidate) {
-            telemetry_.toe_reference = f.toe_position;
+            telemetry_.toe_reference = toe_position;
             telemetry_.estimated_normal_force = magnitude;
 
             if (magnitude < contact_cancel_)
@@ -205,7 +230,7 @@ void MagneticTouchController::Compute(double time,
                 for (int i = 0; i < 3; ++i)
                     telemetry_.normal[i] = -telemetry_.estimated_force[i] / magnitude;
 
-                contact_position_ = f.toe_position;
+                contact_position_ = toe_position;
                 telemetry_.displacement = 0;
 
                 ramp_from_ = ramped_force_ = 0;
@@ -222,10 +247,10 @@ void MagneticTouchController::Compute(double time,
             std::array<double, 3> delta{}, velocity{};
 
             for (int i = 0; i < 3; ++i) {
-                delta[i] = f.toe_position[i] - contact_position_[i];
+                delta[i] = toe_position[i] - contact_position_[i];
 
                 for (int j = 0; j < 3; ++j)
-                    velocity[i] += f.jacobian[3 * i + j] * f.velocity[j];
+                    velocity[i] += jacobian[3 * i + j] * joint_velocity[j];
             }
 
             if (Norm(delta) > maximum_distance_)
@@ -274,7 +299,7 @@ void MagneticTouchController::Compute(double time,
                     std::array<double, 3> tracking{};
 
                     for (int i = 0; i < 3; ++i)
-                        tracking[i] = telemetry_.toe_reference[i] - f.toe_position[i];
+                        tracking[i] = telemetry_.toe_reference[i] - toe_position[i];
 
                     const double raw_force = ramped_force_ + force_gain_ * error +
                                              stiffness_ * Dot(telemetry_.normal, tracking) -
@@ -286,8 +311,8 @@ void MagneticTouchController::Compute(double time,
                         double contact_torque = 0;
 
                         for (int axis = 0; axis < 3; ++axis)
-                            contact_torque += f.jacobian[3 * axis + joint] *
-                                              telemetry_.normal[axis] * telemetry_.force_command;
+                            contact_torque += jacobian[3 * axis + joint] * telemetry_.normal[axis] *
+                                              telemetry_.force_command;
 
                         torque[joint] += contact_torque;
                         saturated |= std::abs(torque[joint]) > torque_limit_[joint];
@@ -306,7 +331,7 @@ void MagneticTouchController::Compute(double time,
     }
 
     if (telemetry_.phase == MagneticPhase::Free)
-        telemetry_.toe_reference = f.toe_position;
+        telemetry_.toe_reference = toe_position;
 
     for (int i = 0; i < 3; ++i) {
         telemetry_.torque_saturated |= std::abs(torque[i]) > torque_limit_[i];

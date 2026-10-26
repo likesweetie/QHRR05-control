@@ -1,7 +1,7 @@
 #pragma once
 
 #include <mujoco/mujoco.h>
-#include "shared_memory.hpp"
+#include "control_types.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,7 +13,7 @@ struct Sample {
     double time = 0, control_time = 0;
     std::uint64_t run_id = 0;
     int mode = 0;
-    std::array<double, 3> position{}, reference{}, torque{};
+    std::array<double, 3> position{}, reference{}, measured_torque{};
     MagneticTelemetry magnetic{};
     std::array<double, 3> toe_position{}, contact_force{}, contact_torque{}, object_position{};
 };
@@ -36,8 +36,9 @@ public:
 
         std::snprintf(
             figures_[0].title, sizeof(figures_[0].title), "Joint angle [rad] - measured/reference");
-        std::snprintf(
-            figures_[1].title, sizeof(figures_[1].title), "Actuator torque [N m] - actual output");
+        std::snprintf(figures_[1].title,
+            sizeof(figures_[1].title),
+            "Actuator torque [N m] - measured feedback");
         std::snprintf(figures_[2].title,
             sizeof(figures_[2].title),
             "Contact force [N] - equivalent estimate/GT");
@@ -125,7 +126,7 @@ public:
             for (int i = 0; i < 3; ++i) {
                 Add(figures_[0], i, sample.time, sample.position[i]);
                 Add(figures_[0], i + 3, sample.time, sample.reference[i]);
-                Add(figures_[1], i, sample.time, sample.torque[i]);
+                Add(figures_[1], i, sample.time, sample.measured_torque[i]);
                 Add(figures_[3], i, sample.time, sample.toe_position[i]);
                 Add(figures_[3], i + 3, sample.time, m.toe_reference[i]);
                 error += std::pow(sample.toe_position[i] - m.toe_reference[i], 2);

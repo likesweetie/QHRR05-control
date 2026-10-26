@@ -12,10 +12,27 @@ function(expect_result expected_code expected_message)
     endif()
 endfunction()
 function(write_manifest path control)
-    file(WRITE "${path}" "debug_processes:\n  - name: simulator\n    exec_path: '${SIMULATOR}'\n    wait_ready: true\n    args: ['--create-shm', '--without-can', '--model', '${MODEL}', '--control-config', '${control}', '--shm-name', '/qhrr05-startup-${shm_suffix}', '--headless', '--duration', '4']\n  - name: controller\n    exec_path: '${CONTROLLER}'\n    args: ['${control}', '/qhrr05-startup-${shm_suffix}', '--without-can']\n")
+    file(WRITE "${path}" "shm_name: /qhrr05-startup-${shm_suffix}\nmonitoring: {display_interval_sec: 2, window_sec: 10, sample_hz: 100}\ndebug_processes:\n  - name: simulator\n    exec_path: '${SIMULATOR}'\n    wait_ready: true\n    args: ['--without-can', '--model', '${MODEL}', '--control-config', '${control}', '--shm-name', '{shm_name}', '--headless', '--duration', '4']\n  - name: controller\n    exec_path: '${CONTROLLER}'\n    args: ['${control}', '{shm_name}', '--without-can']\n")
 endfunction()
 expect_result(1 "usage: task_controller CONTROL_CONFIG SHM_NAME" "${CONTROLLER}")
+expect_result(1 "--simulation-config is required" "${SIMULATOR}"
+    --model "${MODEL}" --control-config "${CONTROL_CONFIG}"
+    --shm-name /qhrr05-iq-missing-config --hal-config unused.yaml)
+expect_result(1 "unavailable with --without-can" "${SIMULATOR}"
+    --model "${MODEL}" --control-config "${CONTROL_CONFIG}"
+    --shm-name /qhrr05-iq-no-can --without-can --simulation-config unused.yaml)
 expect_result(1 "usage: daemon" "${DAEMON}" --robot other-platform)
+file(WRITE "${TEST_DIR}/missing-shm.yaml"
+    "processes:\n  - name: completed\n    exec_path: /bin/true\n    args: []\n")
+expect_result(1 "daemon config requires shm_name" "${DAEMON}"
+    --config "${TEST_DIR}/missing-shm.yaml")
+file(WRITE "${TEST_DIR}/bad-shm.yaml"
+    "shm_name: invalid/name\nprocesses:\n  - name: completed\n    exec_path: /bin/true\n    args: []\n")
+expect_result(1 "daemon shm_name must be" "${DAEMON}"
+    --config "${TEST_DIR}/bad-shm.yaml")
+expect_result(1 "shm_open" "${SIMULATOR}" --without-can --model "${MODEL}"
+    --control-config "${CONTROL_CONFIG}" --shm-name /qhrr05-missing-owner-${shm_suffix}
+    --headless --duration 1)
 file(READ "${CONTROL_CONFIG}" config_text)
 foreach(kind other nan limits)
     if(kind STREQUAL "other")
@@ -30,14 +47,30 @@ foreach(kind other nan limits)
     endif()
     file(WRITE "${TEST_DIR}/${kind}.yaml" "${invalid}")
     write_manifest("${TEST_DIR}/${kind}-processes.yaml" "${TEST_DIR}/${kind}.yaml")
-    expect_result(1 "${expected}" "${DAEMON}" --config "${TEST_DIR}/${kind}-processes.yaml" --without-can)
+    expect_result(1 "${expected}" "${DAEMON}" --no-terminals --config "${TEST_DIR}/${kind}-processes.yaml" --without-can)
 endforeach()
 file(WRITE "${TEST_DIR}/empty.yaml" "processes: []\n")
-expect_result(1 "nonempty processes" "${DAEMON}" --config "${TEST_DIR}/empty.yaml")
-expect_result(1 "nonempty debug_processes" "${DAEMON}" --config "${TEST_DIR}/empty.yaml" --without-can)
+expect_result(1 "nonempty processes" "${DAEMON}" --no-terminals --config "${TEST_DIR}/empty.yaml")
+expect_result(1 "nonempty debug_processes" "${DAEMON}" --no-terminals --config "${TEST_DIR}/empty.yaml" --without-can)
 write_manifest("${TEST_DIR}/valid.yaml" "${CONTROL_CONFIG}")
-expect_result(1 "nonempty processes" "${DAEMON}" --config "${TEST_DIR}/valid.yaml")
-execute_process(COMMAND "${DAEMON}" --config "${TEST_DIR}/valid.yaml" --without-can
+file(READ "${TEST_DIR}/valid.yaml" valid_manifest)
+foreach(kind interval window sample)
+    if(kind STREQUAL "interval")
+        string(REPLACE "display_interval_sec: 2" "display_interval_sec: 1" invalid_manifest "${valid_manifest}")
+        set(expected "monitoring.display_interval_sec")
+    elseif(kind STREQUAL "window")
+        string(REPLACE "window_sec: 10" "window_sec: .nan" invalid_manifest "${valid_manifest}")
+        set(expected "monitoring.window_sec")
+    else()
+        string(REPLACE "sample_hz: 100" "sample_hz: 0" invalid_manifest "${valid_manifest}")
+        set(expected "monitoring.sample_hz")
+    endif()
+    file(WRITE "${TEST_DIR}/bad-${kind}.yaml" "${invalid_manifest}")
+    expect_result(1 "${expected}" "${DAEMON}" --no-terminals
+        --config "${TEST_DIR}/bad-${kind}.yaml" --without-can)
+endforeach()
+expect_result(1 "nonempty processes" "${DAEMON}" --no-terminals --config "${TEST_DIR}/valid.yaml")
+execute_process(COMMAND "${DAEMON}" --no-terminals --config "${TEST_DIR}/valid.yaml" --without-can
     WORKING_DIRECTORY "${TEST_DIR}"
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 15)
 if(NOT result EQUAL 0 OR NOT output MATCHES "stopped at t=4")
