@@ -11,6 +11,8 @@ import tempfile
 import time
 from PIL import ImageGrab
 
+from daemon_test_config import simulation_command
+
 root = Path(__file__).resolve().parents[1]
 
 with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
@@ -18,13 +20,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-magnetic-gui-') as tmp:
 
     with log.open('w') as stream:
         process = subprocess.Popen(
-            [
-                str(root / 'build/daemon'),
-                '--shm-name',
-                f'/qhrr05-mag-gui-{os.getpid()}',
-                '--csv',
-                str(csv_path),
-            ],
+            simulation_command(tmp, f'/qhrr05-mag-gui-{os.getpid()}', csv_path),
             stdout=stream,
             stderr=subprocess.STDOUT,
         )

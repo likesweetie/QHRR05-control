@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <pthread.h>
+#include "motor_can/openrobot_protocol.hpp"
 
 // Fixed qhrr-05 joint order: FL hip, thigh, calf. All accesses use ShmData::mutex.
 struct ShmState {
@@ -118,6 +119,27 @@ struct ShmJoystick {
     std::array<bool, 11> buttons{};
 };
 
+// Separate CAN HAL transport channels. No torque/feedforward input exists.
+struct ShmMotorTargets {
+    std::uint64_t sequence = 0, published_ns = 0;
+    std::array<openrobot::PositionTarget, 3> motors{};
+};
+
+struct ShmCanMotor {
+    openrobot::Feedback feedback{};
+    std::uint64_t received_ns = 0, feedback_sequence = 0;
+    std::uint64_t tx_frames = 0, rx_frames = 0, invalid_frames = 0;
+    bool profile_verified = false, enable_requested = false, enabled = false;
+};
+
+struct ShmCanState {
+    openrobot::MitProfile profile{};
+    std::uint64_t sequence = 0, published_ns = 0, command_sequence = 0;
+    std::uint64_t last_tx_ns = 0, cycles = 0, socket_errors = 0;
+    bool running = false;
+    std::array<ShmCanMotor, 3> motors{};
+};
+
 struct ShmData {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
@@ -135,4 +157,8 @@ struct ShmData {
     std::array<ShmCommand, 2> commands{};
     std::array<ShmSample, 2> samples{};
     std::array<ShmJoystick, 2> joystick{};
+
+    std::uint64_t motor_target_sequence = 0, can_state_sequence = 0;
+    std::array<ShmMotorTargets, 2> motor_targets{};
+    std::array<ShmCanState, 2> can_states{};
 };

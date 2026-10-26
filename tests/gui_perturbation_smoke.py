@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import time
 
+from daemon_test_config import simulation_command
+
 root = Path(__file__).resolve().parents[1]
 
 
@@ -24,13 +26,7 @@ for button, width, height, calf_x, calf_y in [(3, 1600, 900, 750, 565), (1, 1400
 
         with log.open('w') as stream:
             process = subprocess.Popen(
-                [
-                    str(root / 'build/daemon'),
-                    '--shm-name',
-                    f'/qhrr05-drag-{os.getpid()}-{button}',
-                    '--csv',
-                    str(csv_path),
-                ],
+                simulation_command(tmp, f'/qhrr05-drag-{os.getpid()}-{button}', csv_path),
                 stdout=stream,
                 stderr=subprocess.STDOUT,
                 cwd='/tmp',

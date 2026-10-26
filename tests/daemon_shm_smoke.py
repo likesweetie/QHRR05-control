@@ -10,6 +10,8 @@ import signal
 import subprocess
 import tempfile
 
+from daemon_test_config import simulation_command
+
 root = Path(__file__).resolve().parents[1]
 libc = ctypes.CDLL(None, use_errno=True)
 
@@ -25,10 +27,10 @@ def assert_unlinked(name):
 
 with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
     name = f'/qhrr05-daemon-test-{os.getpid()}'
-    command = [str(root / 'build/daemon'), '--shm-name', name]
+    command = simulation_command(tmp, name, Path(tmp) / 'telemetry.csv', duration=4)
     csv_path = Path(tmp) / 'telemetry.csv'
     result = subprocess.run(
-        command + ['--headless', '--duration', '4', '--csv', str(csv_path)],
+        command,
         capture_output=True,
         text=True,
         timeout=15,
@@ -59,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
 
     original = csv_path.read_bytes()
     result = subprocess.run(
-        command + ['--headless', '--duration', '4', '--csv', str(csv_path)],
+        command,
         capture_output=True,
         text=True,
         timeout=15,
@@ -76,9 +78,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
 
     try:
         os.write(fd, b'pre-existing-shm')
-        result = subprocess.run(
-            command + ['--headless', '--duration', '.1'], capture_output=True, text=True, timeout=15
-        )
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
 
         assert result.returncode != 0
         assert os.fstat(fd).st_size == len(b'pre-existing-shm')
@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
 
     for action in ['kill_controller', 'stop_daemon']:
         process = subprocess.Popen(
-            command + ['--headless', '--duration', '100000'],
+            simulation_command(tmp, name, duration=100000),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -112,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
                 if match:
                     controller = int(match.group(1))
 
-                if '[simulate] qhrr-05 viewer' in line:
+                if controller:
                     break
 
             assert controller and process.poll() is None, ''.join(output)

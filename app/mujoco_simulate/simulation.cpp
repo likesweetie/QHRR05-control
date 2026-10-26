@@ -4,8 +4,200 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <iostream>
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
 namespace qhrr05 {
+VirtualMotors::VirtualMotors(
+    const std::string& config_path, const std::array<double, 3>& encoder_origin)
+    : encoder_origin_(encoder_origin) {
+    const auto config = YAML::LoadFile(config_path);
+    const auto interface = config["interface"].as<std::string>();
+    const auto ids = config["motor_ids"].as<std::vector<unsigned>>();
+    const auto mit = config["mit"];
+
+    if (ids.size() != 3 || interface.empty() || interface.size() >= IFNAMSIZ)
+        throw std::runtime_error("virtual motors require an interface and three IDs");
+
+    for (int i = 0; i < 3; ++i) {
+        if (!ids[i] || ids[i] > 254 ||
+            std::find(ids.begin(), ids.begin() + i, ids[i]) != ids.begin() + i)
+            throw std::runtime_error("virtual motor IDs must be distinct and in [1, 254]");
+
+        ids_[i] = 0x140 + ids[i];
+    }
+
+    profile_.velocity_max = mit["velocity_max_rad_s"].as<double>();
+    profile_.torque_max = mit["torque_max_nm"].as<double>();
+    profile_.kt_output = mit["kt_output_nm_a"].as<double>();
+    profile_.gear_ratio = mit["gear_ratio"].as<double>();
+    profile_.kd_scale = mit["kd_scale"].as<unsigned>();
+    openrobot::EncodePosition({}, profile_);
+    openrobot::EncodeProfile(profile_);
+
+    can_ = std::make_unique<shm_utils::Mapping>(config["shm_name"].as<std::string>());
+    const auto peer = ReadFeedback();
+
+    if (!peer.running)
+        throw std::runtime_error("CAN HAL is not running");
+
+    openrobot::CheckProfile(openrobot::EncodeProfile(profile_), peer.profile);
+
+    const auto index = ::if_nametoindex(interface.c_str());
+
+    if (!index)
+        throw std::runtime_error("CAN interface not found: " + interface);
+
+    socket_ = ::socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
+
+    if (socket_ < 0)
+        shm_utils::Check(errno, "virtual motor SocketCAN");
+
+    try {
+        ifreq request{};
+        std::copy(interface.begin(), interface.end(), request.ifr_name);
+
+        if (::ioctl(socket_, SIOCGIFHWADDR, &request) < 0)
+            shm_utils::Check(errno, "virtual motor interface type");
+
+        if (request.ifr_hwaddr.sa_family != ARPHRD_CAN)
+            throw std::runtime_error("virtual motor interface is not CAN");
+
+        if (::ioctl(socket_, SIOCGIFFLAGS, &request) < 0 || !(request.ifr_flags & IFF_UP))
+            throw std::runtime_error("virtual motor CAN interface is not UP");
+
+        std::array<can_filter, 3> filters{};
+
+        for (int i = 0; i < 3; ++i)
+            filters[i] = {ids_[i], CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG};
+
+        const int receive_own = 0;
+
+        if (::setsockopt(socket_, SOL_CAN_RAW, CAN_RAW_FILTER, filters.data(), sizeof(filters)) <
+                0 ||
+            ::setsockopt(
+                socket_, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &receive_own, sizeof(receive_own)) < 0)
+            shm_utils::Check(errno, "virtual motor CAN options");
+
+        sockaddr_can address{};
+        address.can_family = AF_CAN;
+        address.can_ifindex = int(index);
+
+        if (::bind(socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0)
+            shm_utils::Check(errno, "virtual motor CAN bind");
+    } catch (...) {
+        ::close(socket_);
+        socket_ = -1;
+        throw;
+    }
+}
+
+VirtualMotors::~VirtualMotors() {
+    if (socket_ >= 0)
+        ::close(socket_);
+}
+
+ShmCanState VirtualMotors::ReadFeedback() const {
+    auto& shm = *can_->get();
+    shm_utils::Lock lock(shm);
+    auto state = shm.can_states[shm.can_state_sequence % 2];
+
+    if (shm.failed)
+        throw std::runtime_error("CAN HAL failed");
+
+    state.running &= !shm.stopping;
+
+    return state;
+}
+
+void VirtualMotors::Reply(int axis, const openrobot::Payload& bytes) {
+    can_frame frame{};
+    frame.can_id = ids_[axis];
+    frame.can_dlc = 8;
+    std::copy(bytes.begin(), bytes.end(), frame.data);
+    ssize_t count;
+
+    do {
+        count = ::write(socket_, &frame, sizeof(frame));
+    } while (count < 0 && errno == EINTR);
+
+    if (count != sizeof(frame))
+        throw std::runtime_error(
+            "virtual motor CAN reply failed: " + std::string(std::strerror(errno)));
+}
+
+void VirtualMotors::Update(const mjModel* model, mjData* data) {
+    for (unsigned batch = 0; batch < 256; ++batch) {
+        can_frame frame{};
+        const auto count = ::read(socket_, &frame, sizeof(frame));
+
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            break;
+
+        if (count < 0 && errno == EINTR)
+            continue;
+
+        if (count != sizeof(frame))
+            throw std::runtime_error("virtual motor CAN read failed");
+
+        const auto found = std::find(ids_.begin(), ids_.end(), frame.can_id);
+
+        if (found == ids_.end())
+            continue;
+
+        if (frame.can_dlc != 8) {
+            std::cerr << "[virtual motor] rejected CAN DLC " << int(frame.can_dlc) << '\n';
+            continue;
+        }
+
+        const int axis = int(found - ids_.begin());
+        openrobot::Payload bytes{};
+        std::copy_n(frame.data, 8, bytes.begin());
+
+        if (bytes[0] == 0xC4)
+            Reply(axis, openrobot::EncodeProfile(profile_));
+        else if (bytes[0] == 0xC1) {
+            enabled_[axis] = true;
+            Reply(axis, {0xC1, std::uint8_t(profile_.kd_scale)});
+        } else if (bytes[0] == 0xC2) {
+            enabled_[axis] = false;
+            targets_[axis] = {};
+            Reply(axis, {0xC2});
+        } else if (bytes[0] == 0xC0) {
+            const auto target = openrobot::DecodePosition(bytes, profile_);
+
+            if (enabled_[axis])
+                targets_[axis] = target;
+
+            Reply(axis,
+                openrobot::EncodeFeedback({data->qpos[axis] - encoder_origin_[axis],
+                    data->qvel[axis],
+                    data->qfrc_actuator[axis] / profile_.kt_output,
+                    25}));
+        } else
+            throw std::runtime_error(
+                "unsupported virtual motor command: " + std::to_string(bytes[0]));
+    }
+
+    // Only received CAN targets drive the torque actuators. FF is not used.
+    for (int i = 0; i < 3; ++i) {
+        const auto& target = targets_[i];
+        const double torque =
+            enabled_[i] && target.enabled
+                ? target.kp * (target.position - (data->qpos[i] - encoder_origin_[i])) +
+                      target.kd * (target.velocity - data->qvel[i])
+                : 0;
+        const double minimum = std::max(-profile_.torque_max, model->actuator_ctrlrange[2 * i]);
+        const double maximum = std::min(profile_.torque_max, model->actuator_ctrlrange[2 * i + 1]);
+        data->ctrl[i] = std::clamp(torque, minimum, maximum);
+    }
+}
+
 std::array<double, 3> ReadPosition(const YAML::Node& value, const mjModel* model) {
     const auto values = value.as<std::vector<double>>();
 
@@ -37,7 +229,8 @@ ShmCommand UpdateControlIO(ShmData& shm,
     mjData* gravity_data,
     std::array<double, 3>& reference,
     const std::array<double, 3>& acceleration,
-    std::uint64_t measurement_sequence) {
+    std::uint64_t measurement_sequence,
+    const ShmCanState* can_feedback) {
     mj_forward(model, data);
 
     // Separate zero-velocity state: qfrc_bias contains gravity without Coriolis.
@@ -66,6 +259,11 @@ ShmCommand UpdateControlIO(ShmData& shm,
         state.acceleration = acceleration;
 
         std::copy_n(data->qfrc_actuator, 3, state.motor_torque.begin());
+
+        if (can_feedback)
+            for (int i = 0; i < 3; ++i)
+                state.motor_torque[i] =
+                    can_feedback->motors[i].feedback.current * can_feedback->profile.kt_output;
         std::copy_n(data->qfrc_bias, 3, state.bias_torque.begin());
         std::copy_n(data->qfrc_passive, 3, state.passive_torque.begin());
         std::copy_n(model->dof_frictionloss, 3, state.friction_limit.begin());
@@ -97,9 +295,10 @@ ShmCommand UpdateControlIO(ShmData& shm,
         if (!std::isfinite(command.torque[i]) || !std::isfinite(command.reference[i]))
             throw std::runtime_error("non-finite joint output");
 
-        data->ctrl[i] = std::clamp(command.torque[i],
-            model->actuator_ctrlrange[2 * i],
-            model->actuator_ctrlrange[2 * i + 1]);
+        if (!can_feedback)
+            data->ctrl[i] = std::clamp(command.torque[i],
+                model->actuator_ctrlrange[2 * i],
+                model->actuator_ctrlrange[2 * i + 1]);
         reference[i] = command.reference[i];
     }
 

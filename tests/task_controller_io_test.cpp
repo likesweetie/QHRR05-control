@@ -93,7 +93,12 @@ int main(int argc, char** argv) {
             Require(worker >= 0, "fork failed");
 
             if (worker == 0) {
-                ::execl(argv[3], argv[3], path.c_str(), name.c_str(), static_cast<char*>(nullptr));
+                ::execl(argv[3],
+                    argv[3],
+                    path.c_str(),
+                    name.c_str(),
+                    "--without-can",
+                    static_cast<char*>(nullptr));
                 ::_exit(127);
             }
         };

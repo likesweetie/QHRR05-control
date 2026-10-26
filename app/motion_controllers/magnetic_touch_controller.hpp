@@ -7,6 +7,15 @@ namespace qhrr05 {
 class MagneticTouchController {
 public:
     explicit MagneticTouchController(const std::string& config_path);
+
+    const std::array<double, 3>& kp_motor() const {
+        return kp_motor_;
+    }
+
+    const std::array<double, 3>& kd_motor() const {
+        return kd_motor_;
+    }
+
     void Start(double time, const ShmState& feedback);
     void Compute(double time,
         const ShmState& feedback,
@@ -26,6 +35,7 @@ private:
     MagneticTelemetry telemetry_{};
 
     std::array<double, 3> damping_;
+    std::array<double, 3> kp_motor_, kd_motor_;
     std::array<double, 3> torque_limit_;
     std::array<double, 3> workspace_min_;
     std::array<double, 3> workspace_max_;

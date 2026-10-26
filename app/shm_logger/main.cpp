@@ -5,8 +5,114 @@
 #include <memory>
 #include <cmath>
 
+namespace {
+int LogCan(const char* name, const char* csv_path) {
+    shm_utils::Mapping mapping(name);
+    auto& shm = *mapping.get();
+    const int descriptor = ::open(csv_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+
+    if (descriptor < 0)
+        throw std::runtime_error(std::string("CAN CSV create failed: ") + std::strerror(errno));
+
+    FILE* stream = ::fdopen(descriptor, "w");
+
+    if (!stream) {
+        ::close(descriptor);
+        throw std::runtime_error("CAN CSV fdopen failed");
+    }
+
+    std::unique_ptr<FILE, decltype(&std::fclose)> file(stream, std::fclose);
+    std::fprintf(stream,
+        "state_seq,cycle,consumed_target_seq,axis,tx_frames,rx_frames,feedback_seq,q_rad,dq_rad_s,iq_a,temp_c,profile_verified,enabled,invalid_frames,socket_errors,feedback_age_us,observed_feedback_interval_us,skipped_publications,latest_target_seq,target_enabled,q_target_rad,dq_target_rad_s,kp,kd\n");
+    std::uint64_t last_sequence = 0, skipped = 0, rows = 0;
+    std::array<std::uint64_t, 3> last_feedback{}, last_received{};
+
+    for (;;) {
+        ShmCanState state;
+        ShmMotorTargets targets;
+        bool done;
+        {
+            shm_utils::Lock lock(shm);
+
+            while (shm.can_state_sequence == last_sequence && !shm.stopping)
+                lock.Wait();
+
+            if (shm.can_state_sequence == last_sequence && shm.stopping)
+                break;
+
+            state = shm.can_states[shm.can_state_sequence % 2];
+            targets = shm.motor_targets[shm.motor_target_sequence % 2];
+            done = shm.stopping;
+        }
+
+        const auto missed = state.sequence - last_sequence - 1;
+        skipped += missed;
+        last_sequence = state.sequence;
+        const auto now = shm_utils::MonotonicNs();
+
+        for (int i = 0; i < 3; ++i) {
+            const auto& motor = state.motors[i];
+            std::fprintf(stream,
+                "%llu,%llu,%llu,%d,%llu,%llu,%llu,%.12g,%.12g,%.12g,%d,%d,%d,%llu,%llu,",
+                static_cast<unsigned long long>(state.sequence),
+                static_cast<unsigned long long>(state.cycles),
+                static_cast<unsigned long long>(state.command_sequence),
+                i,
+                static_cast<unsigned long long>(motor.tx_frames),
+                static_cast<unsigned long long>(motor.rx_frames),
+                static_cast<unsigned long long>(motor.feedback_sequence),
+                motor.feedback.position,
+                motor.feedback.velocity,
+                motor.feedback.current,
+                motor.feedback.temperature,
+                motor.profile_verified,
+                motor.enabled,
+                static_cast<unsigned long long>(motor.invalid_frames),
+                static_cast<unsigned long long>(state.socket_errors));
+
+            if (motor.feedback_sequence)
+                std::fprintf(stream, "%.3f", (now - motor.received_ns) / 1000.0);
+
+            std::fprintf(stream, ",");
+
+            if (motor.feedback_sequence != last_feedback[i]) {
+                if (last_received[i])
+                    std::fprintf(stream, "%.3f", (motor.received_ns - last_received[i]) / 1000.0);
+
+                last_feedback[i] = motor.feedback_sequence;
+                last_received[i] = motor.received_ns;
+            }
+
+            const auto& target = targets.motors[i];
+            std::fprintf(stream,
+                ",%llu,%llu,%d,%.12g,%.12g,%.12g,%.12g\n",
+                static_cast<unsigned long long>(missed),
+                static_cast<unsigned long long>(targets.sequence),
+                target.enabled,
+                target.position,
+                target.velocity,
+                target.kp,
+                target.kd);
+            ++rows;
+        }
+
+        if (std::ferror(stream) || std::fflush(stream) != 0)
+            throw std::runtime_error("CAN CSV write failed");
+
+        if (done)
+            break;
+    }
+
+    std::cout << "[shm_logger] CAN rows=" << rows << " skipped_publications=" << skipped << '\n';
+    return 0;
+}
+}  // namespace
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 4 && std::string(argv[1]) == "--can")
+            return LogCan(argv[2], argv[3]);
+
         if (argc != 3)
             throw std::runtime_error("usage: shm_logger SHM_NAME CSV_PATH");
 

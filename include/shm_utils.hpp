@@ -90,7 +90,7 @@ inline void Stop(ShmData& shm, bool failed = false) {
     Notify(shm);
 }
 
-// The daemon creates exclusively; children only attach. Existing objects are
+// The owning program creates exclusively; other programs attach. Existing objects are
 // never reused, resized or unlinked by an attaching process.
 class Mapping {
 public:

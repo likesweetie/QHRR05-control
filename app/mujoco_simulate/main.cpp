@@ -1,5 +1,6 @@
 #include <array>
 #include "simulation.hpp"
+#include "daemon/daemon.hpp"
 #include "telemetry.hpp"
 #include "simulate/simulate.h"
 #include "simulate/glfw_adapter.h"
@@ -23,8 +24,10 @@ void OnSignal(int) {
 }
 
 struct Options {
-    std::string model, config, shm_name;
+    std::string model, config, shm_name, motor_config;
+    bool without_can = false;
     bool headless = false;
+    bool create_shm = false;
     double duration = 0;
 };
 
@@ -33,6 +36,16 @@ Options Parse(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
+
+        if (arg == "--without-can") {
+            options.without_can = true;
+            continue;
+        }
+
+        if (arg == "--create-shm") {
+            options.create_shm = true;
+            continue;
+        }
 
         if (arg == "--headless") {
             options.headless = true;
@@ -50,6 +63,8 @@ Options Parse(int argc, char** argv) {
             options.config = value;
         else if (arg == "--shm-name")
             options.shm_name = value;
+        else if (arg == "--motor-config")
+            options.motor_config = value;
         else if (arg == "--duration") {
             std::size_t count = 0;
             options.duration = std::stod(value, &count);
@@ -65,6 +80,10 @@ Options Parse(int argc, char** argv) {
 
     if (options.headless && options.duration <= 0)
         throw std::runtime_error("--headless requires --duration");
+
+    if ((options.without_can && !options.motor_config.empty()) ||
+        (!options.without_can && options.motor_config.empty()))
+        throw std::runtime_error("select --motor-config YAML or explicit --without-can");
 
     return options;
 }
@@ -88,7 +107,7 @@ int main(int argc, char** argv) {
             history_sec <= 0 || sample_hz * history_sec > mjMAXLINEPNT)
             throw std::runtime_error("invalid plot sampling or history length");
 
-        shm_utils::Mapping mapping(options.shm_name);
+        shm_utils::Mapping mapping(options.shm_name, options.create_shm);
         auto& shm = *mapping.get();
 
         char error[2048] = {};
@@ -123,6 +142,50 @@ int main(int argc, char** argv) {
         std::array<double, 3> reference = initial, acceleration{};
         std::uint64_t measurement_sequence = 0;
 
+        std::unique_ptr<qhrr05::VirtualMotors> virtual_motors;
+        std::unique_ptr<mjData, decltype(&mj_deleteData)> model_data(nullptr, mj_deleteData);
+
+        if (!options.without_can) {
+            virtual_motors = std::make_unique<qhrr05::VirtualMotors>(options.motor_config, initial);
+            model_data.reset(mj_makeData(model.get()));
+
+            if (!model_data)
+                throw std::runtime_error("could not allocate CAN model state");
+        }
+
+        const auto update_io = [&] {
+            if (!virtual_motors)
+                return qhrr05::UpdateControlIO(shm,
+                    model.get(),
+                    data.get(),
+                    gravity_data.get(),
+                    reference,
+                    acceleration,
+                    measurement_sequence);
+
+            const auto feedback = virtual_motors->ReadFeedback();
+
+            if (!feedback.running) {
+                stopped = 1;
+                throw std::runtime_error("CAN HAL stopped normally");
+            }
+
+            // Model terms use decoded encoders, not the simulator's physical state.
+            for (int i = 0; i < 3; ++i) {
+                model_data->qpos[i] = initial[i] + feedback.motors[i].feedback.position;
+                model_data->qvel[i] = feedback.motors[i].feedback.velocity;
+            }
+
+            return qhrr05::UpdateControlIO(shm,
+                model.get(),
+                model_data.get(),
+                gravity_data.get(),
+                reference,
+                {},
+                0,
+                &feedback);
+        };
+
         const int object_body = mj_name2id(model.get(), mjOBJ_BODY, "touch_object");
 
         if (object_body < 0)
@@ -137,13 +200,7 @@ int main(int argc, char** argv) {
         double target_force = config["magnetic_touch"]["target_force_n"].as<double>();
         const double maximum_force = config["magnetic_touch"]["maximum_force_n"].as<double>();
 
-        ShmCommand applied_command = qhrr05::UpdateControlIO(shm,
-            model.get(),
-            data.get(),
-            gravity_data.get(),
-            reference,
-            acceleration,
-            measurement_sequence);
+        ShmCommand applied_command = update_io();
 
         std::uint64_t request_sequence = 0;
         int mode = 0;  // Mutually exclusive: homing or gravity compensation.
@@ -173,13 +230,7 @@ int main(int argc, char** argv) {
             mode = 0;
 
             request_sequence = request_control(mode);
-            applied_command = qhrr05::UpdateControlIO(shm,
-                model.get(),
-                data.get(),
-                gravity_data.get(),
-                reference,
-                acceleration,
-                measurement_sequence);
+            applied_command = update_io();
         };
 
         const auto select_controller = [&](int requested) {
@@ -241,13 +292,10 @@ int main(int argc, char** argv) {
         };
 
         const auto step = [&] {
-            applied_command = qhrr05::UpdateControlIO(shm,
-                model.get(),
-                data.get(),
-                gravity_data.get(),
-                reference,
-                acceleration,
-                measurement_sequence);
+            applied_command = update_io();
+
+            if (virtual_motors)
+                virtual_motors->Update(model.get(), data.get());
 
             std::array<double, 3> previous_velocity;
             std::copy_n(data->qvel, 3, previous_velocity.begin());
@@ -276,11 +324,23 @@ int main(int argc, char** argv) {
             return options.duration > 0 && data->time + 1e-9 >= options.duration;
         };
 
-        std::cout << "[simulate] qhrr-05 viewer + separate control superloop" << std::endl;
+        std::cout << "[simulate] "
+                  << (virtual_motors ? "MIT CAN virtual motors" : "DEBUG direct SHM torque")
+                  << " + independent control superloop" << std::endl;
+        Daemon::NotifyReady();
 
         if (options.headless) {
-            while (!stopped && !finished())
+            auto next_tick = std::chrono::steady_clock::now();
+
+            while (!stopped && !finished()) {
                 step();
+
+                if (virtual_motors) {
+                    next_tick += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(model->opt.timestep));
+                    std::this_thread::sleep_until(next_tick);
+                }
+            }
         } else {
             mjvCamera camera;
             mjv_defaultCamera(&camera);
@@ -461,13 +521,11 @@ int main(int argc, char** argv) {
                                 step();
                                 sim->AddToHistory();
                             } else {
-                                applied_command = qhrr05::UpdateControlIO(shm,
-                                    model.get(),
-                                    data.get(),
-                                    gravity_data.get(),
-                                    reference,
-                                    acceleration,
-                                    measurement_sequence);
+                                applied_command = update_io();
+
+                                if (virtual_motors)
+                                    virtual_motors->Update(model.get(), data.get());
+
                                 mj_forward(model.get(), data.get());
                                 check_holding();
                             }

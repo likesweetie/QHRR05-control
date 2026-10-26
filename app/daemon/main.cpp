@@ -1,17 +1,19 @@
 #include "daemon/daemon.hpp"
-#include "shm_utils.hpp"
-#include <memory>
 
-#include <yaml-cpp/yaml.h>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <termios.h>
 #include <thread>
 #include <unistd.h>
-#include <map>
+#include <yaml-cpp/yaml.h>
 
 namespace {
 namespace fs = std::filesystem;
@@ -19,24 +21,6 @@ volatile std::sig_atomic_t stop_requested = 0;
 
 void OnSignal(int) {
     stop_requested = 1;
-}
-
-void CheckKeys(const YAML::Node& node, std::initializer_list<const char*> keys) {
-    if (!node || !node.IsMap())
-        throw std::runtime_error("configuration section must be a map");
-
-    for (const char* key : keys)
-        if (!node[key])
-            throw std::runtime_error(std::string("missing daemon key: ") + key);
-}
-
-fs::path Resolve(const fs::path& root, const std::string& value) {
-    const auto path = fs::absolute(root / value).lexically_normal();
-
-    if (!fs::is_regular_file(path))
-        throw std::runtime_error("required file not found: " + path.string());
-
-    return path;
 }
 
 fs::path ExecutableDirectory() {
@@ -48,234 +32,283 @@ fs::path ExecutableDirectory() {
 
     return fs::path(std::string(buffer, size)).parent_path();
 }
+
+std::vector<ProcessSpec> LoadProcesses(const fs::path& path, bool without_can) {
+    const auto config = YAML::LoadFile(path.string());
+    const std::string section = without_can ? "debug_processes" : "processes";
+    const auto processes = config[section];
+
+    if (!config.IsMap() || !processes || !processes.IsSequence() || processes.size() == 0)
+        throw std::runtime_error("daemon config requires a nonempty " + section + " sequence");
+
+    std::vector<ProcessSpec> result;
+
+    for (const auto& process : processes) {
+        ProcessSpec spec;
+        spec.name = process["name"].as<std::string>();
+        spec.exec_path =
+            fs::absolute(ExecutableDirectory() / process["exec_path"].as<std::string>()).string();
+        spec.args = process["args"].as<std::vector<std::string>>();
+
+        if (spec.name.empty() || !fs::is_regular_file(spec.exec_path))
+            throw std::runtime_error("invalid process name or executable: " + spec.name);
+
+        for (const auto& existing : result)
+            if (existing.name == spec.name)
+                throw std::runtime_error("duplicate process name: " + spec.name);
+
+        if (process["working_directory"])
+            spec.working_directory =
+                fs::absolute(path.parent_path() / process["working_directory"].as<std::string>())
+                    .string();
+
+        if (process["wait_ready"])
+            spec.wait_ready = process["wait_ready"].as<bool>();
+
+        if (process["terminal_title"]) {
+            spec.terminal_title = process["terminal_title"].as<std::string>();
+            spec.terminal_exec =
+                fs::absolute(ExecutableDirectory() / process["terminal_exec"].as<std::string>())
+                    .string();
+
+            if (spec.terminal_title.empty() || !fs::is_regular_file(spec.terminal_exec))
+                throw std::runtime_error("invalid terminal configuration: " + spec.name);
+        }
+
+        if (process["ready_timeout_ms"])
+            spec.ready_timeout_ms = process["ready_timeout_ms"].as<int>();
+
+        if (spec.ready_timeout_ms <= 0)
+            throw std::runtime_error("ready_timeout_ms must be positive");
+
+        if (process["env"])
+            for (const auto& entry : process["env"])
+                spec.env.emplace(entry.first.as<std::string>(), entry.second.as<std::string>());
+
+        result.push_back(std::move(spec));
+    }
+
+    for (const auto& spec : result)
+        if (!spec.terminal_title.empty())
+            for (const auto& other : result)
+                if (other.name == spec.name + ".terminal")
+                    throw std::runtime_error("reserved terminal process name: " + other.name);
+
+    return result;
+}
+
+// The application remains a direct child. The terminal only displays its PTY output.
+struct ProcessTerminal {
+    int master{-1};
+    int slave{-1};
+
+    ~ProcessTerminal() {
+        if (slave >= 0)
+            ::close(slave);
+
+        if (master >= 0)
+            ::close(master);
+    }
+
+    void Open() {
+        master = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+
+        if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0)
+            throw std::runtime_error(
+                "cannot create process terminal: " + std::string(std::strerror(errno)));
+
+        char* path = ::ptsname(master);
+
+        if (!path)
+            throw std::runtime_error("cannot resolve process terminal");
+
+        slave = ::open(path, O_RDWR | O_NOCTTY | O_CLOEXEC);
+        termios attributes{};
+
+        if (slave < 0 || ::tcgetattr(slave, &attributes) != 0)
+            throw std::runtime_error("cannot open process terminal");
+
+        ::cfmakeraw(&attributes);
+
+        if (::tcsetattr(slave, TCSANOW, &attributes) != 0)
+            throw std::runtime_error("cannot configure process terminal");
+    }
+
+    void ReportStartupError() {
+        if (::fcntl(master, F_SETFL, O_NONBLOCK) < 0)
+            throw std::runtime_error("cannot read process startup output");
+
+        char buffer[4096];
+
+        while (true) {
+            const auto count = ::read(master, buffer, sizeof(buffer));
+
+            if (count > 0)
+                std::cerr.write(buffer, count);
+            else if (count < 0 && errno == EINTR)
+                continue;
+            else if (count == 0 || errno == EAGAIN || errno == EIO)
+                break;
+            else
+                throw std::runtime_error("cannot read process startup output");
+        }
+    }
+};
+
+void StartProcess(Daemon& daemon, const ProcessSpec& spec, std::vector<ProcessSpec>& children) {
+    const auto pid = daemon.Spawn(spec);
+
+    if (!pid)
+        throw std::runtime_error(
+            "process start failed: " + spec.name + ": " + std::strerror(daemon.LastErrno()));
+
+    children.push_back(spec);
+    std::cout << "[daemon] " << spec.name << " started pid=" << *pid << std::endl;
+}
+
+bool AnyRunning(Daemon& daemon, const std::vector<ProcessSpec>& specs) {
+    bool running = false;
+
+    for (const auto& spec : specs) {
+        const auto info = daemon.Get(spec.name);
+        running |= info && info->running;
+    }
+
+    return running;
+}
+
+bool StopChildren(Daemon& daemon, const std::vector<ProcessSpec>& specs) {
+    daemon.TerminateAll(SIGTERM);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+
+    while (AnyRunning(daemon, specs) && std::chrono::steady_clock::now() < deadline) {
+        daemon.Reap();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    const bool forced = AnyRunning(daemon, specs);
+    daemon.TerminateAll(SIGKILL);
+
+    while (AnyRunning(daemon, specs)) {
+        daemon.Reap();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return forced;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Display-only mode must retain the terminal's normal signal handling.
+    if (argc == 3 && std::string(argv[1]) == "--terminal-output")
+        return Daemon::RelayTerminalOutput(argv[2]);
+
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
-
-    std::unique_ptr<shm_utils::Mapping> shm;
+    std::signal(SIGHUP, OnSignal);
     Daemon daemon;
+    std::vector<ProcessSpec> children;
+    std::vector<std::unique_ptr<ProcessTerminal>> terminals;
 
     try {
         fs::path config_path = QHRR05_DEFAULT_DAEMON_CONFIG;
-        std::string control_override, shm_override, csv_path;
-        std::vector<std::string> forwarded;
+        bool without_can = false;
+        const char* usage = "usage: daemon [--config PROCESS_CONFIG.yaml] [--without-can]";
 
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
 
-            if (argument == "--help" || argument == "-h") {
-                std::cout << "daemon [--config YAML] [--control-config YAML] [--robot qhrr-05] "
-                             "[--shm-name NAME] [--headless --duration SEC] [--csv PATH]\n";
+            if (argument == "--without-can")
+                without_can = true;
+            else if (argument == "--config" && i + 1 < argc)
+                config_path = argv[++i];
+            else if (argument == "--help") {
+                std::cout << usage << '\n';
                 return 0;
-            }
-
-            if (argument == "--headless") {
-                forwarded.push_back(argument);
-                continue;
-            }
-
-            if (i + 1 >= argc)
-                throw std::runtime_error("missing value for " + argument);
-
-            const std::string value = argv[++i];
-
-            if (argument == "--config")
-                config_path = value;
-            else if (argument == "--control-config")
-                control_override = value;
-            else if (argument == "--shm-name")
-                shm_override = value;
-            else if (argument == "--csv")
-                csv_path = value;
-            else if (argument == "--robot") {
-                if (value != "qhrr-05")
-                    throw std::runtime_error("unsupported robot: " + value);
-            } else if (argument == "--duration") {
-                forwarded.push_back(argument);
-                forwarded.push_back(value);
             } else
-                throw std::runtime_error("unknown argument: " + argument);
+                throw std::runtime_error(usage);
         }
 
-        config_path = fs::absolute(config_path);
-        const auto config = YAML::LoadFile(config_path.string());
+        const auto specs = LoadProcesses(fs::absolute(config_path), without_can);
 
-        CheckKeys(config, {"robots", "processes"});
+        if (without_can)
+            std::cout << "[daemon] DEBUG --without-can: using debug_processes without CAN HAL"
+                      << std::endl;
 
-        const auto robots = config["robots"];
+        for (const auto& spec : specs) {
+            if (spec.terminal_title.empty()) {
+                StartProcess(daemon, spec, children);
+            } else {
+                auto terminal = std::make_unique<ProcessTerminal>();
+                terminal->Open();
+                auto application = spec;
+                application.output_fd = terminal->slave;
 
-        if (!robots.IsMap() || robots.size() != 1 || !robots["qhrr-05"])
-            throw std::runtime_error("robots must contain only qhrr-05");
+                try {
+                    StartProcess(daemon, application, children);
+                } catch (...) {
+                    terminal->ReportStartupError();
+                    throw;
+                }
 
-        const auto selected = robots["qhrr-05"];
-        CheckKeys(selected, {"model_path", "control_config_path"});
+                ::close(terminal->slave);
+                terminal->slave = -1;
 
-        const auto root = config_path.parent_path();
-        const auto model = Resolve(root, selected["model_path"].as<std::string>());
-        const auto control = control_override.empty()
-                                 ? Resolve(root, selected["control_config_path"].as<std::string>())
-                                 : Resolve(fs::current_path(), control_override);
-        const auto processes = config["processes"];
-
-        if (!processes.IsSequence() || processes.size() != 2)
-            throw std::runtime_error("task_controller and mujoco_simulate processes are required");
-
-        std::map<std::string, std::string> executables;
-
-        for (const auto& process : processes) {
-            CheckKeys(process, {"name", "exec_path"});
-            const auto name = process["name"].as<std::string>();
-
-            if ((name != "task_controller" && name != "mujoco_simulate") || executables.count(name))
-                throw std::runtime_error(
-                    "only one task_controller and one mujoco_simulate are supported");
-
-            executables[name] =
-                Resolve(ExecutableDirectory(), process["exec_path"].as<std::string>()).string();
-        }
-
-        if (!csv_path.empty())
-            executables["shm_logger"] = Resolve(ExecutableDirectory(), "shm_logger").string();
-
-        const auto shm_name =
-            shm_override.empty() ? config["shm_name"].as<std::string>() : shm_override;
-        shm = std::make_unique<shm_utils::Mapping>(shm_name, true);
-        std::cout << "[daemon] SHM " << shm_name << " (sequence double buffers)" << std::endl;
-
-        // Start readers before the simulator. The daemon owns creation and unlink.
-        for (const auto& name : {"task_controller", "shm_logger", "mujoco_simulate"}) {
-            if (!executables.count(name))
-                continue;
-
-            ProcessSpec spec;
-            spec.name = name;
-            spec.exec_path = executables.at(name);
-
-            if (spec.name == "task_controller")
-                spec.args = {control.string(), shm_name};
-            else if (spec.name == "shm_logger")
-                spec.args = {shm_name, csv_path};
-            else {
-                spec.args = {"--model",
-                    model.string(),
-                    "--control-config",
-                    control.string(),
-                    "--shm-name",
-                    shm_name};
-                spec.args.insert(spec.args.end(), forwarded.begin(), forwarded.end());
+                ProcessSpec display;
+                display.name = spec.name + ".terminal";
+                display.exec_path = spec.terminal_exec;
+                display.args = {"--wait",
+                    "--window",
+                    "--title=" + spec.terminal_title,
+                    "--fd=" + std::to_string(terminal->master),
+                    "--",
+                    (ExecutableDirectory() / "daemon").string(),
+                    "--terminal-output",
+                    std::to_string(terminal->master)};
+                display.pass_fd = terminal->master;
+                StartProcess(daemon, display, children);
+                terminals.push_back(std::move(terminal));
             }
 
-            const auto pid = daemon.Spawn(spec);
-
-            if (!pid)
-                throw std::runtime_error(
-                    std::string("exec failed: ") + std::strerror(daemon.LastErrno()));
-
-            std::cout << "[daemon] " << name << " started pid=" << *pid << std::endl;
+            if (stop_requested)
+                break;
         }
 
         int result = 0;
+        bool completed = false;
 
-        while (!stop_requested) {
-            const auto exited = daemon.Reap();
+        while (!stop_requested && !completed) {
+            for (const auto& name : daemon.Reap()) {
+                const auto info = daemon.Get(name).value();
+                completed = true;
 
-            if (!exited.empty()) {
-                bool finished;
-
-                {
-                    shm_utils::Lock lock(*shm->get());
-                    finished = shm->get()->simulation_finished;
-                }
-
-                if (finished)
-                    shm_utils::Stop(*shm->get());
-
-                if (!finished) {
-                    std::cerr << "[daemon] child exited before simulation finished\n";
-                    result = 1;
-                    shm_utils::Stop(*shm->get(), true);
-                    daemon.TerminateAll(SIGTERM);
-                }
-
-                break;
+                if (info.exit_code || info.term_signal)
+                    result = info.exit_code ? info.exit_code : 128 + info.term_signal;
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
-        // A finished simulator wakes the controller and logger through SHM.
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        if (StopChildren(daemon, children) && result == 0)
+            result = 1;
 
-        if (stop_requested) {
-            shm_utils::Stop(*shm->get());
-            daemon.TerminateAll(SIGTERM);
-        }
+        for (const auto& spec : children) {
+            const auto info = daemon.Get(spec.name);
 
-        for (;;) {
-            daemon.Reap();
-            bool running = false;
+            if (info)
+                std::cout << "[daemon] " << spec.name << " exited code=" << info->exit_code
+                          << " signal=" << info->term_signal << std::endl;
 
-            for (const auto& [name, _] : executables) {
-                const auto info = daemon.Get(name).value();
-                running |= info.running;
+            if (info && result == 0 && info->exit_code != 0)
+                result = info->exit_code;
 
-                if (info.exited && (info.exit_code != 0 ||
-                                       (info.term_signal != 0 && info.term_signal != SIGTERM))) {
-                    result = info.exit_code != 0 ? info.exit_code : 128 + info.term_signal;
-                    shm_utils::Stop(*shm->get(), true);
-                    daemon.TerminateAll(SIGTERM);
-                }
-            }
-
-            if (!running)
-                break;
-
-            if (std::chrono::steady_clock::now() >= deadline) {
-                std::cerr << "[daemon] stopping remaining owned processes\n";
-                daemon.TerminateAll(SIGKILL);
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-
-        for (const auto& [name, _] : executables) {
-            const auto info = daemon.Get(name).value();
-            std::cout << "[daemon] " << name << " exited code=" << info.exit_code
-                      << " signal=" << info.term_signal << std::endl;
+            if (info && result == 0 && info->term_signal != 0 && info->term_signal != SIGTERM)
+                result = 128 + info->term_signal;
         }
 
         return result;
     } catch (const std::exception& error) {
-        if (shm) {
-            try {
-                shm_utils::Stop(*shm->get(), true);
-            } catch (const std::exception& stop_error) {
-                std::cerr << "[daemon] " << stop_error.what() << '\n';
-            }
-        }
-
-        daemon.TerminateAll(SIGTERM);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-
-        while (std::chrono::steady_clock::now() < deadline) {
-            daemon.Reap();
-            bool running = false;
-
-            for (const char* name : {"task_controller", "shm_logger", "mujoco_simulate"}) {
-                const auto child = daemon.Get(name);
-                running |= child && child->running;
-            }
-
-            if (!running)
-                break;
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-
-        daemon.TerminateAll(SIGKILL);
-        daemon.Reap();
+        StopChildren(daemon, children);
         std::cerr << "[daemon] ERROR: " << error.what() << '\n';
 
         return 1;

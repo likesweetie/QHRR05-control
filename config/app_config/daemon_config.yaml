@@ -1,17 +1,35 @@
-# Created exclusively by daemon; an existing name is an error, never reused.
-shm_name: /qhrr05
-
-# Robot asset paths are relative to this file.
-robots:
-  qhrr-05:
-    model_path: "../../models/qhrr-05/scene.xml"
-    control_config_path: "../control_config/control_config.yaml"
-
-# Separate simulator GUI/physics and control-only superloop processes.
-# exec_path is relative to the daemon executable, independent of the working directory.
+# Process lifetime only. Arguments and paths belong to the launched programs.
+# exec_path is relative to the daemon binary; working_directory to this YAML.
 processes:
-  - name: task_controller
-    exec_path: task_controller
+  - name: can_hal
+    exec_path: can_hal
+    working_directory: ../..
+    wait_ready: true
+    terminal_title: QHRR05-CAN-HAL
+    # Use the native GNOME executable; Ubuntu's Python wrapper closes passed FDs.
+    terminal_exec: /usr/bin/gnome-terminal.real
+    args: [config/motor_config/can_hal.yaml]
 
   - name: mujoco_simulate
     exec_path: mujoco_simulate
+    working_directory: ../..
+    wait_ready: true
+    args: [--create-shm, --model, models/qhrr-05/scene.xml, --control-config, config/control_config/control_config.yaml, --shm-name, /qhrr05, --motor-config, config/motor_config/can_hal.yaml]
+
+  - name: task_controller
+    exec_path: task_controller
+    working_directory: ../..
+    args: [config/control_config/control_config.yaml, /qhrr05, --motor-config, config/motor_config/can_hal.yaml]
+
+# Selected only by daemon --without-can; never used after a CAN startup failure.
+debug_processes:
+  - name: mujoco_simulate
+    exec_path: mujoco_simulate
+    working_directory: ../..
+    wait_ready: true
+    args: [--create-shm, --model, models/qhrr-05/scene.xml, --control-config, config/control_config/control_config.yaml, --shm-name, /qhrr05, --without-can]
+
+  - name: task_controller
+    exec_path: task_controller
+    working_directory: ../..
+    args: [config/control_config/control_config.yaml, /qhrr05, --without-can]

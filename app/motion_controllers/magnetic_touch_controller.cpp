@@ -54,6 +54,8 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
     };
 
     damping_ = joints("joint_damping_nm_s_rad");
+    kp_motor_ = joints("kp_motor");
+    kd_motor_ = joints("kd_motor");
     torque_limit_ = joints("torque_limit_nm");
     workspace_min_ = joints("workspace_min_m");
     workspace_max_ = joints("workspace_max_m");
@@ -84,7 +86,8 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
         throw std::runtime_error("invalid magnetic thresholds, force, time or motion bounds");
 
     for (int i = 0; i < 3; ++i)
-        if (damping_[i] < 0 || torque_limit_[i] <= 0 || workspace_min_[i] >= workspace_max_[i])
+        if (damping_[i] < 0 || kp_motor_[i] <= 0 || kp_motor_[i] > 500 || kd_motor_[i] < 0 ||
+            torque_limit_[i] <= 0 || workspace_min_[i] >= workspace_max_[i])
             throw std::runtime_error("invalid magnetic joint/workspace bounds");
 }
 

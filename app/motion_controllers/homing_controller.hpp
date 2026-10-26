@@ -15,6 +15,19 @@ public:
     explicit HomingController(const std::string& config_path);
     void Start(double time, const double position[3]);
     HomingReference Reference(double sim_time) const;
+
+    const std::array<double, 3>& kp() const {
+        return kp_;
+    }
+
+    const std::array<double, 3>& kd() const {
+        return kd_;
+    }
+
+    const std::array<double, 3>& initial_position() const {
+        return initial_;
+    }
+
     void Compute(double time,
         const double position[3],
         const double velocity[3],
