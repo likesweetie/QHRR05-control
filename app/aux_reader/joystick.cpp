@@ -242,7 +242,7 @@ void Joystick::processEvent_(const js_event& event) {
 }
 
 void Joystick::Publish() {
-    ShmJoystick input;
+    ControlData input;
 
     for (const auto& mapping : axis_mappings_) {
         double value = applyDeadband_(axes_[mapping.axis_number], mapping.deadband);
@@ -251,12 +251,12 @@ void Joystick::Publish() {
             value = -value;
 
         const int index = mapping.target == TargetType::AngVel ? 2 : mapping.target_index;
-        input.axes[index] = value * mapping.scale;
+        input.joystick_axes[index] = value * mapping.scale;
     }
 
     for (const auto& mapping : button_mappings_) {
         const int index = static_cast<int>(mapping.target) - static_cast<int>(TargetType::AButton);
-        input.buttons[index] = buttons_[mapping.button_number] != mapping.invert;
+        input.joystick_buttons[index] = buttons_[mapping.button_number] != mapping.invert;
     }
 
     shm_utils::Lock lock(*shared_memory_);
@@ -266,9 +266,11 @@ void Joystick::Publish() {
         return;
     }
 
-    input.sequence = shared_memory_->joystick_sequence + 1;
-    input.published_ns = shm_utils::MonotonicNs();
-    shared_memory_->joystick[input.sequence % 2] = input;
-    shared_memory_->joystick_sequence = input.sequence;
+    auto& next = shm_utils::Next(shared_memory_->control, shared_memory_->control_sequence);
+    next.joystick_axes = input.joystick_axes;
+    next.joystick_buttons = input.joystick_buttons;
+    ++next.joystick_sequence;
+    next.joystick_published_ns = shm_utils::MonotonicNs();
+    ++shared_memory_->control_sequence;
     shm_utils::Notify(*shared_memory_);
 }

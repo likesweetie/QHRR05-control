@@ -1,7 +1,7 @@
 #pragma once
 
 #include <array>
-#include <memory>
+#include <string>
 #include "shm_utils.hpp"
 
 #include <mujoco/mujoco.h>
@@ -10,12 +10,14 @@
 namespace qhrr05 {
 class VirtualMotors {
 public:
-    VirtualMotors(const std::string& config_path, const std::array<double, 3>& encoder_origin);
+    VirtualMotors(const std::string& hal_config_path,
+        const std::array<double, 3>& encoder_origin,
+        ShmData& shared);
     ~VirtualMotors();
     VirtualMotors(const VirtualMotors&) = delete;
     VirtualMotors& operator=(const VirtualMotors&) = delete;
     void Update(const mjModel* model, mjData* data);
-    ShmCanState ReadFeedback() const;
+    MotorData ReadFeedback() const;
 
 private:
     void Reply(int axis, const openrobot::Payload& bytes);
@@ -25,18 +27,17 @@ private:
     std::array<bool, 3> enabled_{};
     std::array<openrobot::PositionTarget, 3> targets_{};
     openrobot::MitProfile profile_{};
-    std::unique_ptr<shm_utils::Mapping> can_;
+    ShmData& shared_;
 };
 
 std::array<double, 3> ReadPosition(const YAML::Node& value, const mjModel* model);
 void ResetSimulation(const std::array<double, 3>& initial, const mjModel* model, mjData* data);
-ShmCommand UpdateControlIO(ShmData& shm,
+ControlData UpdateControlIO(ShmData& shm,
     const mjModel* model,
     mjData* data,
     mjData* gravity_data,
     std::array<double, 3>& reference,
-    const std::array<double, 3>& acceleration = {},
     std::uint64_t measurement_sequence = 0,
-    const ShmCanState* can_feedback = nullptr);
+    const MotorData* can_feedback = nullptr);
 std::array<double, 6> ReadContactGroundTruth(const mjModel* model, const mjData* data);
 }  // namespace qhrr05

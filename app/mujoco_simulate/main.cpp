@@ -24,7 +24,7 @@ void OnSignal(int) {
 }
 
 struct Options {
-    std::string model, config, shm_name, motor_config;
+    std::string model, config, shm_name, hal_config;
     bool without_can = false;
     bool headless = false;
     bool create_shm = false;
@@ -63,8 +63,8 @@ Options Parse(int argc, char** argv) {
             options.config = value;
         else if (arg == "--shm-name")
             options.shm_name = value;
-        else if (arg == "--motor-config")
-            options.motor_config = value;
+        else if (arg == "--hal-config")
+            options.hal_config = value;
         else if (arg == "--duration") {
             std::size_t count = 0;
             options.duration = std::stod(value, &count);
@@ -81,9 +81,9 @@ Options Parse(int argc, char** argv) {
     if (options.headless && options.duration <= 0)
         throw std::runtime_error("--headless requires --duration");
 
-    if ((options.without_can && !options.motor_config.empty()) ||
-        (!options.without_can && options.motor_config.empty()))
-        throw std::runtime_error("select --motor-config YAML or explicit --without-can");
+    if ((options.without_can && !options.hal_config.empty()) ||
+        (!options.without_can && options.hal_config.empty()))
+        throw std::runtime_error("select --hal-config YAML or explicit --without-can");
 
     return options;
 }
@@ -95,6 +95,10 @@ int main(int argc, char** argv) {
 
     try {
         const auto options = Parse(argc, argv);
+
+        if (!options.without_can &&
+            YAML::LoadFile(options.hal_config)["shm_name"].as<std::string>() != options.shm_name)
+            throw std::runtime_error("simulator SHM name must match HAL configuration");
         const auto config = YAML::LoadFile(options.config);
 
         if (config["robot"].as<std::string>() != "qhrr-05")
@@ -137,16 +141,31 @@ int main(int argc, char** argv) {
 
         qhrr05::ResetSimulation(initial, model.get(), data.get());
 
+        {
+            shm_utils::Lock lock(shm);
+
+            if (shm.can_enabled == options.without_can)
+                throw std::runtime_error("SHM transport does not match simulator mode");
+
+            auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
+
+            for (int i = 0; i < 3; ++i)
+                motors.position_offset[i] = initial[i];
+
+            ++shm.motor_sequence;
+        }
+
         std::uint64_t run_id = 0;
         auto plots = std::make_unique<qhrr05::viewer::LivePlots>(history_sec);
-        std::array<double, 3> reference = initial, acceleration{};
+        std::array<double, 3> reference = initial;
         std::uint64_t measurement_sequence = 0;
 
         std::unique_ptr<qhrr05::VirtualMotors> virtual_motors;
         std::unique_ptr<mjData, decltype(&mj_deleteData)> model_data(nullptr, mj_deleteData);
 
         if (!options.without_can) {
-            virtual_motors = std::make_unique<qhrr05::VirtualMotors>(options.motor_config, initial);
+            virtual_motors =
+                std::make_unique<qhrr05::VirtualMotors>(options.hal_config, initial, shm);
             model_data.reset(mj_makeData(model.get()));
 
             if (!model_data)
@@ -160,7 +179,6 @@ int main(int argc, char** argv) {
                     data.get(),
                     gravity_data.get(),
                     reference,
-                    acceleration,
                     measurement_sequence);
 
             const auto feedback = virtual_motors->ReadFeedback();
@@ -172,18 +190,12 @@ int main(int argc, char** argv) {
 
             // Model terms use decoded encoders, not the simulator's physical state.
             for (int i = 0; i < 3; ++i) {
-                model_data->qpos[i] = initial[i] + feedback.motors[i].feedback.position;
-                model_data->qvel[i] = feedback.motors[i].feedback.velocity;
+                model_data->qpos[i] = feedback.position_offset[i] + feedback.feedback[i].position;
+                model_data->qvel[i] = feedback.feedback[i].velocity;
             }
 
-            return qhrr05::UpdateControlIO(shm,
-                model.get(),
-                model_data.get(),
-                gravity_data.get(),
-                reference,
-                {},
-                0,
-                &feedback);
+            return qhrr05::UpdateControlIO(
+                shm, model.get(), model_data.get(), gravity_data.get(), reference, 0, &feedback);
         };
 
         const int object_body = mj_name2id(model.get(), mjOBJ_BODY, "touch_object");
@@ -200,7 +212,7 @@ int main(int argc, char** argv) {
         double target_force = config["magnetic_touch"]["target_force_n"].as<double>();
         const double maximum_force = config["magnetic_touch"]["maximum_force_n"].as<double>();
 
-        ShmCommand applied_command = update_io();
+        ControlData applied_command = update_io();
 
         std::uint64_t request_sequence = 0;
         int mode = 0;  // Mutually exclusive: homing or gravity compensation.
@@ -209,13 +221,13 @@ int main(int argc, char** argv) {
 
         const auto request_control = [&](int requested) {
             shm_utils::Lock lock(shm);
-            const auto sequence = shm.request_sequence + 1;
-            shm.requests[sequence % 2] = {sequence, requested, target_force, sequence};
-            shm.request_sequence = sequence;
-
+            auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+            control.requested_mode = requested;
+            control.target_force = target_force;
+            ++control.motion_sequence;
+            ++shm.control_sequence;
             shm_utils::Notify(shm);
-
-            return sequence;
+            return control.motion_sequence;
         };
 
         const auto reset = [&] {
@@ -224,7 +236,6 @@ int main(int argc, char** argv) {
             plots->Clear();
 
             reference = initial;
-            acceleration.fill(0);
             next_sample = 0;
             holding_reported = false;
             mode = 0;
@@ -270,22 +281,33 @@ int main(int argc, char** argv) {
 
             {
                 shm_utils::Lock lock(shm);
-                frame.sequence = shm.sample_sequence + 1;
-                frame.state_sequence = applied_command.state_sequence;
-                frame.command_sequence = applied_command.sequence;
-                frame.state_published_ns = applied_command.state_published_ns;
-                frame.command_published_ns = applied_command.published_ns;
-                frame.published_ns = shm_utils::MonotonicNs();
+                auto& snapshot = shm_utils::Next(shm.simulation, shm.simulation_sequence);
+                snapshot.run_id = frame.run_id;
+                snapshot.time = frame.time;
+                snapshot.position_gt = frame.position;
+                snapshot.torque_gt = frame.torque;
+                snapshot.toe_position = frame.toe_position;
+                snapshot.contact_force = frame.contact_force;
+                snapshot.contact_torque = frame.contact_torque;
+                snapshot.object_position = frame.object_position;
+                const bool contact = mju_norm3(frame.contact_force.data()) > 0;
 
-                shm.samples[frame.sequence % 2] = frame;
-                shm.sample_sequence = frame.sequence;
+                if (contact != snapshot.contact) {
+                    ++snapshot.contact_event_sequence;
+                    snapshot.contact_event_time = frame.time;
+                }
+
+                snapshot.contact = contact;
+                snapshot.published_ns = shm_utils::MonotonicNs();
+                ++shm.simulation_sequence;
                 shm_utils::Notify(shm);
             }
         };
 
         const auto check_holding = [&] {
             if (!holding_reported && mode == 0 && applied_command.mode == 0 &&
-                applied_command.request_sequence == request_sequence && applied_command.holding) {
+                applied_command.active_motion_sequence == request_sequence &&
+                applied_command.holding) {
                 std::cout << "[homing] HOLD: maintaining configured homing pose" << std::endl;
                 holding_reported = true;
             }
@@ -297,13 +319,7 @@ int main(int argc, char** argv) {
             if (virtual_motors)
                 virtual_motors->Update(model.get(), data.get());
 
-            std::array<double, 3> previous_velocity;
-            std::copy_n(data->qvel, 3, previous_velocity.begin());
-
             mj_step(model.get(), data.get());
-
-            for (int i = 0; i < 3; ++i)
-                acceleration[i] = (data->qvel[i] - previous_velocity[i]) / model->opt.timestep;
 
             ++measurement_sequence;
             mj_forward(model.get(), data.get());
@@ -394,9 +410,9 @@ int main(int argc, char** argv) {
                     target_force = requested;
 
                     shm_utils::Lock shared_lock(shm);
-                    const auto sequence = shm.request_sequence + 1;
-                    shm.requests[sequence % 2] = {sequence, mode, target_force, request_sequence};
-                    shm.request_sequence = sequence;
+                    auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+                    control.target_force = target_force;
+                    ++shm.control_sequence;
                     shm_utils::Notify(shm);
                 });
             };

@@ -82,6 +82,9 @@ target_link_libraries(shm_logger PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_test(NAME launcher_modes COMMAND unshare --user --map-root-user --net --
+        python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_modes_test.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_daemon.sh)
     add_executable(can_control_integration_test tests/can_control_integration_test.cpp)
     target_link_libraries(can_control_integration_test PRIVATE mujoco_simulation)
     set_target_properties(can_control_integration_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
@@ -90,7 +93,7 @@ if(BUILD_TESTING)
         $<TARGET_FILE:can_control_integration_test>
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/control_config.yaml
         ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
-        ${CMAKE_CURRENT_SOURCE_DIR}/config/motor_config/can_hal.yaml
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/hal_config/can_hal.yaml
         $<TARGET_FILE:can_hal> $<TARGET_FILE:task_controller>)
     add_executable(can_hal_test tests/can_hal_test.cpp)
     target_link_libraries(can_hal_test PRIVATE openrobot_can pthread)

@@ -53,19 +53,21 @@ int main(int argc, char** argv) {
         auto& shm = *mapping.get();
         {
             shm_utils::Lock lock(shm);
-            auto& sample = shm.samples[1];
-            sample.sequence = shm.sample_sequence =
-                5;  // Reader starts after four missed publications.
+            auto& sample = shm.simulation[1];
+            shm.simulation_sequence = 5;  // Reader starts after four missed publications.
             sample.run_id = 7;
-            sample.state_sequence = 42;
-            sample.command_sequence = 17;
-            sample.control_time = 1.25;
-            sample.mode = 1;
+            shm.control[0].input_model_sequence = 42;
+            shm.control[0].command_sequence = 17;
+            shm.control[0].control_time = 1.25;
+            shm.control[0].mode = 1;
             sample.time = .123;
-            sample.position = {.1, .2, .3};
+            sample.contact = true;
+            sample.contact_event_sequence = 2;
+            sample.contact_event_time = .08;
+            sample.position_gt = {.1, .2, .3};
             const auto now = shm_utils::MonotonicNs();
-            sample.state_published_ns = now - 5000000;
-            sample.command_published_ns = now - 2000000;
+            shm.control[0].input_model_published_ns = now - 5000000;
+            shm.control[0].published_ns = now - 2000000;
             sample.published_ns = now;
             shm.simulation_finished = true;
         }
@@ -94,6 +96,9 @@ int main(int argc, char** argv) {
             "controller time was not recorded independently");
         Require(
             data["skipped_samples"] == "4", "logger did not evaluate missed double-buffer samples");
+        Require(data["sim_contact"] == "1" && data["sim_contact_event_seq"] == "2" &&
+                    std::stod(data["sim_contact_event_time"]) == .08,
+            "simulation contact events were not read from their canonical block");
         Require(Run(argv[1], name, csv) == 1, "logger overwrote an existing CSV");
         std::ifstream unchanged(csv);
         std::string same_header, same_row;

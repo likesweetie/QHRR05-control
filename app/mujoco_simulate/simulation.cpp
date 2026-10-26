@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
+#include <filesystem>
 #include <linux/can.h>
 #include <linux/can/raw.h>
 #include <net/if.h>
@@ -13,13 +14,17 @@
 #include <sys/socket.h>
 
 namespace qhrr05 {
-VirtualMotors::VirtualMotors(
-    const std::string& config_path, const std::array<double, 3>& encoder_origin)
-    : encoder_origin_(encoder_origin) {
-    const auto config = YAML::LoadFile(config_path);
+VirtualMotors::VirtualMotors(const std::string& hal_config_path,
+    const std::array<double, 3>& encoder_origin,
+    ShmData& shared)
+    : encoder_origin_(encoder_origin), shared_(shared) {
+    const auto config = YAML::LoadFile(hal_config_path);
     const auto interface = config["interface"].as<std::string>();
     const auto ids = config["motor_ids"].as<std::vector<unsigned>>();
-    const auto mit = config["mit"];
+    const auto motor_path = std::filesystem::path(hal_config_path).parent_path() /
+                            config["motor_config"].as<std::string>();
+    const auto motor = YAML::LoadFile(motor_path.string());
+    const auto mit = motor["mit"];
 
     if (ids.size() != 3 || interface.empty() || interface.size() >= IFNAMSIZ)
         throw std::runtime_error("virtual motors require an interface and three IDs");
@@ -40,7 +45,6 @@ VirtualMotors::VirtualMotors(
     openrobot::EncodePosition({}, profile_);
     openrobot::EncodeProfile(profile_);
 
-    can_ = std::make_unique<shm_utils::Mapping>(config["shm_name"].as<std::string>());
     const auto peer = ReadFeedback();
 
     if (!peer.running)
@@ -102,10 +106,10 @@ VirtualMotors::~VirtualMotors() {
         ::close(socket_);
 }
 
-ShmCanState VirtualMotors::ReadFeedback() const {
-    auto& shm = *can_->get();
+MotorData VirtualMotors::ReadFeedback() const {
+    auto& shm = shared_;
     shm_utils::Lock lock(shm);
-    auto state = shm.can_states[shm.can_state_sequence % 2];
+    auto state = shm.motors[shm.motor_sequence % 2];
 
     if (shm.failed)
         throw std::runtime_error("CAN HAL failed");
@@ -223,86 +227,88 @@ void ResetSimulation(const std::array<double, 3>& initial, const mjModel* model,
     mj_forward(model, data);
 }
 
-ShmCommand UpdateControlIO(ShmData& shm,
+ControlData UpdateControlIO(ShmData& shm,
     const mjModel* model,
     mjData* data,
     mjData* gravity_data,
     std::array<double, 3>& reference,
-    const std::array<double, 3>& acceleration,
     std::uint64_t measurement_sequence,
-    const ShmCanState* can_feedback) {
+    const MotorData* can_feedback) {
     mj_forward(model, data);
-
-    // Separate zero-velocity state: qfrc_bias contains gravity without Coriolis.
     mju_copy(gravity_data->qpos, data->qpos, model->nq);
     mju_zero(gravity_data->qvel, model->nv);
     mj_forward(model, gravity_data);
 
-    ShmCommand command;
+    ModelData state;
+    std::copy_n(gravity_data->qfrc_bias, 3, state.gravity_torque.begin());
+    std::copy_n(data->qfrc_bias, 3, state.bias_torque.begin());
+    std::copy_n(data->qfrc_passive, 3, state.passive_torque.begin());
+    std::copy_n(model->dof_frictionloss, 3, state.friction_limit.begin());
+    mj_fullM(model, state.mass.data(), data->qM);
+    const int site = mj_name2id(model, mjOBJ_SITE, "FL_foot");
 
+    if (site < 0)
+        throw std::runtime_error("missing FL_foot site");
+
+    mj_jacSite(model, data, state.jacobian.data(), nullptr, site);
+    std::copy_n(data->site_xpos + 3 * site, 3, state.toe_position.begin());
+
+    for (int i = 0; i < 3; ++i) {
+        state.joint_min[i] = model->jnt_range[2 * i];
+        state.joint_max[i] = model->jnt_range[2 * i + 1];
+    }
+
+    ControlData control;
+    MotorData motors;
     {
         shm_utils::Lock lock(shm);
 
         if (shm.stopping)
             throw std::runtime_error("SHM stopped during control");
 
-        const auto sequence = shm.state_sequence + 1;
-        auto& state = shm.states[sequence % 2];
-        state.sequence = sequence;
+        state.published_ns = shm_utils::MonotonicNs();
+        shm.model[(shm.model_sequence + 1) % 2] = state;
+        ++shm.model_sequence;
 
-        std::copy_n(data->qpos, 3, state.position.begin());
-        std::copy_n(data->qvel, 3, state.velocity.begin());
-        std::copy_n(gravity_data->qfrc_bias, 3, state.gravity_torque.begin());
+        if (!can_feedback) {
+            auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
+            next.sample_dt = model->opt.timestep;
+            ++next.feedback_sequence;
+            next.feedback_published_ns = state.published_ns;
 
-        state.measurement_sequence = measurement_sequence;
-        state.measurement_dt = model->opt.timestep;
-        state.acceleration = acceleration;
+            for (int i = 0; i < 3; ++i) {
+                next.feedback[i] = {data->qpos[i] - next.position_offset[i],
+                    data->qvel[i],
+                    data->qfrc_actuator[i] / next.profile.kt_output,
+                    25};
 
-        std::copy_n(data->qfrc_actuator, 3, state.motor_torque.begin());
+                if (next.received_sequence[i] != measurement_sequence || !next.received_ns[i])
+                    next.received_ns[i] = state.published_ns;
 
-        if (can_feedback)
-            for (int i = 0; i < 3; ++i)
-                state.motor_torque[i] =
-                    can_feedback->motors[i].feedback.current * can_feedback->profile.kt_output;
-        std::copy_n(data->qfrc_bias, 3, state.bias_torque.begin());
-        std::copy_n(data->qfrc_passive, 3, state.passive_torque.begin());
-        std::copy_n(model->dof_frictionloss, 3, state.friction_limit.begin());
+                next.received_sequence[i] = measurement_sequence;
+            }
 
-        mj_fullM(model, state.mass.data(), data->qM);
-        const int site = mj_name2id(model, mjOBJ_SITE, "FL_foot");
-
-        if (site < 0)
-            throw std::runtime_error("missing FL_foot site");
-
-        mj_jacSite(model, data, state.jacobian.data(), nullptr, site);
-        std::copy_n(data->site_xpos + 3 * site, 3, state.toe_position.begin());
-
-        for (int i = 0; i < 3; ++i) {
-            state.joint_min[i] = model->jnt_range[2 * i];
-            state.joint_max[i] = model->jnt_range[2 * i + 1];
+            ++shm.motor_sequence;
         }
 
-        state.published_ns = shm_utils::MonotonicNs();
-        shm.state_sequence = sequence;
+        motors = shm.motors[shm.motor_sequence % 2];
+        control = shm.control[shm.control_sequence % 2];
         shm_utils::Notify(shm);
-
-        // Both loops are independent: apply the latest published command,
-        // including repeated commands when the controller runs more slowly.
-        command = shm.commands[shm.command_sequence % 2];
     }
 
     for (int i = 0; i < 3; ++i) {
-        if (!std::isfinite(command.torque[i]) || !std::isfinite(command.reference[i]))
+        if (!std::isfinite(motors.debug_torque[i]) || !std::isfinite(motors.reference[i]))
             throw std::runtime_error("non-finite joint output");
 
         if (!can_feedback)
-            data->ctrl[i] = std::clamp(command.torque[i],
+            data->ctrl[i] = std::clamp(motors.debug_torque[i],
                 model->actuator_ctrlrange[2 * i],
                 model->actuator_ctrlrange[2 * i + 1]);
-        reference[i] = command.reference[i];
+
+        reference[i] = motors.reference[i];
     }
 
-    return command;
+    return control;
 }
 
 std::array<double, 6> ReadContactGroundTruth(const mjModel* model, const mjData* data) {

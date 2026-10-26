@@ -8,7 +8,15 @@
 #include <cstdio>
 
 namespace qhrr05::viewer {
-using Sample = ShmSample;
+// Viewer-local plot sample. Shared memory keeps only the canonical domains.
+struct Sample {
+    double time = 0, control_time = 0;
+    std::uint64_t run_id = 0;
+    int mode = 0;
+    std::array<double, 3> position{}, reference{}, torque{};
+    MagneticTelemetry magnetic{};
+    std::array<double, 3> toe_position{}, contact_force{}, contact_torque{}, object_position{};
+};
 
 class LivePlots {
 public:

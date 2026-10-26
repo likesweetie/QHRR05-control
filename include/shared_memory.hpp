@@ -5,23 +5,6 @@
 #include <pthread.h>
 #include "motor_can/openrobot_protocol.hpp"
 
-// Fixed qhrr-05 joint order: FL hip, thigh, calf. All accesses use ShmData::mutex.
-struct ShmState {
-    std::uint64_t sequence = 0;
-    std::uint64_t published_ns = 0;
-
-    std::array<double, 3> position{}, velocity{}, gravity_torque{};
-
-    // Generic, time-aligned model/encoder feedback. No contact/constraint truth.
-    std::uint64_t measurement_sequence = 0;
-    double measurement_dt = 0;
-
-    std::array<double, 3> acceleration{}, motor_torque{}, bias_torque{}, passive_torque{},
-        friction_limit{};
-    std::array<double, 9> mass{}, jacobian{};  // Row-major, J maps dq to world toe velocity.
-    std::array<double, 3> toe_position{}, joint_min{}, joint_max{};
-};
-
 enum class MagneticPhase : int { Free, Candidate, Following, Releasing };
 enum class MagneticReason : int {
     None,
@@ -79,86 +62,76 @@ struct MagneticTelemetry {
     std::array<double, 3> estimated_force{}, external_torque{}, normal{}, toe_reference{};
 };
 
-struct ShmControlRequest {
-    std::uint64_t sequence = 0;
-    int mode = 0;  // 0=homing, 1=gravity, 2=magnetic touch; a new request restarts motion.
-    double target_force = 3.0;  // N, live request for magnetic mode.
-    std::uint64_t motion_sequence = 0;  // Changes only for mode/restart, not a slider edit.
-};
+// Canonical motor data for HR / HP / KP; every array follows that axis order.
+struct MotorData {
+    // Controller-owned outputs.
+    std::array<openrobot::PositionTarget, 3> command{};
+    std::array<double, 3> reference{}, debug_torque{};
 
-struct ShmCommand {
-    std::uint64_t sequence = 0;  // Controller's own publication counter.
-    std::uint64_t published_ns = 0;
-    std::uint64_t state_sequence = 0, state_published_ns = 0;
-    std::uint64_t request_sequence = 0;
-    double control_time = 0;  // Controller's own monotonic elapsed time, seconds.
-    int mode = 0;
-    bool holding = false;
-    MagneticTelemetry magnetic{};
-    std::array<double, 3> torque{}, reference{};
-};
+    // HAL-owned feedback and per-axis CAN status.
+    std::array<openrobot::Feedback, 3> feedback{};
+    std::array<std::uint64_t, 3> received_ns{}, received_sequence{};
+    std::array<std::uint64_t, 3> tx_frames{}, rx_frames{}, invalid_frames{};
+    std::array<bool, 3> profile_verified{}, enable_requested{}, enabled{};
 
-struct ShmSample {
-    std::uint64_t sequence = 0;
-    std::uint64_t published_ns = 0;
-    std::uint64_t run_id = 0;
-    std::uint64_t state_sequence = 0, command_sequence = 0;
-    std::uint64_t state_published_ns = 0, command_published_ns = 0;
-    double time = 0, control_time = 0;
-    int mode = 0;
-    std::array<double, 3> position{}, reference{}, torque{};
-    MagneticTelemetry magnetic{};
-    std::array<double, 3> toe_position{}, contact_force{}, contact_torque{},
-        object_position{};  // GT ONLY; never in ShmState.
-};
+    // Simulation bootstrap, then runtime calibration.
+    std::array<double, 3> position_offset{};
 
-struct ShmJoystick {
-    std::uint64_t sequence = 0;
-    std::uint64_t published_ns = 0;
-    std::array<double, 3> axes{};  // Original joystick mapping: forward, lateral, yaw.
-    std::array<bool, 11> buttons{};
-};
-
-// Separate CAN HAL transport channels. No torque/feedforward input exists.
-struct ShmMotorTargets {
-    std::uint64_t sequence = 0, published_ns = 0;
-    std::array<openrobot::PositionTarget, 3> motors{};
-};
-
-struct ShmCanMotor {
-    openrobot::Feedback feedback{};
-    std::uint64_t received_ns = 0, feedback_sequence = 0;
-    std::uint64_t tx_frames = 0, rx_frames = 0, invalid_frames = 0;
-    bool profile_verified = false, enable_requested = false, enabled = false;
-};
-
-struct ShmCanState {
     openrobot::MitProfile profile{};
-    std::uint64_t sequence = 0, published_ns = 0, command_sequence = 0;
-    std::uint64_t last_tx_ns = 0, cycles = 0, socket_errors = 0;
+    std::uint64_t command_sequence = 0, command_published_ns = 0;  // Controller
+    std::uint64_t feedback_sequence = 0, feedback_published_ns = 0;  // HAL (sim in debug)
+    std::uint64_t consumed_command_sequence = 0, last_tx_ns = 0, cycles = 0, socket_errors = 0;
+    double sample_dt = .001;
     bool running = false;
-    std::array<ShmCanMotor, 3> motors{};
+};
+
+// Simulator-owned model information, evaluated at decoded joint positions.
+struct ModelData {
+    std::uint64_t published_ns = 0;
+    std::array<double, 3> gravity_torque{}, bias_torque{}, passive_torque{}, friction_limit{};
+    std::array<double, 9> mass{}, jacobian{};
+    std::array<double, 3> toe_position{}, joint_min{}, joint_max{};
+};
+
+struct ControlData {
+    int requested_mode = 0;  // GUI owns requests. Slider edits preserve motion_sequence.
+    double target_force = 3;
+    std::uint64_t motion_sequence = 0;
+
+    int mode = 0;  // Controller owns status and observer output.
+    bool holding = false;
+    double control_time = 0;
+    std::uint64_t command_sequence = 0, published_ns = 0, active_motion_sequence = 0;
+    std::uint64_t input_model_sequence = 0, input_model_published_ns = 0;  // Logger trace
+    MagneticTelemetry magnetic{};
+
+    std::array<double, 3> joystick_axes{};  // Optional aux_reader owns these fields only.
+    std::array<bool, 11> joystick_buttons{};
+    std::uint64_t joystick_sequence = 0, joystick_published_ns = 0;
+};
+
+// Physical truth and object/contact events stay on the simulation SHM path.
+struct SimulationData {
+    std::uint64_t published_ns = 0, run_id = 0;
+    double time = 0;
+    std::array<double, 3> position_gt{}, torque_gt{}, toe_position{};
+    std::array<double, 3> contact_force{}, contact_torque{}, object_position{};
+    bool contact = false;
+    std::uint64_t contact_event_sequence = 0;
+    double contact_event_time = 0;
 };
 
 struct ShmData {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
+    bool stopping = false, failed = false, simulation_finished = false, can_enabled = false;
 
-    bool stopping = false, failed = false, simulation_finished = false;
-    std::uint64_t request_sequence = 0;
-    std::uint64_t state_sequence = 0, command_sequence = 0, sample_sequence = 0,
-                  joystick_sequence = 0;
-
-    // Writers fill the other slot, then publish its sequence under the shared mutex.
-    // Readers copy the selected slot under the same mutex, so an old slot cannot
-    // be overwritten while a slower reader is still copying it.
-    std::array<ShmState, 2> states{};
-    std::array<ShmControlRequest, 2> requests{};
-    std::array<ShmCommand, 2> commands{};
-    std::array<ShmSample, 2> samples{};
-    std::array<ShmJoystick, 2> joystick{};
-
-    std::uint64_t motor_target_sequence = 0, can_state_sequence = 0;
-    std::array<ShmMotorTargets, 2> motor_targets{};
-    std::array<ShmCanState, 2> can_states{};
+    // All copies/publications hold mutex. Multiwriter channels copy the CURRENT
+    // published slot before updating their own fields; never publish a stale bank.
+    std::uint64_t motor_sequence = 0, model_sequence = 0, control_sequence = 0,
+                  simulation_sequence = 0;
+    std::array<MotorData, 2> motors{};
+    std::array<ModelData, 2> model{};
+    std::array<ControlData, 2> control{};
+    std::array<SimulationData, 2> simulation{};
 };

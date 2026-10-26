@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
     const std::string suffix = std::to_string(::getpid());
     const std::string name = "/qhrr05-can-test-" + suffix;
     const std::string config = "/tmp/qhrr05-can-test-" + suffix + ".yaml";
+    const std::string motor_profile = config + ".motor.yaml";
     const std::string csv_path = "/tmp/qhrr05-can-test-" + suffix + ".csv";
 
     try {
@@ -63,9 +64,12 @@ int main(int argc, char** argv) {
         address.can_ifindex = ::if_nametoindex("vcan0");
         Require(::bind(peer, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0,
             "peer bind failed");
+        std::ofstream(motor_profile)
+            << "mit: {velocity_max_rad_s: 45, torque_max_nm: 53, kt_output_nm_a: 1.44, gear_ratio: 9, kd_scale: 1}\n";
         std::ofstream(config)
             << "shm_name: " << name
-            << "\ninterface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nmotor_ids: [1, 2, 3]\nmit: {velocity_max_rad_s: 45, torque_max_nm: 53, kt_output_nm_a: 1.44, gear_ratio: 9, kd_scale: 1}\n";
+            << "\ninterface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nmotor_ids: [1, 2, 3]\nmotor_config: "
+            << std::filesystem::path(motor_profile).filename().string() << "\n";
 
         child = ::fork();
         Require(child >= 0, "fork failed");
@@ -154,14 +158,13 @@ int main(int argc, char** argv) {
         }
         const auto snapshot = [&] {
             shm_utils::Lock lock(shm);
-            return shm.can_states[shm.can_state_sequence % 2];
+            return shm.motors[shm.motor_sequence % 2];
         };
         until([&] {
             const auto s = snapshot();
-            return s.motors[0].profile_verified && s.motors[1].profile_verified &&
-                   s.motors[2].profile_verified;
+            return s.profile_verified[0] && s.profile_verified[1] && s.profile_verified[2];
         });
-        Require(snapshot().motors[0].rx_frames <= 2, "HAL received its own requests");
+        Require(snapshot().rx_frames[0] <= 2, "HAL received its own requests");
 
         const auto command = [&](int axis, const char* position) {
             const std::string index = std::to_string(axis);
@@ -194,27 +197,27 @@ int main(int argc, char** argv) {
 
         {
             shm_utils::Lock lock(shm);
-            ShmMotorTargets target;
-            target.sequence = shm.motor_target_sequence + 1;
-            target.published_ns = shm_utils::MonotonicNs();
+            auto target = shm.motors[shm.motor_sequence % 2];
+            ++target.command_sequence;
+            target.command_published_ns = shm_utils::MonotonicNs();
 
             for (int i = 0; i < 3; ++i)
-                target.motors[i] = {true, (i + 1) * 0.1, 0, 40, 0.3};
+                target.command[i] = {true, (i + 1) * 0.1, 0, 40, 0.3};
 
-            shm.motor_targets[target.sequence % 2] = target;
-            shm.motor_target_sequence = target.sequence;
+            shm.motors[(shm.motor_sequence + 1) % 2] = target;
+            ++shm.motor_sequence;
         }
 
         until([&] {
             return controls[0] > 20 && controls[1] > 20 && controls[2] > 20 &&
-                   snapshot().motors[2].feedback_sequence > 10;
+                   snapshot().received_sequence[2] > 10;
         });
         auto state = snapshot();
-        Require(state.motors[0].feedback.current == -8.25 &&
-                    state.motors[0].feedback.position == measured.position,
+        Require(
+            state.feedback[0].current == -8.25 && state.feedback[0].position == measured.position,
             "feedback not published through SHM");
         const auto old_cycles = state.cycles;
-        const auto old_feedback = state.motors[0].feedback_sequence;
+        const auto old_feedback = state.received_sequence[0];
         const auto quiet_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
 
         while (std::chrono::steady_clock::now() < quiet_until) {
@@ -225,7 +228,7 @@ int main(int argc, char** argv) {
         state = snapshot();
         Require(state.running && state.cycles > old_cycles + 20,
             "HAL waits for feedback or stops on response delay");
-        Require(state.motors[0].feedback_sequence < old_feedback + 10,
+        Require(state.received_sequence[0] < old_feedback + 10,
             "cached feedback was republished as a new measurement");
 
         can_frame bad{};
@@ -234,16 +237,16 @@ int main(int argc, char** argv) {
         bad.data[0] = 0xC0;
         Require(::write(peer, &bad, sizeof(bad)) == sizeof(bad), "malformed test write failed");
         until([&] {
-            return snapshot().motors[0].invalid_frames == 1;
+            return snapshot().invalid_frames[0] == 1;
         });
 
         {
             shm_utils::Lock lock(shm);
-            auto target = shm.motor_targets[shm.motor_target_sequence % 2];
-            target.sequence = shm.motor_target_sequence + 1;
-            target.motors[0].enabled = false;
-            shm.motor_targets[target.sequence % 2] = target;
-            shm.motor_target_sequence = target.sequence;
+            auto target = shm.motors[shm.motor_sequence % 2];
+            ++target.command_sequence;
+            target.command[0].enabled = false;
+            shm.motors[(shm.motor_sequence + 1) % 2] = target;
+            ++shm.motor_sequence;
         }
 
         until([&] {
@@ -258,8 +261,8 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        Require(controls[0] == stopped_controls && !snapshot().motors[0].enabled,
-            "C0 resumed after Release");
+        Require(
+            controls[0] == stopped_controls && !snapshot().enabled[0], "C0 resumed after Release");
         ::kill(child, SIGTERM);
         int status = 0;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -309,6 +312,7 @@ int main(int argc, char** argv) {
         ::close(peer);
 
     std::filesystem::remove(config);
+    std::filesystem::remove(motor_profile);
     std::filesystem::remove(csv_path);
     return 0;
 }

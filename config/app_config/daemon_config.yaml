@@ -8,18 +8,18 @@ processes:
     terminal_title: QHRR05-CAN-HAL
     # Use the native GNOME executable; Ubuntu's Python wrapper closes passed FDs.
     terminal_exec: /usr/bin/gnome-terminal.real
-    args: [config/motor_config/can_hal.yaml]
+    args: [config/hal_config/can_hal.yaml]
 
   - name: mujoco_simulate
     exec_path: mujoco_simulate
     working_directory: ../..
     wait_ready: true
-    args: [--create-shm, --model, models/qhrr-05/scene.xml, --control-config, config/control_config/control_config.yaml, --shm-name, /qhrr05, --motor-config, config/motor_config/can_hal.yaml]
+    args: [--model, models/qhrr-05/scene.xml, --control-config, config/control_config/control_config.yaml, --shm-name, /qhrr05, --hal-config, config/hal_config/can_hal.yaml]
 
   - name: task_controller
     exec_path: task_controller
     working_directory: ../..
-    args: [config/control_config/control_config.yaml, /qhrr05, --motor-config, config/motor_config/can_hal.yaml]
+    args: [config/control_config/control_config.yaml, /qhrr05]
 
 # Selected only by daemon --without-can; never used after a CAN startup failure.
 debug_processes:

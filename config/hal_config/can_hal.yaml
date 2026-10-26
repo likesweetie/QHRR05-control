@@ -1,0 +1,8 @@
+# Runtime transport and axis-to-CAN mapping. HAL owns the shared region.
+shm_name: /qhrr05
+interface: vcan0
+frequency_hz: 500.0
+statistics_hz: 10.0
+motor_ids: [1, 2, 3]  # HR, HP, KP; SID = 0x140 + ID.
+# Resolved relative to this YAML, independently of the process working directory.
+motor_config: ../motor_config/ak10_9_v3.yaml

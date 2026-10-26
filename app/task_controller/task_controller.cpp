@@ -5,24 +5,20 @@
 #include <yaml-cpp/yaml.h>
 
 namespace qhrr05 {
-TaskController::TaskController(const std::string& config_path,
-    const std::string& shm_name,
-    const std::string& motor_config_path,
-    bool without_can)
-    : shm_(shm_name), homing_(std::make_unique<HomingController>(config_path)),
+TaskController::TaskController(
+    const std::string& config_path, const std::string& shm_name, bool without_can)
+    : shm_(shm_name), without_can_(without_can),
+      homing_(std::make_unique<HomingController>(config_path)),
       gravity_(std::make_unique<GravityCompensationController>(config_path)),
       magnetic_(std::make_unique<MagneticTouchController>(config_path)) {
-    // Simulation bootstrap only. Hardware stopper calibration replaces this offset later.
-    encoder_origin_ = homing_->initial_position();
-
-    if (!without_can) {
-        const auto config = YAML::LoadFile(motor_config_path);
-        can_ = std::make_unique<shm_utils::Mapping>(config["shm_name"].as<std::string>());
-        auto& shm = *can_->get();
+    {
+        auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
+        const auto& motors = shm.motors[shm.motor_sequence % 2];
 
-        if (shm.failed || shm.stopping || !shm.can_states[shm.can_state_sequence % 2].running)
-            throw std::runtime_error("CAN HAL is not initialized");
+        if (shm.can_enabled == without_can_ ||
+            (!without_can_ && (shm.failed || shm.stopping || !motors.running)))
+            throw std::runtime_error("SHM transport does not match controller mode");
     }
 
     const double frequency =
@@ -41,7 +37,7 @@ TaskController::TaskController(const std::string& config_path,
 }
 
 bool TaskController::ReadInput() {
-    ShmState state;
+    MotionFeedback state;
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
@@ -52,75 +48,67 @@ bool TaskController::ReadInput() {
         if (shm.stopping)
             return false;
 
-        state = shm.states[shm.state_sequence % 2];
-        const auto& request = shm.requests[shm.request_sequence % 2];
-        requested_mode_ = request.mode;
-        request_sequence_ = request.motion_sequence;
-        target_force_ = request.target_force;
+        static_cast<ModelData&>(state) = shm.model[shm.model_sequence % 2];
+        model_sequence_ = shm.model_sequence;
+        model_published_ns_ = state.published_ns;
+        motor_data_ = shm.motors[shm.motor_sequence % 2];
+        const auto& control = shm.control[shm.control_sequence % 2];
+        requested_mode_ = control.requested_mode;
+        request_sequence_ = control.motion_sequence;
+        target_force_ = control.target_force;
     }
 
     if (requested_mode_ < 0 || requested_mode_ > 2)
         throw std::runtime_error("invalid controller mode");
 
-    if (can_) {
-        {
-            auto& shm = *can_->get();
-            shm_utils::Lock lock(shm);
+    bool fresh = false;
+    std::uint64_t newest_ns = measurement_ns_;
 
-            if (shm.failed)
-                throw std::runtime_error("CAN HAL failed");
+    for (int i = 0; i < 3; ++i) {
+        encoder_origin_[i] = motor_data_.position_offset[i];
+        state.position[i] = motor_data_.position_offset[i] + motor_data_.feedback[i].position;
+        state.velocity[i] = motor_data_.feedback[i].velocity;
+        state.motor_torque[i] = motor_data_.feedback[i].current * motor_data_.profile.kt_output;
 
-            if (shm.stopping)
-                return false;
+        if (motor_data_.received_sequence[i] != received_sequence_[i]) {
+            const auto samples = motor_data_.received_sequence[i] - received_sequence_[i];
+            const double dt = without_can_ ? samples * motor_data_.sample_dt
+                                           : (motor_data_.received_ns[i] - received_ns_[i]) / 1e9;
 
-            can_feedback_ = shm.can_states[shm.can_state_sequence % 2];
+            if (received_sequence_[i] && dt > 0)
+                measured_acceleration_[i] =
+                    (motor_data_.feedback[i].velocity - measured_velocity_[i]) / dt;
+
+            received_sequence_[i] = motor_data_.received_sequence[i];
+            received_ns_[i] = motor_data_.received_ns[i];
+            measured_velocity_[i] = motor_data_.feedback[i].velocity;
+            newest_ns = std::max(newest_ns, motor_data_.received_ns[i]);
+            fresh = true;
         }
 
-        if (!can_feedback_.running)
-            return false;
-
-        bool fresh = false;
-        std::uint64_t newest_ns = measurement_ns_;
-
-        for (int i = 0; i < 3; ++i) {
-            const auto& motor = can_feedback_.motors[i];
-            state.position[i] = encoder_origin_[i] + motor.feedback.position;
-            state.velocity[i] = motor.feedback.velocity;
-            state.motor_torque[i] = motor.feedback.current * can_feedback_.profile.kt_output;
-
-            if (motor.feedback_sequence != received_sequence_[i]) {
-                if (received_ns_[i] && motor.received_ns > received_ns_[i])
-                    measured_acceleration_[i] = (motor.feedback.velocity - measured_velocity_[i]) /
-                                                ((motor.received_ns - received_ns_[i]) / 1e9);
-
-                received_sequence_[i] = motor.feedback_sequence;
-                received_ns_[i] = motor.received_ns;
-                measured_velocity_[i] = motor.feedback.velocity;
-                newest_ns = std::max(newest_ns, motor.received_ns);
-                fresh = true;
-            }
-        }
-
-        if (fresh) {
-            if (measurement_ns_ && newest_ns > measurement_ns_)
-                state.measurement_dt = (newest_ns - measurement_ns_) / 1e9;
-
-            measurement_ns_ = newest_ns;
-            ++measurement_sequence_;
-        }
-
-        state.acceleration = measured_acceleration_;
-        state.measurement_sequence = measurement_sequence_;
+        if (!std::isfinite(state.position[i]) || !std::isfinite(state.velocity[i]) ||
+            !std::isfinite(state.gravity_torque[i]))
+            throw std::runtime_error("non-finite joint input");
     }
 
-    for (int joint = 0; joint < 3; ++joint)
-        if (!std::isfinite(state.position[joint]) || !std::isfinite(state.velocity[joint]) ||
-            !std::isfinite(state.gravity_torque[joint]))
-            throw std::runtime_error("non-finite joint input");
+    state.measurement_dt = motor_data_.sample_dt;
 
+    if (fresh) {
+        if (!without_can_ && measurement_ns_ && newest_ns > measurement_ns_)
+            state.measurement_dt = (newest_ns - measurement_ns_) / 1e9;
+
+        measurement_ns_ = newest_ns;
+
+        if (without_can_)
+            measurement_sequence_ =
+                *std::max_element(received_sequence_.begin(), received_sequence_.end());
+        else
+            ++measurement_sequence_;
+    }
+
+    state.acceleration = measured_acceleration_;
+    state.measurement_sequence = measurement_sequence_;
     feedback_ = state;
-    state_sequence_ = state.sequence;
-    state_published_ns_ = state.published_ns;
     joint_position_ = state.position;
     joint_velocity_ = state.velocity;
     gravity_torque_ = state.gravity_torque;
@@ -162,7 +150,7 @@ void TaskController::Control() {
             control_time_, feedback_, target_force_, torque_command_, position_reference_);
     }
 
-    if (can_) {
+    if (!without_can_) {
         const auto& kp = mode_ == 0 ? homing_->kp()
                                     : (mode_ == 1 ? gravity_->kp_motor() : magnetic_->kp_motor());
         const auto& kd = mode_ == 0 ? homing_->kd()
@@ -170,8 +158,8 @@ void TaskController::Control() {
         const auto home = homing_->Reference(control_time_);
         bool profiles_ready = true;
 
-        for (const auto& motor : can_feedback_.motors)
-            profiles_ready &= motor.profile_verified;
+        for (bool verified : motor_data_.profile_verified)
+            profiles_ready &= verified;
 
         for (int i = 0; i < 3; ++i) {
             // Remove the motor D term already included in torque_command_, then
@@ -185,74 +173,65 @@ void TaskController::Control() {
                 mode_ == 0 ? home.velocity[i] : 0,
                 kp[i],
                 kd[i]};
-            openrobot::EncodePosition(motor_targets_[i], can_feedback_.profile);
+            openrobot::EncodePosition(motor_targets_[i], motor_data_.profile);
         }
     }
 }
 
 void TaskController::WriteOutput() {
-    {
-        auto& shm = *shm_.get();
-        shm_utils::Lock lock(shm);
+    auto& shm = *shm_.get();
+    shm_utils::Lock lock(shm);
 
-        if (shm.stopping)
-            return;
+    if (shm.failed)
+        throw std::runtime_error("SHM failed during output");
 
-        ++cycle_;
-        auto& command = shm.commands[cycle_ % 2];
+    if (shm.stopping)
+        return;
 
-        command.sequence = cycle_;
-        command.state_sequence = state_sequence_;
-        command.state_published_ns = state_published_ns_;
-        command.request_sequence = active_request_sequence_;
+    auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
+    ++motors.command_sequence;
+    motors.command_published_ns = shm_utils::MonotonicNs();
 
-        command.control_time = control_time_;
-        command.mode = mode_;
-        command.holding = holding_;
-
-        command.torque = torque_command_;
-        command.reference = position_reference_;
-        command.magnetic = mode_ == 2 ? magnetic_->telemetry() : MagneticTelemetry{};
-
-        command.published_ns = shm_utils::MonotonicNs();
-
-        shm.command_sequence = cycle_;
-        shm_utils::Notify(shm);
+    for (int i = 0; i < 3; ++i) {
+        motors.command[i] = motor_targets_[i];
+        motors.debug_torque[i] = torque_command_[i];
+        motors.reference[i] = position_reference_[i];
     }
 
-    if (can_) {
-        auto& shm = *can_->get();
-        shm_utils::Lock lock(shm);
+    auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+    control.command_sequence = motors.command_sequence;
+    control.published_ns = motors.command_published_ns;
+    control.input_model_sequence = model_sequence_;
+    control.input_model_published_ns = model_published_ns_;
+    control.active_motion_sequence = active_request_sequence_;
+    control.control_time = control_time_;
+    control.mode = mode_;
+    control.holding = holding_;
+    control.magnetic = mode_ == 2 ? magnetic_->telemetry() : MagneticTelemetry{};
 
-        if (shm.failed)
-            throw std::runtime_error("CAN HAL failed during output");
-
-        if (shm.stopping)
-            return;
-
-        const auto sequence = shm.motor_target_sequence + 1;
-        auto& target = shm.motor_targets[sequence % 2];
-        target.sequence = sequence;
-        target.published_ns = shm_utils::MonotonicNs();
-        target.motors = motor_targets_;
-        shm.motor_target_sequence = sequence;
-        shm_utils::Notify(shm);
-    }
+    ++shm.motor_sequence;
+    ++shm.control_sequence;
+    shm_utils::Notify(shm);
 }
 
 void TaskController::Release() {
-    if (!can_)
+    if (without_can_)
         return;
 
-    auto& shm = *can_->get();
+    auto& shm = *shm_.get();
     shm_utils::Lock lock(shm);
 
     if (shm.stopping)
         return;
 
-    const auto sequence = shm.motor_target_sequence + 1;
-    shm.motor_targets[sequence % 2] = {sequence, shm_utils::MonotonicNs(), {}};
-    shm.motor_target_sequence = sequence;
+    auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
+
+    for (auto& target : motors.command)
+        target.enabled = false;
+
+    ++motors.command_sequence;
+    motors.command_published_ns = shm_utils::MonotonicNs();
+    ++shm.motor_sequence;
     shm_utils::Notify(shm);
 }
 

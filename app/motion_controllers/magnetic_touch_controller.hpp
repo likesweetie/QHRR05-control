@@ -16,9 +16,9 @@ public:
         return kd_motor_;
     }
 
-    void Start(double time, const ShmState& feedback);
+    void Start(double time, const MotionFeedback& feedback);
     void Compute(double time,
-        const ShmState& feedback,
+        const MotionFeedback& feedback,
         double target_force,
         std::array<double, 3>& torque,
         std::array<double, 3>& reference);

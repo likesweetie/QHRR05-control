@@ -1,7 +1,7 @@
 robot: qhrr-05
 
 task_controller:
-  frequency_hz: 1000.0  # Independent monotonic wall-clock control loop.
+  frequency_hz: 500.0  # Independent monotonic wall-clock control loop.
 
 # Joint order: FL hip roll, thigh pitch, calf pitch.
 # Gains accept either a scalar or three joint values.
@@ -13,7 +13,7 @@ homing:
   duration_sec: 3.0
 
 gravity_compensation:
-  kp_motor: [40.0, 40.0, 40.0]  # Simulated inner position servo, N*m/rad.
+  kp_motor: [2.0, 2.0, 2.0]  # Simulated inner position servo, N*m/rad.
   kd_motor: [0.3, 0.3, 0.3]    # N*m*s/rad.
   alpha: 1.0  # Gravity compensation ratio, 0..1.
   # N*m/rad; desired pose is captured when entering gravity mode.

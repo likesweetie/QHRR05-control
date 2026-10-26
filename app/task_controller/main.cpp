@@ -17,12 +17,11 @@ int main(int argc, char** argv) {
 
     try {
         const char* usage = "usage: task_controller CONTROL_CONFIG SHM_NAME "
-                            "[--motor-config YAML | --without-can]";
+                            "[--without-can]";
 
         if (argc < 3)
             throw std::runtime_error(usage);
 
-        std::string motor_config;
         bool without_can = false;
 
         for (int i = 3; i < argc; ++i) {
@@ -30,16 +29,11 @@ int main(int argc, char** argv) {
 
             if (argument == "--without-can")
                 without_can = true;
-            else if (argument == "--motor-config" && i + 1 < argc)
-                motor_config = argv[++i];
             else
                 throw std::runtime_error(usage);
         }
 
-        if ((without_can && !motor_config.empty()) || (!without_can && motor_config.empty()))
-            throw std::runtime_error(usage);
-
-        qhrr05::TaskController task(argv[1], argv[2], motor_config, without_can);
+        qhrr05::TaskController task(argv[1], argv[2], without_can);
 
         while (!stopping && task.ReadInput()) {
             task.Control();

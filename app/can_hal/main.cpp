@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <csignal>
 #include <iomanip>
+#include <filesystem>
 #include <iostream>
 #include <linux/can.h>
 #include <linux/can/error.h>
@@ -40,8 +41,8 @@ std::uint64_t Period(double frequency, const char* name) {
 
 class CanHal {
 public:
-    explicit CanHal(const std::string& path) {
-        const auto config = YAML::LoadFile(path);
+    explicit CanHal(const std::string& hal_config_path) {
+        const auto config = YAML::LoadFile(hal_config_path);
         interface_ = config["interface"].as<std::string>();
         period_ns_ = Period(config["frequency_hz"].as<double>(), "frequency_hz");
         display_period_ns_ = Period(config["statistics_hz"].as<double>(), "statistics_hz");
@@ -58,7 +59,10 @@ public:
             ids_[i] = 0x140 + ids[i];
         }
 
-        const auto mit = config["mit"];
+        const auto motor_path = std::filesystem::path(hal_config_path).parent_path() /
+                                config["motor_config"].as<std::string>();
+        const auto motor = YAML::LoadFile(motor_path.string());
+        const auto mit = motor["mit"];
         profile_.velocity_max = mit["velocity_max_rad_s"].as<double>();
         profile_.torque_max = mit["torque_max_nm"].as<double>();
         profile_.kt_output = mit["kt_output_nm_a"].as<double>();
@@ -75,6 +79,7 @@ public:
 
         openrobot::EncodePosition({}, profile_);
         state_.profile = profile_;
+        state_.sample_dt = period_ns_ / 1e9;
 
         const unsigned index = ::if_nametoindex(interface_.c_str());
 
@@ -123,6 +128,7 @@ public:
             // HAL owns its transport SHM, independently of the supervisor.
             mapping_ =
                 std::make_unique<shm_utils::Mapping>(config["shm_name"].as<std::string>(), true);
+            mapping_->get()->can_enabled = true;
         } catch (...) {
             ::close(socket_);
             socket_ = -1;
@@ -164,11 +170,11 @@ public:
 
             try {
                 while (!display_done) {
-                    ShmCanState snapshot;
+                    MotorData snapshot;
                     {
                         auto& shm = *mapping_->get();
                         shm_utils::Lock lock(shm);
-                        snapshot = shm.can_states[shm.can_state_sequence % 2];
+                        snapshot = shm.motors[shm.motor_sequence % 2];
                     }
 
                     const auto now = shm_utils::MonotonicNs();
@@ -180,21 +186,23 @@ public:
                         << "SID   profile mode       TX       RX   TX/s   RX/s   q[rad]  dq[rad/s]  Iq[A] temp invalid\n";
 
                     for (int i = 0; i < 3; ++i) {
-                        const auto& motor = snapshot.motors[i];
                         text << std::hex << ids_[i] << std::dec << "   "
-                             << (motor.profile_verified ? "OK   " : "WAIT ") << "  "
-                             << (motor.enabled ? "ENABLED "
-                                               : (motor.enable_requested ? "ENTERING" : "RELEASED"))
-                             << std::setw(9) << motor.tx_frames << std::setw(9) << motor.rx_frames
-                             << std::fixed << std::setprecision(0) << std::setw(7)
-                             << (motor.tx_frames - previous_tx[i]) / seconds << std::setw(7)
-                             << (motor.rx_frames - previous_rx[i]) / seconds << std::setprecision(3)
-                             << std::setw(9) << motor.feedback.position << std::setw(11)
-                             << motor.feedback.velocity << std::setw(8) << motor.feedback.current
-                             << std::setw(5) << motor.feedback.temperature << std::setw(8)
-                             << motor.invalid_frames << '\n';
-                        previous_tx[i] = motor.tx_frames;
-                        previous_rx[i] = motor.rx_frames;
+                             << (snapshot.profile_verified[i] ? "OK   " : "WAIT ") << "  "
+                             << (snapshot.enabled[i]
+                                        ? "ENABLED "
+                                        : (snapshot.enable_requested[i] ? "ENTERING" : "RELEASED"))
+                             << std::setw(9) << snapshot.tx_frames[i] << std::setw(9)
+                             << snapshot.rx_frames[i] << std::fixed << std::setprecision(0)
+                             << std::setw(7) << (snapshot.tx_frames[i] - previous_tx[i]) / seconds
+                             << std::setw(7) << (snapshot.rx_frames[i] - previous_rx[i]) / seconds
+                             << std::setprecision(3) << std::setw(9)
+                             << snapshot.feedback[i].position << std::setw(11)
+                             << snapshot.feedback[i].velocity << std::setw(8)
+                             << snapshot.feedback[i].current << std::setw(5)
+                             << snapshot.feedback[i].temperature << std::setw(8)
+                             << snapshot.invalid_frames[i] << '\n';
+                        previous_tx[i] = snapshot.tx_frames[i];
+                        previous_rx[i] = snapshot.rx_frames[i];
                     }
 
                     text << "socket errors=" << snapshot.socket_errors
@@ -233,7 +241,7 @@ public:
         try {
             while (!stopping) {
                 auto& shm = *mapping_->get();
-                ShmMotorTargets targets;
+                MotorData targets;
                 {
                     shm_utils::Lock lock(shm);
 
@@ -243,7 +251,7 @@ public:
                     if (shm.stopping)
                         break;
 
-                    targets = shm.motor_targets[shm.motor_target_sequence % 2];
+                    targets = shm.motors[shm.motor_sequence % 2];
                 }
 
                 if (display_failed)
@@ -254,37 +262,36 @@ public:
 
                 // Validate the complete publication before transmitting any axis.
                 for (int i = 0; i < 3; ++i)
-                    frames[i] = openrobot::EncodePosition(targets.motors[i], profile_);
+                    frames[i] = openrobot::EncodePosition(targets.command[i], profile_);
 
                 for (int i = 0; i < 3; ++i) {
-                    auto& motor = state_.motors[i];
-                    const auto& target = targets.motors[i];
+                    const auto& target = targets.command[i];
 
                     // Periodic discovery/enable requests, not a response-age check.
                     if (state_.cycles && state_.cycles % 100 == 0) {
-                        if (!motor.profile_verified)
+                        if (!state_.profile_verified[i])
                             Send(i, {0xC4});
-                        else if (target.enabled && motor.enable_requested && !motor.enabled)
+                        else if (target.enabled && state_.enable_requested[i] && !state_.enabled[i])
                             Send(i, {0xC1});
                     }
 
-                    if (target.enabled && !motor.enable_requested) {
-                        if (!motor.profile_verified)
+                    if (target.enabled && !state_.enable_requested[i]) {
+                        if (!state_.profile_verified[i])
                             throw std::runtime_error(
                                 "enable requested before MIT C4 profile verification");
 
                         Send(i, {0xC1});
-                        motor.enable_requested = true;
-                    } else if (!target.enabled && motor.enable_requested) {
+                        state_.enable_requested[i] = true;
+                    } else if (!target.enabled && state_.enable_requested[i]) {
                         Send(i, {0xC2});
-                        motor.enable_requested = motor.enabled = false;
+                        state_.enable_requested[i] = state_.enabled[i] = false;
                     }
 
-                    if (target.enabled && motor.enabled)
+                    if (target.enabled && state_.enabled[i])
                         Send(i, frames[i]);
                 }
 
-                state_.command_sequence = targets.sequence;
+                state_.consumed_command_sequence = targets.command_sequence;
                 ++state_.cycles;
                 Publish();
                 next_cycle += period_ns_;
@@ -298,7 +305,7 @@ public:
         for (int i = 0; i < 3; ++i) {
             try {
                 Send(i, {0xC2});
-                state_.motors[i].enabled = state_.motors[i].enable_requested = false;
+                state_.enabled[i] = state_.enable_requested[i] = false;
             } catch (const std::exception& error) {
                 std::cerr << "[can_hal] release failed: " << error.what() << '\n';
                 failure = std::current_exception();
@@ -343,7 +350,7 @@ private:
             throw std::runtime_error("CAN write failed: " + std::string(std::strerror(errno)));
         }
 
-        ++state_.motors[motor].tx_frames;
+        ++state_.tx_frames[motor];
         state_.last_tx_ns = shm_utils::MonotonicNs();
     }
 
@@ -377,11 +384,10 @@ private:
                 continue;
 
             const int i = int(found - ids_.begin());
-            auto& motor = state_.motors[i];
-            ++motor.rx_frames;
+            ++state_.rx_frames[i];
 
             if (frame.can_dlc != 8) {
-                ++motor.invalid_frames;
+                ++state_.invalid_frames[i];
                 std::cerr << "[can_hal] invalid DLC for motor " << i << '\n';
                 continue;
             }
@@ -391,18 +397,18 @@ private:
 
             if (bytes[0] == 0xC4) {
                 openrobot::CheckProfile(bytes, profile_);
-                motor.profile_verified = true;
-            } else if (bytes[0] == 0xC1 && motor.enable_requested) {
+                state_.profile_verified[i] = true;
+            } else if (bytes[0] == 0xC1 && state_.enable_requested[i]) {
                 if (bytes[1] != profile_.kd_scale)
                     throw std::runtime_error("MIT C1 kd_scale mismatch");
 
-                motor.enabled = true;
+                state_.enabled[i] = true;
             } else if (bytes[0] == 0xC0) {
-                motor.feedback = openrobot::DecodeFeedback(bytes);
-                motor.received_ns = shm_utils::MonotonicNs();
-                ++motor.feedback_sequence;
+                state_.feedback[i] = openrobot::DecodeFeedback(bytes);
+                state_.received_ns[i] = shm_utils::MonotonicNs();
+                ++state_.received_sequence[i];
             } else if (bytes[0] != 0xC2) {
-                ++motor.invalid_frames;
+                ++state_.invalid_frames[i];
                 std::cerr << "[can_hal] unexpected MIT response opcode=" << int(bytes[0]) << '\n';
             }
         }
@@ -411,10 +417,28 @@ private:
     void Publish() {
         auto& shm = *mapping_->get();
         shm_utils::Lock lock(shm);
-        state_.sequence = shm.can_state_sequence + 1;
-        state_.published_ns = shm_utils::MonotonicNs();
-        shm.can_states[state_.sequence % 2] = state_;
-        shm.can_state_sequence = state_.sequence;
+        auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
+        next.profile = state_.profile;
+        next.sample_dt = state_.sample_dt;
+        next.running = state_.running;
+        next.feedback_sequence = ++state_.feedback_sequence;
+        next.feedback_published_ns = shm_utils::MonotonicNs();
+        next.consumed_command_sequence = state_.consumed_command_sequence;
+        next.last_tx_ns = state_.last_tx_ns;
+        next.cycles = state_.cycles;
+        next.socket_errors = state_.socket_errors;
+
+        next.feedback = state_.feedback;
+        next.received_ns = state_.received_ns;
+        next.received_sequence = state_.received_sequence;
+        next.tx_frames = state_.tx_frames;
+        next.rx_frames = state_.rx_frames;
+        next.invalid_frames = state_.invalid_frames;
+        next.profile_verified = state_.profile_verified;
+        next.enable_requested = state_.enable_requested;
+        next.enabled = state_.enabled;
+
+        ++shm.motor_sequence;
         shm_utils::Notify(shm);
     }
 
@@ -423,7 +447,7 @@ private:
     std::array<canid_t, 3> ids_{};
     openrobot::MitProfile profile_;
     std::unique_ptr<shm_utils::Mapping> mapping_;
-    ShmCanState state_{};
+    MotorData state_{};
     std::uint64_t period_ns_ = 0, display_period_ns_ = 0;
 };
 }  // namespace
@@ -447,14 +471,14 @@ int main(int argc, char** argv) {
             auto& shm = *mapping.get();
             shm_utils::Lock lock(shm);
 
-            if (shm.stopping || !shm.can_states[shm.can_state_sequence % 2].running)
+            if (shm.stopping || !shm.motors[shm.motor_sequence % 2].running)
                 throw std::runtime_error("CAN HAL is not running");
 
-            auto targets = shm.motor_targets[shm.motor_target_sequence % 2];
+            auto targets = shm.motors[shm.motor_sequence % 2];
 
             if (release) {
-                for (auto& motor : targets.motors)
-                    motor.enabled = false;
+                for (auto& target : targets.command)
+                    target.enabled = false;
             } else {
                 const auto number = [](const char* value) {
                     std::size_t length = 0;
@@ -470,28 +494,28 @@ int main(int argc, char** argv) {
                 if (index < 0 || index > 2 || index != std::floor(index))
                     throw std::runtime_error("axis must be 0, 1 or 2");
 
-                const auto& state = shm.can_states[shm.can_state_sequence % 2];
+                const auto& state = shm.motors[shm.motor_sequence % 2];
 
-                if (!state.motors[int(index)].profile_verified)
+                if (!state.profile_verified[int(index)])
                     throw std::runtime_error("motor MIT profile has not been verified");
 
                 openrobot::PositionTarget target{
                     true, number(argv[4]), number(argv[5]), number(argv[6]), number(argv[7])};
                 openrobot::EncodePosition(target, state.profile);
-                targets.motors[int(index)] = target;
+                targets.command[int(index)] = target;
             }
 
-            targets.sequence = shm.motor_target_sequence + 1;
-            targets.published_ns = shm_utils::MonotonicNs();
-            shm.motor_targets[targets.sequence % 2] = targets;
-            shm.motor_target_sequence = targets.sequence;
+            ++targets.command_sequence;
+            targets.command_published_ns = shm_utils::MonotonicNs();
+            shm.motors[(shm.motor_sequence + 1) % 2] = targets;
+            ++shm.motor_sequence;
             shm_utils::Notify(shm);
 
             return 0;
         }
 
         if (argc != 2)
-            throw std::runtime_error("usage: can_hal CAN_CONFIG.yaml");
+            throw std::runtime_error("usage: can_hal HAL_CONFIG.yaml");
 
         CanHal hal(argv[1]);
         hal.Run();

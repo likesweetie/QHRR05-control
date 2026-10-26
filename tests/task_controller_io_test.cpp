@@ -16,18 +16,23 @@ void Require(bool value, const char* message) {
         throw std::runtime_error(message);
 }
 
-ShmCommand Latest(ShmData& shm) {
+ControlData Latest(ShmData& shm) {
     shm_utils::Lock lock(shm);
-    return shm.commands[shm.command_sequence % 2];
+    return shm.control[shm.control_sequence % 2];
 }
 
-template <class Predicate> ShmCommand WaitCommand(ShmData& shm, Predicate predicate) {
+MotorData Motors(ShmData& shm) {
+    shm_utils::Lock lock(shm);
+    return shm.motors[shm.motor_sequence % 2];
+}
+
+template <class Predicate> ControlData WaitCommand(ShmData& shm, Predicate predicate) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 
     while (std::chrono::steady_clock::now() < deadline) {
         const auto command = Latest(shm);
 
-        if (command.sequence && predicate(command))
+        if (command.command_sequence && predicate(command))
             return command;
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -38,12 +43,13 @@ template <class Predicate> ShmCommand WaitCommand(ShmData& shm, Predicate predic
 
 std::uint64_t Request(ShmData& shm, int mode) {
     shm_utils::Lock lock(shm);
-    const auto sequence = shm.request_sequence + 1;
-    shm.requests[sequence % 2] = {sequence, mode, 3.0, sequence};
-    shm.request_sequence = sequence;
+    auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+    control.requested_mode = mode;
+    control.target_force = 3;
+    ++control.motion_sequence;
+    ++shm.control_sequence;
     shm_utils::Notify(shm);
-
-    return sequence;
+    return control.motion_sequence;
 }
 
 void WaitExit(pid_t child, int expected) {
@@ -107,16 +113,16 @@ int main(int argc, char** argv) {
             shm_utils::Mapping mapping(prefix, true);
             auto& shm = *mapping.get();
             launch(prefix);  // No simulator, not even an initial measurement.
-            auto before = WaitCommand(shm, [](const ShmCommand&) {
+            auto before = WaitCommand(shm, [](const ControlData&) {
                 return true;
             });
 
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
             auto after = Latest(shm);
-            const auto cycles = after.sequence - before.sequence;
+            const auto cycles = after.command_sequence - before.command_sequence;
             Require(
                 cycles >= 8 && cycles <= 30, "configured 100 Hz loop is not running independently");
-            Require(after.state_sequence == 0 && after.control_time > .1,
+            Require(after.input_model_sequence == 0 && after.control_time > .1,
                 "controller waited for simulator readiness");
             {
                 shm_utils::Lock lock(shm);
@@ -124,7 +130,7 @@ int main(int argc, char** argv) {
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
-            Require(Latest(shm).sequence > after.sequence,
+            Require(Latest(shm).command_sequence > after.command_sequence,
                 "controller depends on simulator completion status");
             {
                 shm_utils::Lock lock(shm);
@@ -136,24 +142,24 @@ int main(int argc, char** argv) {
             data->time = 1000;  // Producer clock is unrelated to controller time.
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
             const auto request = Request(shm, 0);
-            before = WaitCommand(shm, [&](const ShmCommand& cmd) {
-                return cmd.request_sequence == request;
+            before = WaitCommand(shm, [&](const ControlData& cmd) {
+                return cmd.active_motion_sequence == request;
             });
 
             for (int i = 0; i < 3; ++i)
-                Require(std::abs(before.reference[i] - initial[i]) < .02,
+                Require(std::abs(Motors(shm).reference[i] - initial[i]) < .02,
                     "explicit restart did not capture current position");
 
-            after = WaitCommand(shm, [&](const ShmCommand& cmd) {
-                return cmd.request_sequence == request && cmd.holding;
+            after = WaitCommand(shm, [&](const ControlData& cmd) {
+                return cmd.active_motion_sequence == request && cmd.holding;
             });
 
-            Require(after.state_sequence == 1, "unchanged measurement was not reused");
+            Require(after.input_model_sequence == 1, "unchanged measurement was not reused");
             Require(after.control_time - before.control_time >= .1,
                 "homing did not use controller elapsed time");
 
             for (int i = 0; i < 3; ++i)
-                Require(std::abs(after.reference[i] - home[i]) < 1e-12,
+                Require(std::abs(Motors(shm).reference[i] - home[i]) < 1e-12,
                     "homing stopped with a frozen simulator");
 
             for (int i = 0; i < 3; ++i)
@@ -161,32 +167,33 @@ int main(int argc, char** argv) {
 
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
             const auto gravity_request = Request(shm, 1);
-            after = WaitCommand(shm, [&](const ShmCommand& cmd) {
-                return cmd.request_sequence == gravity_request && cmd.state_sequence == 2;
+            after = WaitCommand(shm, [&](const ControlData& cmd) {
+                return cmd.active_motion_sequence == gravity_request &&
+                       cmd.input_model_sequence == 2;
             });
 
             for (int i = 0; i < 3; ++i) {
                 const double damping = config["gravity_compensation"]["kd_motor"][i].as<double>();
-                Require(std::abs(after.torque[i] -
+                Require(std::abs(Motors(shm).debug_torque[i] -
                                  (gravity->qfrc_bias[i] - damping * data->qvel[i])) < 1e-10,
                     "gravity torque is wrong with frozen input");
             }
 
             const auto home_request = Request(shm, 0);
-            WaitCommand(shm, [&](const ShmCommand& cmd) {
-                return cmd.request_sequence == home_request && cmd.holding;
+            WaitCommand(shm, [&](const ControlData& cmd) {
+                return cmd.active_motion_sequence == home_request && cmd.holding;
             });
 
             qhrr05::ResetSimulation(initial, model.get(), data.get());
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
-            after = WaitCommand(shm, [](const ShmCommand& cmd) {
-                return cmd.state_sequence == 3;
+            after = WaitCommand(shm, [](const ControlData& cmd) {
+                return cmd.input_model_sequence == 3;
             });
 
             Require(after.holding, "simulation time rewind restarted the independent controller");
             const auto magnetic_request = Request(shm, 2);
-            auto magnetic = WaitCommand(shm, [&](const ShmCommand& cmd) {
-                return cmd.request_sequence == magnetic_request && cmd.mode == 2;
+            auto magnetic = WaitCommand(shm, [&](const ControlData& cmd) {
+                return cmd.active_motion_sequence == magnetic_request && cmd.mode == 2;
             });
 
             Require(magnetic.magnetic.phase == MagneticPhase::Free,
@@ -194,24 +201,23 @@ int main(int argc, char** argv) {
             const auto event = magnetic.magnetic.event_sequence;
             {
                 shm_utils::Lock lock(shm);
-                auto request = shm.requests[shm.request_sequence % 2];
-                request.sequence = ++shm.request_sequence;
+                auto& request = shm_utils::Next(shm.control, shm.control_sequence);
                 request.target_force = 4;
-                shm.requests[request.sequence % 2] = request;
+                ++shm.control_sequence;
                 shm_utils::Notify(shm);
             }
 
-            magnetic = WaitCommand(shm, [&](const ShmCommand& cmd) {
+            magnetic = WaitCommand(shm, [&](const ControlData& cmd) {
                 return cmd.magnetic.target_force == 4;
             });
 
-            Require(magnetic.request_sequence == magnetic_request &&
+            Require(magnetic.active_motion_sequence == magnetic_request &&
                         magnetic.magnetic.event_sequence == event,
                 "live force update restarted the magnetic state machine");
             shm_utils::Stop(shm);
             WaitExit(worker, 0);
             worker = -1;
-            Require(shm.commands[after.sequence % 2].sequence != 0,
+            Require(shm.control[shm.control_sequence % 2].command_sequence != 0,
                 "commands were not published to double buffers");
             std::cout << "observed 100 Hz cycles in 150ms=" << cycles << '\n';
         }
@@ -222,7 +228,7 @@ int main(int argc, char** argv) {
         {
             shm_utils::Mapping mapping(prefix + "-slow", true);
             launch(prefix + "-slow");
-            WaitCommand(*mapping.get(), [](const ShmCommand&) {
+            WaitCommand(*mapping.get(), [](const ControlData&) {
                 return true;
             });
 
@@ -251,23 +257,23 @@ int main(int argc, char** argv) {
             qhrr05::ResetSimulation(initial, model.get(), data.get());
             std::array<double, 3> reference;
             Require(qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference)
-                            .sequence == 0,
+                            .command_sequence == 0,
                 "simulator did not accept initialized zero command");
             {
                 shm_utils::Lock lock(shm);
-                shm.command_sequence = 7;
-                shm.commands[1].sequence = 7;
-                shm.commands[1].torque[0] = 1000;
+                shm.control[0].command_sequence = 7;
+                shm.motors[shm.motor_sequence % 2].debug_torque[0] = 1000;
             }
 
             const auto command =
                 qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
-            Require(command.sequence == 7 && shm.state_sequence == 2,
+            Require(command.command_sequence == 7 && shm.model_sequence == 2,
                 "simulator still pairs state/command counters");
             Require(data->ctrl[0] == model->actuator_ctrlrange[1], "motor torque limit was lost");
             {
                 shm_utils::Lock lock(shm);
-                shm.commands[1].torque[0] = std::numeric_limits<double>::quiet_NaN();
+                shm.motors[shm.motor_sequence % 2].debug_torque[0] =
+                    std::numeric_limits<double>::quiet_NaN();
             }
 
             bool rejected = false;

@@ -1,0 +1,8 @@
+# AK10-9 V3.0 KV60 with OpenRobot MIT firmware: protocol profile only.
+# These are the expected C4 values, not independently measured hardware limits.
+mit:
+  velocity_max_rad_s: 45.0
+  torque_max_nm: 53.0
+  kt_output_nm_a: 1.44  # Initial ideal output-shaft conversion; not an identified Iq model.
+  gear_ratio: 9.0
+  kd_scale: 1

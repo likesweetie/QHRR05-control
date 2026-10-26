@@ -4,11 +4,18 @@
 #include <string>
 
 namespace qhrr05 {
+// Local controller input, not another SHM channel or motor-data source.
+struct MotionFeedback : ModelData {
+    std::array<double, 3> position{}, velocity{}, acceleration{}, motor_torque{};
+    std::uint64_t measurement_sequence = 0;
+    double measurement_dt = .001;
+};
+
 class ReactionForceObserver {
 public:
     explicit ReactionForceObserver(const std::string& config_path);
     void Reset();
-    void Update(const ShmState& feedback);
+    void Update(const MotionFeedback& feedback);
 
     bool valid() const {
         return valid_;

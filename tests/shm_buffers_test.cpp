@@ -17,77 +17,81 @@ void WaitChild(pid_t child) {
 }
 
 int main() {
-    pid_t writer = -1;
+    pid_t writer = -1, feedback_writer = -1;
     const auto name = "/qhrr05-buffers-" + std::to_string(::getpid());
 
     try {
         {
             shm_utils::Mapping mapping(name, true);
             auto& shm = *mapping.get();
-            writer = ::fork();
-            Require(writer >= 0, "fork failed");
+            const auto launch = [&](bool feedback) {
+                const auto child = ::fork();
+                Require(child >= 0, "fork failed");
 
-            if (writer == 0) {
-                for (std::uint64_t sequence = 1; sequence <= 15000; ++sequence) {
-                    shm_utils::Lock lock(shm);
-                    auto& state = shm.states[sequence % 2];
-                    state.sequence = sequence;
+                if (child == 0) {
+                    for (std::uint64_t sequence = 1; sequence <= 15000; ++sequence) {
+                        shm_utils::Lock lock(shm);
+                        auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
 
-                    for (int i = 0; i < 3; ++i) {
-                        state.position[i] = sequence * (i + 1);
-                        state.velocity[i] = -state.position[i];
-                        state.gravity_torque[i] = 2 * state.position[i];
+                        if (feedback)
+                            motors.feedback_sequence = sequence;
+                        else
+                            motors.command_sequence = sequence;
+
+                        for (int i = 0; i < 3; ++i) {
+                            if (feedback)
+                                motors.feedback[i].position = -double(sequence * (i + 1));
+                            else
+                                motors.command[i].position = sequence * (i + 1);
+                        }
+
+                        ++shm.motor_sequence;
+                        shm_utils::Notify(shm);
                     }
 
-                    shm.state_sequence = sequence;
-                    shm_utils::Notify(shm);
+                    ::_exit(0);
                 }
 
-                {
-                    shm_utils::Lock lock(shm);
-                    shm.simulation_finished = true;
-                    shm_utils::Notify(shm);
-                }
-
-                ::_exit(0);
-            }
-
+                return child;
+            };
+            writer = launch(false);
+            feedback_writer = launch(true);
             std::uint64_t seen = 0;
 
             for (;;) {
-                ShmState snapshot;
-                bool finished;
+                MotorData snapshot;
                 {
                     shm_utils::Lock lock(shm);
 
-                    while (shm.state_sequence == seen && !shm.simulation_finished)
+                    while (shm.motor_sequence == seen)
                         lock.Wait();
 
-                    snapshot = shm.states[shm.state_sequence % 2];
-                    finished = shm.simulation_finished;
+                    snapshot = shm.motors[shm.motor_sequence % 2];
+                    seen = shm.motor_sequence;
                 }
 
                 for (int i = 0; i < 3; ++i) {
-                    Require(snapshot.position[i] == snapshot.sequence * (i + 1),
-                        "torn position snapshot");
-                    Require(snapshot.velocity[i] == -snapshot.position[i], "mixed state versions");
-                    Require(snapshot.gravity_torque[i] == 2 * snapshot.position[i],
-                        "torn gravity snapshot");
+                    Require(snapshot.command[i].position == snapshot.command_sequence * (i + 1),
+                        "torn command snapshot or feedback writer overwrote a command");
+                    Require(snapshot.feedback[i].position ==
+                                -double(snapshot.feedback_sequence * (i + 1)),
+                        "torn feedback snapshot or command writer overwrote feedback");
                 }
 
-                seen = snapshot.sequence;
-
-                if (finished)
+                if (snapshot.command_sequence == 15000 && snapshot.feedback_sequence == 15000)
                     break;
 
-                ::usleep(50);  // Reader may fall behind and a slot may be reused repeatedly.
+                ::usleep(50);
             }
 
             WaitChild(writer);
             writer = -1;
-            Require(seen == 15000, "last published state was lost");
-            Require(shm.states[0].sequence == 15000 && shm.states[1].sequence == 14999,
-                "writer did not alternate double-buffer slots");
+            WaitChild(feedback_writer);
+            feedback_writer = -1;
+            Require(seen == 30000, "multiwriter publication lost an update");
+            Require(shm.motors[0].command_sequence + shm.motors[0].feedback_sequence == 30000 &&
+                        shm.motors[1].command_sequence + shm.motors[1].feedback_sequence == 29999,
+                "writers did not alternate double-buffer slots");
         }
 
         const int stale = ::shm_open(name.c_str(), O_RDWR, 0600);
@@ -137,6 +141,13 @@ int main() {
 
         Require(::fstat(small, &stat) == 0 && stat.st_size == 1, "attach resized an existing SHM");
         ::close(small);
+        if (feedback_writer > 0) {
+            ::kill(feedback_writer, SIGKILL);
+
+            while (::waitpid(feedback_writer, nullptr, 0) < 0 && errno == EINTR) {
+            }
+        }
+
         ::shm_unlink(name.c_str());
         Require(rejected, "wrong SHM size was accepted");
         std::cout

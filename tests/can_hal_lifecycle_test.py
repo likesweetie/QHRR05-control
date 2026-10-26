@@ -31,6 +31,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
             'kd_scale': 1,
         },
     }
+    profile = directory / 'motor profile.json'
+    profile.write_text(json.dumps({'mit': settings.pop('mit')}))
+    settings['motor_config'] = profile.name
     config.write_text(json.dumps(settings))
     manifest.write_text(
         json.dumps(
@@ -100,9 +103,18 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
                 process.terminate()
                 process.wait(timeout=5)
 
-    for key, bad in [('interface', 'no_such_can'), ('frequency_hz', 0), ('motor_ids', [1, 1, 3])]:
+    for key, bad in [
+        ('interface', 'no_such_can'),
+        ('frequency_hz', 0),
+        ('motor_ids', [1, 1, 3]),
+        ('motor_config', 'missing-profile.yaml'),
+    ]:
         invalid = dict(settings)
         invalid[key] = bad
+
+        if key == 'motor_config':
+            invalid['mit'] = json.loads(profile.read_text())['mit']  # No inline-profile fallback.
+
         config.write_text(json.dumps(invalid))
         result = subprocess.run(
             [str(daemon), '--config', str(manifest)], capture_output=True, text=True, timeout=6

@@ -111,7 +111,7 @@ void MagneticTouchController::Release(MagneticReason reason, double time) {
     armed_ = false;
 }
 
-void MagneticTouchController::Start(double time, const ShmState& feedback) {
+void MagneticTouchController::Start(double time, const MotionFeedback& feedback) {
     const auto event = telemetry_.event_sequence + 1;
     telemetry_ = {};
     telemetry_.event_sequence = event;
@@ -126,7 +126,7 @@ void MagneticTouchController::Start(double time, const ShmState& feedback) {
 }
 
 void MagneticTouchController::Compute(double time,
-    const ShmState& f,
+    const MotionFeedback& f,
     double target_force,
     std::array<double, 3>& torque,
     std::array<double, 3>& reference) {

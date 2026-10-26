@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     try {
         Require(argc == 3, "expected config and scene");
         qhrr05::ReactionForceObserver observer(argv[1]);
-        ShmState feedback;
+        qhrr05::MotionFeedback feedback;
         feedback.measurement_dt = .001;
         feedback.jacobian = {.18, .02, -.01, .04, .25, .03, .01, -.02, .22};
         feedback.mass = {.1, 0, 0, 0, .2, 0, 0, 0, .3};
@@ -197,15 +197,28 @@ int main(int argc, char** argv) {
             else if (time >= 2.8)
                 center = toe_x + .09;
             data->mocap_pos[3 * mocap] = center;
-            qhrr05::UpdateControlIO(
-                shm, model.get(), data.get(), gravity.get(), reference, acceleration, step);
-            const auto state = shm.states[shm.state_sequence % 2];
+            qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference, step);
+            qhrr05::MotionFeedback state;
+            static_cast<ModelData&>(state) = shm.model[shm.model_sequence % 2];
+            const auto motors = shm.motors[shm.motor_sequence % 2];
+            state.acceleration = acceleration;
+            state.measurement_sequence = step;
+            state.measurement_dt = model->opt.timestep;
+
+            for (int i = 0; i < 3; ++i) {
+                state.position[i] = motors.position_offset[i] + motors.feedback[i].position;
+                state.velocity[i] = motors.feedback[i].velocity;
+                state.motor_torque[i] = motors.feedback[i].current * motors.profile.kt_output;
+            }
             controller.Compute(time, state, 3, torque, reference);
             {
                 shm_utils::Lock lock(shm);
-                const auto sequence = ++shm.command_sequence;
-                shm.commands[sequence % 2].sequence = sequence;
-                shm.commands[sequence % 2].torque = torque;
+                auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
+
+                for (int i = 0; i < 3; ++i)
+                    motors.debug_torque[i] = torque[i];
+
+                ++shm.motor_sequence;
             }
 
             const std::array<double, 3> velocity{data->qvel[0], data->qvel[1], data->qvel[2]};

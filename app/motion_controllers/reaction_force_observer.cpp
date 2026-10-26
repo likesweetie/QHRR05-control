@@ -100,7 +100,7 @@ void ReactionForceObserver::Reset() {
     filtered_torque_.fill(0);
 }
 
-void ReactionForceObserver::Update(const ShmState& f) {
+void ReactionForceObserver::Update(const MotionFeedback& f) {
     for (const auto& values : {f.mass, f.jacobian})
         for (double value : values)
             if (!std::isfinite(value)) {

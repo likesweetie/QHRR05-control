@@ -38,20 +38,24 @@ int main(int argc, char** argv) {
     };
 
     try {
-        Require(argc == 6, "expected control/model/motor-config/HAL/controller paths");
+        Require(argc == 6, "expected control/model/HAL-config/HAL/controller paths");
         const std::string suffix = std::to_string(::getpid());
         directory = "/tmp/qhrr05-can-control-" + suffix;
         std::filesystem::create_directory(directory);
         const auto control_path = (directory / "control.yaml").string();
-        const auto motor_path = (directory / "motor.yaml").string();
+        const auto hal_path = (directory / "HAL settings.yaml").string();
         const std::string sim_name = "/qhrr05-can-control-" + suffix;
         const std::string can_name = sim_name + "-bus";
         auto config = YAML::LoadFile(argv[1]);
         config["homing"]["duration_sec"] = .35;
         std::ofstream(control_path) << config;
-        auto motor_config = YAML::LoadFile(argv[3]);
-        motor_config["shm_name"] = can_name;
-        std::ofstream(motor_path) << motor_config;
+        auto hal_config = YAML::LoadFile(argv[3]);
+        const auto motor_source = std::filesystem::path(argv[3]).parent_path() /
+                                  hal_config["motor_config"].as<std::string>();
+        std::ofstream(directory / "motor profile.yaml") << YAML::LoadFile(motor_source.string());
+        hal_config["motor_config"] = "motor profile.yaml";
+        hal_config["shm_name"] = can_name;
+        std::ofstream(hal_path) << hal_config;
 
         const openrobot::Payload bytes{0xC0, 26, 0, 0xFE, 0xA6, 0xFF, 0, 0xE0};
         Require(openrobot::EncodeFeedback(openrobot::DecodeFeedback(bytes)) == bytes,
@@ -65,7 +69,7 @@ int main(int argc, char** argv) {
         Require(hal >= 0, "HAL fork failed");
 
         if (hal == 0) {
-            ::execl(argv[4], argv[4], motor_path.c_str(), static_cast<char*>(nullptr));
+            ::execl(argv[4], argv[4], hal_path.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
 
@@ -85,7 +89,7 @@ int main(int argc, char** argv) {
         const auto snapshot = [&] {
             auto& shared = *can->get();
             shm_utils::Lock lock(shared);
-            return shared.can_states[shared.can_state_sequence % 2];
+            return shared.motors[shared.motor_sequence % 2];
         };
 
         while (!snapshot().running) {
@@ -93,8 +97,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        shm_utils::Mapping simulation(sim_name, true);
-        auto& shm = *simulation.get();
+        auto& shm = *can->get();
         char error[2048]{};
         std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
             mj_loadXML(argv[2], nullptr, error, sizeof(error)), mj_deleteModel);
@@ -109,25 +112,35 @@ int main(int argc, char** argv) {
             qhrr05::ReadPosition(config["homing"]["initial_position_rad"], model.get());
         const auto home = qhrr05::ReadPosition(config["homing"]["position_rad"], model.get());
         qhrr05::ResetSimulation(origin, model.get(), physical.get());
-        qhrr05::VirtualMotors motors(motor_path, origin);
+        {
+            shm_utils::Lock lock(shm);
+            auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
+
+            for (int i = 0; i < 3; ++i)
+                next.position_offset[i] = origin[i];
+
+            ++shm.motor_sequence;
+        }
+        qhrr05::VirtualMotors motors(hal_path, origin, shm);
         std::array<double, 3> reference{};
 
         const auto publish_model = [&] {
             const auto feedback = snapshot();
 
             for (int i = 0; i < 3; ++i) {
-                sensed->qpos[i] = origin[i] + feedback.motors[i].feedback.position;
-                sensed->qvel[i] = feedback.motors[i].feedback.velocity;
+                sensed->qpos[i] = origin[i] + feedback.feedback[i].position;
+                sensed->qvel[i] = feedback.feedback[i].velocity;
             }
 
             qhrr05::UpdateControlIO(
-                shm, model.get(), sensed.get(), gravity.get(), reference, {}, 0, &feedback);
+                shm, model.get(), sensed.get(), gravity.get(), reference, 0, &feedback);
             shm_utils::Lock lock(shm);
-            auto& state = shm.states[shm.state_sequence % 2];
-            // Poison the legacy joint feedback: CAN mode must read encoders/current from HAL.
-            state.position.fill(std::numeric_limits<double>::quiet_NaN());
-            state.velocity = state.motor_torque = state.acceleration = state.position;
-            shm.commands[shm.command_sequence % 2].torque.fill(1e6);
+            // Poison physics truth and debug effort; neither may drive CAN control.
+            auto& truth = shm.simulation[shm.simulation_sequence % 2];
+            truth.position_gt.fill(std::numeric_limits<double>::quiet_NaN());
+            truth.torque_gt = truth.position_gt;
+
+            shm.motors[shm.motor_sequence % 2].debug_torque.fill(1e6);
         };
 
         publish_model();
@@ -138,22 +151,22 @@ int main(int argc, char** argv) {
             ::execl(argv[5],
                 argv[5],
                 control_path.c_str(),
-                sim_name.c_str(),
-                "--motor-config",
-                motor_path.c_str(),
+                can_name.c_str(),
                 static_cast<char*>(nullptr));
             _exit(127);
         }
 
         const auto request = [&](int mode) {
             shm_utils::Lock lock(shm);
-            const auto sequence = shm.request_sequence + 1;
-            shm.requests[sequence % 2] = {sequence, mode, 3, sequence};
-            shm.request_sequence = sequence;
+            auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+            control.requested_mode = mode;
+            control.target_force = 3;
+            ++control.motion_sequence;
+            ++shm.control_sequence;
         };
         const auto command = [&] {
             shm_utils::Lock lock(shm);
-            return shm.commands[shm.command_sequence % 2];
+            return shm.control[shm.control_sequence % 2];
         };
         auto next = std::chrono::steady_clock::now();
         const auto tick = [&](bool integrate = true) {
@@ -177,11 +190,10 @@ int main(int argc, char** argv) {
 
         for (int i = 0; i < 3; ++i) {
             const auto state = snapshot();
-            Require(state.motors[i].enabled && state.motors[i].feedback_sequence > 200,
+            Require(state.enabled[i] && state.received_sequence[i] > 200,
                 "MIT feedback did not traverse CAN");
             Require(std::abs(physical->qpos[i] - home[i]) < .08, "CAN homing did not track target");
-            Require(
-                std::abs(origin[i] + state.motors[i].feedback.position - physical->qpos[i]) < .01,
+            Require(std::abs(origin[i] + state.feedback[i].position - physical->qpos[i]) < .01,
                 "CAN position feedback differs from physics");
         }
 
@@ -191,7 +203,7 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
         motors.Update(model.get(), physical.get());
         const std::array<double, 3> held{physical->ctrl[0], physical->ctrl[1], physical->ctrl[2]};
-        const auto previous_sequence = command().sequence;
+        const auto previous_sequence = command().command_sequence;
         request(1);
 
         for (int step = 0; step < 60; ++step) {
@@ -201,7 +213,7 @@ int main(int argc, char** argv) {
                 Require(physical->ctrl[i] == held[i], "SHM command bypassed stopped CAN");
         }
 
-        Require(command().mode == 1 && command().sequence > previous_sequence + 10,
+        Require(command().mode == 1 && command().command_sequence > previous_sequence + 10,
             "controller waited for CAN feedback instead of running independently");
         std::cout
             << "PASS: stopped CAN retains ZOH; controller continues; no SHM actuation bypass\n";
@@ -277,7 +289,7 @@ int main(int argc, char** argv) {
         }
 
         for (int i = 0; i < 3; ++i)
-            Require(!snapshot().motors[i].enabled && physical->ctrl[i] == 0,
+            Require(!snapshot().enabled[i] && physical->ctrl[i] == 0,
                 "controller exit did not release virtual motor");
 
         stop(hal);

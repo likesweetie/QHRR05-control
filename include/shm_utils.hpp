@@ -27,6 +27,13 @@ inline std::uint64_t MonotonicNs() {
     return static_cast<std::uint64_t>(time.tv_sec) * 1000000000ULL + time.tv_nsec;
 }
 
+// Caller holds ShmData::mutex through the subsequent sequence increment.
+template <class T> T& Next(std::array<T, 2>& slots, std::uint64_t sequence) {
+    auto& next = slots[(sequence + 1) % 2];
+    next = slots[sequence % 2];
+    return next;
+}
+
 inline void Notify(ShmData& shm) {
     Check(::pthread_cond_broadcast(&shm.changed), "SHM notify");
 }
