@@ -6,7 +6,7 @@
 
 ## 빌드와 실행
 
-Linux, CMake, C++17 컴파일러, pkg-config, yaml-cpp, GLFW/OpenGL이 필요합니다. MuJoCo는 `third_party/mujoco`의 헤더·라이브러리를 사용합니다. GUI 실행에는 디스플레이가 필요합니다.
+Linux, CMake 3.22 이상, C++17 컴파일러(DataTamer 내부 빌드는 C++20), pkg-config, yaml-cpp, GLFW/OpenGL, OpenSSL·zstd·lz4 개발 라이브러리가 필요합니다. MuJoCo는 `third_party/mujoco`의 헤더·라이브러리를 사용합니다. GUI 실행에는 디스플레이가 필요합니다.
 
 저장소 루트에서 실행합니다.
 
@@ -16,7 +16,7 @@ cmake --build build --parallel 2
 ./scripts/run_daemon.sh
 ```
 
-daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·시뮬레이터·TaskController를 직접 자식으로 실행**하고 종료·자식 회수를 관리합니다. 각 프로그램의 출력과 기본 프로세스 통계를 별도 GNOME 터미널에 표시하며, CAN 창에는 채널 점유율 바도 표시합니다. 창에서는 동일 실행 파일의 출력 전용 함수만 실행하고, 프로세스 수명 관리는 원래 daemon 하나가 담당합니다. Ctrl+C, 어느 프로세스 터미널 또는 시뮬레이터 종료 시 나머지 프로세스도 정리합니다.
+daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·시뮬레이터·TaskController·shm_logger를 직접 자식으로 실행**하고 종료·자식 회수를 관리합니다. 각 프로그램의 출력과 기본 프로세스 통계를 별도 GNOME 터미널에 표시하며, CAN 창에는 채널 점유율 바도 표시합니다. 창에서는 동일 실행 파일의 출력 전용 함수만 실행하고, 프로세스 수명 관리는 원래 daemon 하나가 담당합니다. 핵심 프로세스의 Ctrl+C·터미널/시뮬레이터 종료 시 나머지도 정리합니다. 선택적 로거의 종료·창 닫기는 로거만 재시작하며 제어를 중단하지 않습니다.
 
 기본 런처는 **호스트 네트워크에 vcan0를 생성하고 UP으로 올린 뒤** daemon을 실행합니다. 이미 UP인 vcan은 재사용하고, DOWN이면 활성화합니다. 같은 이름의 다른 종류 장치는 변경하지 않고 실패합니다. 최초 생성·활성화에 권한이 필요하면 해당 `ip link` 명령에만 sudo를 사용하며 daemon·GUI·제어기는 현재 사용자로 실행합니다. vcan 준비나 HAL 시작 실패를 디버깅 경로로 대체하지 않습니다.
 
@@ -34,19 +34,21 @@ daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·
 
 프로그램별 옵션은 목록의 `args`에 지정합니다. 다른 목록은 `./build/daemon --config FILE.yaml`로 선택합니다. SHM 이름은 최상위 `shm_name`에서 한 번 정하고, `args`의 `"{shm_name}"` 인자에 치환합니다. daemon이 SHM 생성·초기화·해제를 담당하고 CAN HAL은 소켓을 소유합니다.
 
-필요하면 다른 터미널에서 계측을 기록합니다. 기존 CSV는 덮어쓰지 않습니다.
+기본 MCAP 기록과 5초 이전/2초 이후 Flight Recorder는 daemon이 실행합니다. [로깅 설정·CLI·분석 안내](docs/logging.md)에서 저장 한계·기록 제어·검증 범위를 확인할 수 있습니다. 별도 CSV 진단이 필요하면 명시적으로 실행합니다. 기존 CSV는 덮어쓰지 않습니다.
 
 ```bash
-./build/shm_logger /qhrr05 /tmp/qhrr05-new-run.csv
+./build/shm_logger --csv /qhrr05 /tmp/qhrr05-new-run.csv
+./build/qhrr-logctl status
+./build/qhrr-logctl trigger
 ```
 
 ## 프로세스 터미널과 SHM 통계
 
-기본 실행은 HAL·시뮬레이터·TaskController마다 터미널을 하나씩 엽니다. 추가한 프로세스도 자동으로 별도 창을 받습니다. 창 상단에는 PID·상태·직전 관측 간격의 CPU 사용률·RSS·스레드 수·가동 시간을 **2초마다** 갱신합니다. CPU는 여러 코어를 사용하면 100%를 넘을 수 있습니다. CAN 창에는 기존 모터 상태와 점유율도 같은 고정 영역에 표시합니다.
+기본 실행은 HAL·시뮬레이터·TaskController·로거마다 터미널을 하나씩 엽니다. 추가한 프로세스도 자동으로 별도 창을 받습니다. 창 상단에는 PID·상태·직전 관측 간격의 CPU 사용률·RSS·스레드 수·가동 시간을 **2초마다** 갱신합니다. CPU는 여러 코어를 사용하면 100%를 넘을 수 있습니다. CAN 창에는 기존 모터 상태와 점유율도 같은 고정 영역에 표시합니다.
 
 통계 갱신은 로그 영역을 스크롤하지 않습니다. 실제 stdout/stderr는 하단 로그 영역과 실행별 `logs/run-<epoch_ms>-<daemon_pid>/<process>.log`에 함께 기록합니다. 통계 패널은 이 파일에 섞지 않습니다. 시작 실패 메시지도 기록하며, 정상 종료 시 프로그램을 먼저 종료하고 릴레이가 EOF까지 읽은 뒤 창을 닫습니다. 창 크기가 아직 0이거나 너무 작으면 명시적인 대기/잘림 안내를 표시합니다. 로그는 계속 전달됩니다. 기본 실행은 아래 자동 배치로 충분한 작업 영역을 확보합니다.
 
-화면은 터미널의 별도 화면 버퍼를 사용합니다. 정상 종료·Ctrl+C·오류 종료 시 원래 화면·제목·커서·스크롤 영역을 복원하므로 통계가 셸에 남지 않습니다. 자식 터미널의 Ctrl+C도 daemon에 전달하며 마지막 종료 로그까지 읽습니다. 화면 크기를 변경하면 최근 메시지 최대 200줄을 다시 배치하고, 전체 로그는 파일에 보존합니다.
+화면은 터미널의 별도 화면 버퍼를 사용합니다. 정상 종료·Ctrl+C·오류 종료 시 원래 화면·제목·커서·스크롤 영역을 복원하므로 통계가 셸에 남지 않습니다. 핵심 프로세스 창의 Ctrl+C는 daemon에, 선택적 로거 창의 Ctrl+C는 로거에 전달하며 마지막 종료 로그까지 읽습니다. 화면 크기를 변경하면 최근 메시지 최대 200줄을 다시 배치하고, 전체 로그는 파일에 보존합니다.
 
 설정은 [daemon.yaml](config/daemon/daemon.yaml)에 모았습니다. 경로는 해당 YAML 디렉터리 기준입니다.
 
@@ -66,7 +68,7 @@ monitoring:
   sample_hz: 100.0          # 1~1000 Hz; 제어 주기와 무관
 ```
 
-기본 `terminal_layout`은 **보조 모니터가 있으면 첫 보조 모니터**, 없으면 주 모니터를 선택하며 선택 결과를 `[layout]` 로그에 출력합니다. 운영체제 패널을 제외한 작업 영역에 2열로 배치하고, 마지막 줄에 창 하나만 남으면 그 줄의 전체 폭을 사용합니다. daemon을 일반 GNOME 터미널에서 실행하면 그 창도 포함해 기본 네 창을 2×2로 정렬합니다. stdout을 파일로 연결하면 실제 호출 창이 없으므로 자식 터미널만 배치합니다.
+기본 `terminal_layout`은 **보조 모니터가 있으면 첫 보조 모니터**, 없으면 주 모니터를 선택하며 선택 결과를 `[layout]` 로그에 출력합니다. 운영체제 패널을 제외한 작업 영역에 2열로 배치하고, 마지막 줄에 창 하나만 남으면 그 줄의 전체 폭을 사용합니다. daemon을 일반 GNOME 터미널에서 실행하면 그 창도 포함해 기본 다섯 창을 2열로 정렬합니다. stdout을 파일로 연결하면 실제 호출 창이 없으므로 자식 터미널만 배치합니다.
 
 `monitor`는 `auto`, `primary`, 또는 `xrandr --listmonitors`에 표시되는 이름(예: `DP-2`)입니다. `columns`는 1~8, 여백·간격은 0~200 px, 자식 터미널 `zoom`은 0.5~2.0으로 조정합니다. 기존 호출 터미널의 글꼴 설정은 유지합니다. IDE 내장 터미널처럼 독립된 호출 창을 찾을 수 없는 경우에는 `include_daemon: false`를 명시합니다. 배치는 **시작 시에만** 적용하므로 이후 사용자가 창을 자유롭게 옮길 수 있습니다.
 
@@ -125,6 +127,7 @@ H/G 화면은 관절각과 피드백 측정 토크를 표시합니다. CAN 모�
 | [can_hal.yaml](config/can_hal/can_hal.yaml) | HAL 인터페이스·주기·CAN ID 배치·모터 설정 경로 |
 | [simulation.yaml](config/simulation/simulation.yaml) | 시뮬레이션 실제 모터 특성·가상 Iq 센서 ON/OFF·오차 파라미터 |
 | [ak10_9_v3.yaml](config/motor/ak10_9_v3.yaml) | 모터 MIT 규약: V_MAX·T_MAX·Kt·감속비·Kd scale |
+| [shm_logger.yaml](config/shm_logger/shm_logger.yaml) | 500 Hz MCAP·Flight Recorder·저장 한계·건전성·세션 설정 |
 | [apps/](apps/) | daemon·TaskController·CAN HAL·MuJoCo·로거·입력 프로그램의 실행 진입점 |
 | [src/ipc/](src/ipc/) | SHM 전체 배치·메모리 매핑/동기화·공유 값 타입 |
 | [src/control/](src/control/) | `TaskController`의 제어기 핸들 소유, 입력 → 제어 → 출력 → 주기 대기 |
@@ -133,10 +136,11 @@ H/G 화면은 관절각과 피드백 측정 토크를 표시합니다. CAN 모�
 | [src/motor_can_protocol/](src/motor_can_protocol/) | OpenRobot MIT 코덱 |
 | [src/daemon/](src/daemon/) | 기존 `Daemon` 프로세스 관리·터미널 릴레이·SHM 통계 |
 | [src/input/](src/input/) | 조이스틱 입력 |
+| [src/shm_logger/](src/shm_logger/) | SHM 복사·명시적 스키마·MCAP/RAM 이력·세션/저장 정책·관리 소켓 |
 | [third_party/mujoco_simulate/](third_party/mujoco_simulate/) | 프로젝트에서 사용하는 MuJoCo GUI 복사본·출처·해시 |
 | [tests/](tests/) | 기능·CAN·SHM·프로세스·GUI 회귀 시험 |
 
-프로젝트는 `apps/`에 여섯 실행 파일의 `main.cpp`, `src/`에 기능별 구현과 헤더를 함께 둡니다. `TaskController` 클래스는 `src/control/control.hpp/.cpp`, 기존 `Daemon` 클래스는 `src/daemon/daemon.hpp/.cpp`로 옮겼습니다. 별도의 제어 런타임 래퍼는 추가하지 않았습니다.
+프로젝트는 `apps/`에 실행 프로그램별 `main.cpp`, `src/`에 기능별 구현과 헤더를 함께 둡니다. `TaskController` 클래스는 `src/control/control.hpp/.cpp`, 기존 `Daemon` 클래스는 `src/daemon/daemon.hpp/.cpp`로 옮겼습니다. 별도의 제어 런타임 래퍼는 추가하지 않았습니다.
 
 프로젝트 헤더는 `#include "ipc/shared_memory.hpp"`처럼 `src/` 기준 경로를 씁니다. `qhrr05_common` INTERFACE 타깃은 이 검색 경로만 전달합니다. 실제 구현은 `motion_controllers`, `control_core`, `motor_can_protocol`, `simulation_core`, `daemon_core`, `input_core` 등의 라이브러리로 명시적으로 연결합니다.
 
@@ -149,7 +153,8 @@ H/G 화면은 관절각과 피드백 측정 토크를 표시합니다. CAN 모�
 | `simulation` | `apps/simulation/main.cpp` | `src/simulation/` | `config/simulation/simulation.yaml` |
 | `input` | `apps/input/main.cpp` | `src/input/` | CLI의 SHM 이름·장치 경로 |
 | `can_hal` | `apps/can_hal/main.cpp` | 진입점 내부 HAL 및 `src/motor_can_protocol/` | `config/can_hal/can_hal.yaml` |
-| `shm_logger` | `apps/shm_logger/main.cpp` | 진입점 내부 | CLI의 SHM 이름·출력 경로 |
+| `shm_logger` | `apps/shm_logger/main.cpp` | `src/shm_logger/` | `config/shm_logger/shm_logger.yaml` |
+| `qhrr-logctl` | `apps/logctl/main.cpp` | 관리 소켓 클라이언트 | CLI의 소켓 경로 또는 기본 daemon 설정 |
 
 이전 실행 파일 `task_controller`, `mujoco_simulate`, `aux_reader`는 각각 `control`, `simulation`, `input`으로 변경했습니다. 제어 주파수 YAML 키도 `control.frequency_hz`를 사용합니다. 별도 daemon 설정은 런처와 daemon 모두 `--config FILE.yaml`로 지정합니다.
 
@@ -231,7 +236,7 @@ HAL은 기본 daemon의 필수 프로세스입니다. 통계 창의 `BUS LOAD es
 
 ## 검증과 유지 문서
 
-`main`은 통합 기준이며 기능 개발 기준 브랜치는 `logger_and_dashboard`입니다. `directory_test_0`에서 검증한 디렉터리 재구성·명명 통일·터미널 개선을 채택했으며, 후속 작업은 `logger_and_dashboard`에서 이어갑니다.
+`main`에는 디렉터리 재구성·터미널 개선과 `logger_and_dashboard`의 텔레메트리·로깅 구현을 통합했습니다. 후속 작업은 `main`에서 분기한 `dynamic_control`에서 이어갑니다.
 
 ```bash
 ctest --test-dir build --output-on-failure
@@ -239,9 +244,10 @@ ctest --test-dir build --output-on-failure
 
 CTest에는 격리된 vcan의 코덱 시험과 실제 MuJoCo 가상 모터 폐루프 시험이 있습니다. 후자는 호밍·G/M·물체 접촉/해제·CAN 정지 중 우회 금지·Release를 검사합니다. 실제 AK10-9 하드웨어 검증은 아닙니다. 회귀 시험은 사용자 튜닝과 분리한 [고정 설정](tests/fixtures/control.yaml)을 사용합니다.
 
-GUI 시험도 위 명령에 포함합니다. `simulator_gui`는 H/G/M 조작·목표 힘 변경·일시정지·Ctrl+드래그를, `can_gui`는 CAN 실행·실패·전체 종료 경로를 묶어 검사합니다. `terminal_layout`과 `terminal_statistics`는 창 배치와 화면 복원·로그 보존을 검사합니다. 공통 [GUI 실행 환경](tests/run_gui_test.sh)과 [X11 도우미](tests/gui_test_utils.py)를 사용하며, Xvfb·D-Bus·xdotool·GNOME Terminal이 필요합니다. 시험은 별도 세션과 임시 디렉터리를 사용하며 프로젝트 문서에 스크린샷을 남기지 않습니다.
+GUI 시험도 위 명령에 포함합니다. `simulator_gui`는 H/G/M 조작·목표 힘 변경·일시정지·Ctrl+드래그를, `can_gui`는 CAN 실행·실패·전체 종료·선택적 로거 창 재시작 경로를 묶어 검사합니다. `logging_core/service/daemon`은 MCAP 스키마·5초/2초 덤프·저장 장애·오프라인 분석·독립적 재시작을 검사합니다. `terminal_layout`과 `terminal_statistics`는 창 배치와 화면 복원·로그 보존을 검사합니다. 공통 [GUI 실행 환경](tests/run_gui_test.sh)과 [X11 도우미](tests/gui_test_utils.py)를 사용하며, Xvfb·D-Bus·xdotool·GNOME Terminal이 필요합니다. 시험은 별도 세션과 임시 디렉터리를 사용하며 프로젝트 문서에 스크린샷을 남기지 않습니다.
 
 - [최근 작업과 다음 우선순위](WORK_NOTE.md)
+- [MCAP·Flight Recorder·CLI·분석과 검증 범위](docs/logging.md)
 - [CAN HAL 패킷·계측·영점 보정](docs/can_hal.md)
 - [코드 작성·포맷 규칙](docs/code_style.md)
 - [모델 구조·출처·라이선스](models/qhrr-05/README.md)

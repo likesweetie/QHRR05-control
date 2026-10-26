@@ -239,7 +239,7 @@ int Daemon::RelayTerminalOutput(const char* descriptor_text,
     const char* process_name,
     const char* interval_text,
     const char* log_path,
-    const char* supervisor_text) {
+    const char* shutdown_target_text) {
     try {
         char* end = nullptr;
         const long descriptor = std::strtol(descriptor_text, &end, 10);
@@ -252,9 +252,9 @@ int Daemon::RelayTerminalOutput(const char* descriptor_text,
         if (!*pid_text || *end || pid <= 0 || pid > 0x7fffffff)
             throw std::runtime_error("invalid terminal process PID");
 
-        const long supervisor = std::strtol(supervisor_text, &end, 10);
-        if (!*supervisor_text || *end || supervisor <= 0 || supervisor > 0x7fffffff)
-            throw std::runtime_error("invalid terminal supervisor PID");
+        const long shutdown_target = std::strtol(shutdown_target_text, &end, 10);
+        if (!*shutdown_target_text || *end || shutdown_target <= 0 || shutdown_target > 0x7fffffff)
+            throw std::runtime_error("invalid terminal shutdown target PID");
         RelaySignals signals;
 
         const double interval_sec = std::strtod(interval_text, &end);
@@ -301,10 +301,10 @@ int Daemon::RelayTerminalOutput(const char* descriptor_text,
         while (true) {
             if (relay_signal && !shutdown_requested) {
                 shutdown_requested = true;
-                if (::kill(int(supervisor), relay_signal == SIGINT ? SIGINT : SIGTERM) != 0) {
+                if (::kill(int(shutdown_target), relay_signal == SIGINT ? SIGINT : SIGTERM) != 0) {
                     if (errno == ESRCH)
                         return 0;
-                    throw std::runtime_error("cannot notify daemon of terminal shutdown");
+                    throw std::runtime_error("cannot notify terminal shutdown target");
                 }
             }
             const auto now = std::chrono::steady_clock::now();
@@ -464,7 +464,8 @@ int Daemon::RelayTerminalOutput(const char* descriptor_text,
 std::optional<int> Daemon::Spawn(const ProcessSpec& spec) {
     last_errno_ = 0;
 
-    if (spec.name.empty() || spec.exec_path.empty() || processes_.count(spec.name)) {
+    if (spec.name.empty() || spec.exec_path.empty() ||
+        (processes_.count(spec.name) && processes_.at(spec.name).running)) {
         last_errno_ = EINVAL;
         return std::nullopt;
     }

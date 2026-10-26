@@ -48,6 +48,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
     for action in [
         'daemon-stop',
         'window-close',
+        'logger-window-close',
         'terminal-failure',
         'hal-startup-failure',
         'without-can',
@@ -75,6 +76,16 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
         processes = yaml.safe_load((ROOT / 'config/daemon/daemon.yaml').read_text())
         processes['shm_name'] = name
         processes['log_directory'] = str(directory / 'logs')
+        if action != 'logger-window-close':
+            for key in ('processes', 'debug_processes'):
+                processes[key] = [p for p in processes[key] if p['name'] != 'shm_logger']
+        else:
+            recorder = yaml.safe_load((ROOT / 'config/shm_logger/shm_logger.yaml').read_text())
+            recorder['logging']['output_dir'] = str(directory / 'recordings')
+            recorder['logging']['storage']['minimum_free_gib'] = 0
+            recorder['logging']['flight_recorder']['capacity_mib'] = 1
+            recorder_config = directory / 'recorder.yaml'
+            recorder_config.write_text(yaml.safe_dump(recorder))
         control = str(ROOT / 'tests/fixtures/control.yaml')
 
         for spec in processes['processes'] + processes['debug_processes']:
@@ -96,6 +107,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
 
                 if '--hal-config' in args:
                     args[args.index('--hal-config') + 1] = str(config)
+            elif spec['name'] == 'shm_logger':
+                spec['args'][spec['args'].index('--config') + 1] = str(recorder_config)
             elif spec['name'] == 'control':
                 spec['args'] = [control, '{shm_name}'] + (
                     ['--without-can'] if '--without-can' in spec['args'] else []
@@ -172,7 +185,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
                 if action == 'without-can':
                     return len(children) == 4 and sim_shm.exists()
 
-                return len(children) == 6 and shm.exists() and sim_shm.exists()
+                expected = 8 if action == 'logger-window-close' else 6
+                return len(children) == expected and shm.exists() and sim_shm.exists()
 
             wait_for(started, log.read_text)
             assert (
@@ -190,7 +204,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
             for title in ['QHRR05-simulation', 'QHRR05-control']:
                 wait_for(lambda: find_window(title), log.read_text)
 
-            expected_placements = 2 if action == 'without-can' else 3
+            expected_placements = (
+                2 if action == 'without-can' else (4 if action == 'logger-window-close' else 3)
+            )
             wait_for(
                 lambda: log.read_text().count('[layout] placed ') == expected_placements,
                 log.read_text,
@@ -226,14 +242,31 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
             window = wait_for(find_window, log.read_text)
             time.sleep(0.5)
 
-            if action == 'daemon-stop':
+            if action == 'logger-window-close':
+                old = children['shm_logger']
+                logger_window = wait_for(lambda: find_window('QHRR05-shm_logger'), log.read_text)
+                event('windowclose', logger_window)
+                wait_for(
+                    lambda: len(re.findall(r'shm_logger started pid=(\d+)', log.read_text())) >= 2,
+                    log.read_text,
+                )
+                children.update(
+                    (key, int(pid))
+                    for key, pid in re.findall(
+                        r'\[daemon\] (\S+) started pid=(\d+)', log.read_text()
+                    )
+                )
+                assert children['shm_logger'] != old and process.poll() is None, log.read_text()
+                wait_for(lambda: log.read_text().count('[layout] placed ') >= 5, log.read_text)
+                os.kill(daemon_pid, signal.SIGTERM)
+            elif action == 'daemon-stop':
                 os.kill(daemon_pid, signal.SIGTERM)
             else:
                 event('windowclose', window)
 
             code = process.wait(timeout=8)
 
-            if 'window-close' not in action:
+            if action != 'window-close':
                 assert code == 0, log.read_text()
 
             if action == 'daemon-stop':
@@ -251,11 +284,12 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
                         'QHRR05-CAN-HAL',
                         'QHRR05-simulation',
                         'QHRR05-control',
+                        'QHRR05-shm_logger',
                     ]
                 ),
                 lambda: 'Application statistics window remains open',
             )
-            print('PASS:', action, 'one daemon, six direct children, SHM and window cleanup')
+            print('PASS:', action, 'daemon ownership, SHM and window cleanup')
         finally:
             if process.poll() is None:
                 if daemon_pid:

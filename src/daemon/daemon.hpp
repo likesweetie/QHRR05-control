@@ -27,6 +27,8 @@ struct ProcessSpec {
     int ready_timeout_ms{5000};
     bool create_process_group{true};
     bool terminal_viewer{false};
+    bool critical{true};  // Optional observability processes never stop robot control.
+    int restart_limit{0}, restart_delay_ms{1000};
 };
 
 struct ProcessInfo {
@@ -58,7 +60,7 @@ public:
         const char* process_name,
         const char* interval_text,
         const char* log_path,
-        const char* supervisor_text);
+        const char* shutdown_target_text);
     void BeginTerminalScreen();
     void WriteTerminalLog(const std::string& text);
     void DisplayStatistics(const std::string& text);

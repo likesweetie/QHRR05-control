@@ -1,0 +1,9 @@
+{
+  "extends": "@foxglove/tsconfig/node.json",
+  "include": ["./**/*"],
+  "compilerOptions": {
+    "noEmit": true,
+    "erasableSyntaxOnly": false
+  },
+  "references": [{ "path": "../../core" }, { "path": "../../nodejs" }]
+}

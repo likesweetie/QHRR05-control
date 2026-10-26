@@ -1,0 +1,482 @@
+// LogChannel::Stats (attempts, accepted, dropped_by_sink) and SinkWorker::Stats.
+#include "data_tamer_v2/channel.hpp"
+#include "data_tamer_v2/custom_types.hpp"
+#include "data_tamer_v2/data_sink.hpp"
+#include "alloc_counter.hpp"
+#include "test_sinks.hpp"
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace DataTamer2;
+using DataTamerTest::attach;
+using DataTamerTest::Attached;
+using DataTamerTest::droppedBy;
+using DataTamerTest::manual;
+using Delivery = SinkWorker::Delivery;
+
+namespace
+{
+class CountingSink : public DataSink
+{
+public:
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef&) override
+  {
+    ++snapshots;
+    if(throw_every > 0 && snapshots % throw_every == 0)
+    {
+      throw std::runtime_error("sink failed " + std::to_string(snapshots));
+    }
+  }
+  int snapshots = 0;
+  int throw_every = 0;  // 0: never
+};
+
+// Writes its 8-byte value, or throws while `fail` is set.
+class FlakySerializer : public CustomSerializer
+{
+public:
+  const std::string& typeName() const override
+  {
+    static const std::string name = "Flaky";
+    return name;
+  }
+  size_t serializedSize(const void*) const override { return sizeof(uint64_t); }
+  bool isFixedSize() const override { return true; }
+  void serialize(const void* instance, SerializeMe::SpanBytes& buffer) const override
+  {
+    if(fail)
+    {
+      throw std::runtime_error("flaky");
+    }
+    SerializeMe::SerializeIntoBuffer(buffer, *static_cast<const uint64_t*>(instance));
+  }
+  bool fail = false;
+};
+
+struct Flaky
+{
+  uint64_t value = 0;
+};
+
+class SchemaRefusingSink : public DataSink
+{
+public:
+  void onSchema(const Schema&) override { throw std::runtime_error("no schema"); }
+  void onSnapshot(const SnapshotRef&) override {}
+};
+}  // namespace
+
+TEST(ChannelStats, CountersMatchEveryResultOfAScriptedSequence)
+{
+  auto channel = LogChannel::create("stats");
+  auto value = channel->createLoggedValue<std::vector<double>>("value", { 1.0 });
+  Flaky flaky;
+  auto flaky_serializer = std::make_shared<FlakySerializer>();
+  channel->registerCustomValue("flaky", &flaky, flaky_serializer);
+  channel->setPoolCapacity(3);
+  channel->setPayloadCapacity(256);
+  auto a = manual<CountingSink>();
+  auto b = manual<CountingSink>();
+
+  std::map<SnapshotResult, uint64_t> seen;
+  uint64_t calls = 0;
+  uint64_t accepted_calls = 0;
+  const auto expect = [&](SnapshotResult got, SnapshotResult want) {
+    EXPECT_EQ(got, want);
+    ++seen[got];
+    ++calls;
+    accepted_calls += accepted(got) ? 1 : 0;
+    const auto stats = channel->stats();
+    EXPECT_EQ(stats.attempts, calls);
+    EXPECT_EQ(stats.accepted, seen[SnapshotResult::ok] + seen[SnapshotResult::partial]);
+    EXPECT_EQ(stats.accepted, accepted_calls);  // accepted() is what Stats counts
+  };
+
+  expect(channel->takeSnapshot(), SnapshotResult::no_sinks);
+  auto refusing = manual<SchemaRefusingSink>();
+  channel->addDataSink(refusing);
+  expect(channel->tryTakeSnapshot(), SnapshotResult::start_failed);
+  channel->removeDataSink(refusing);
+  channel->addDataSink(a);
+  expect(channel->takeSnapshot(), SnapshotResult::ok);  // starts logging
+
+  channel->addDataSink(b);
+  b.worker->stop();
+  expect(channel->takeSnapshot(), SnapshotResult::partial);
+  a.worker->stop();
+  expect(channel->takeSnapshot(), SnapshotResult::rejected);
+  a.worker->start();
+  b.worker->start();
+  // stop() delivered what A held. The three slots now go to three snapshots that
+  // B and A both hold.
+  for(int i = 0; i < 3; ++i)
+  {
+    expect(channel->tryTakeSnapshot(), SnapshotResult::ok);
+  }
+  expect(channel->tryTakeSnapshot(), SnapshotResult::pool_exhausted);
+  expect(channel->takeSnapshot(), SnapshotResult::pool_exhausted);
+  a.drain();
+  b.drain();
+
+  value->set(std::vector<double>(1024, 3.0));
+  expect(channel->tryTakeSnapshot(), SnapshotResult::oversize);
+  value->set(std::vector<double>{ 1.0 });
+
+  flaky_serializer->fail = true;
+  expect(channel->tryTakeSnapshot(), SnapshotResult::serialize_failed);
+  flaky_serializer->fail = false;
+
+  SnapshotResult probe = SnapshotResult::ok;
+  {
+    // stats() takes the control mutex, which must not be taken inside a
+    // scopedWrite(): read the counters after the scope.
+    const auto transaction = channel->scopedWrite();
+    std::thread([&] { probe = channel->tryTakeSnapshot(); }).join();
+  }
+  expect(probe, SnapshotResult::blocked);
+  expect(channel->tryTakeSnapshot(), SnapshotResult::ok);
+
+  // Every result of the script was exercised, and the counters add up.
+  for(auto result :
+      { SnapshotResult::ok, SnapshotResult::partial, SnapshotResult::rejected,
+        SnapshotResult::no_sinks, SnapshotResult::start_failed,
+        SnapshotResult::pool_exhausted, SnapshotResult::oversize, SnapshotResult::blocked,
+        SnapshotResult::serialize_failed })
+  {
+    EXPECT_GE(seen[result], 1u) << "result " << int(result) << " never happened";
+  }
+  const auto stats = channel->stats();
+  EXPECT_EQ(stats.attempts, 14u);
+  EXPECT_EQ(stats.accepted, 6u);  // 5 ok + 1 partial
+  EXPECT_EQ(stats.pool_exhausted, 2u);
+  EXPECT_EQ(stats.dropped_oversize, 1u);
+  EXPECT_EQ(stats.serialize_failures, 1u);
+  EXPECT_EQ(stats.write_lock_contended, 1u);
+  EXPECT_EQ(channel->snapshotAttempts(), stats.attempts);
+  EXPECT_EQ(channel->snapshotsAccepted(), stats.accepted);
+}
+
+TEST(ChannelStats, ExistingCountersKeepTheirMeaning)
+{
+  auto channel = LogChannel::create("stats");
+  auto value = channel->createLoggedValue<std::vector<double>>("value", { 1.0 });
+  channel->setPoolCapacity(2);
+  channel->setPayloadCapacity(256);
+  auto sink = manual<CountingSink>();
+  channel->addDataSink(sink);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  value->set(std::vector<double>(1024, 3.0));
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);  // grows the second slot
+  ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::pool_exhausted);
+  sink.drain();
+  ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
+  const auto stats = channel->stats();
+  EXPECT_EQ(stats.pool_exhausted, channel->poolExhausted());
+  EXPECT_EQ(stats.pool_exhausted, 1u);
+  EXPECT_EQ(stats.payload_reallocations, channel->payloadReallocations());
+  EXPECT_EQ(stats.payload_reallocations, 1u);
+  EXPECT_EQ(stats.dropped_oversize, channel->droppedOversize());
+  EXPECT_EQ(stats.dropped_oversize, 1u);
+  EXPECT_EQ(stats.write_lock_contended, channel->writeLockContended());
+  EXPECT_EQ(stats.write_lock_wait_max_ns, channel->writeLockWaitMaxNs());
+  EXPECT_EQ(stats.attempts, 4u);
+  EXPECT_EQ(stats.accepted, 2u);
+}
+
+TEST(ChannelStats, DroppedIsCountedPerSink)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  auto a = manual<CountingSink>();
+  auto b = manual<CountingSink>();
+  auto c = manual<CountingSink>();
+  channel->addDataSink(a);
+  channel->addDataSink(b);
+  channel->addDataSink(c);
+  EXPECT_EQ(channel->stats().dropped_by_sink.size(), 3u);
+
+  b.worker->stop();
+  for(int i = 0; i < 3; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::partial);
+    a.drain();
+    c.drain();
+  }
+  c.worker->stop();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::partial);
+  a.drain();
+
+  auto stats = channel->stats();
+  ASSERT_EQ(stats.dropped_by_sink.size(), 3u);
+  EXPECT_EQ(droppedBy(stats, a), 0u);
+  EXPECT_EQ(droppedBy(stats, b), 4u);
+  EXPECT_EQ(droppedBy(stats, c), 1u);
+  EXPECT_EQ(stats.accepted, 4u);
+  EXPECT_EQ(stats.attempts, 4u);
+
+  // A removed sink leaves the array and its count goes with it; the others stay.
+  channel->removeDataSink(b);
+  stats = channel->stats();
+  ASSERT_EQ(stats.dropped_by_sink.size(), 2u);
+  EXPECT_EQ(droppedBy(stats, c), 1u);
+  EXPECT_EQ(droppedBy(stats, b), 0u);
+}
+
+TEST(ChannelStats, ChannelWithoutSinksHasAnEmptyDroppedArray)
+{
+  auto channel = LogChannel::create("stats");
+  const auto stats = channel->stats();
+  EXPECT_EQ(stats.attempts, 0u);
+  EXPECT_EQ(stats.accepted, 0u);
+  EXPECT_TRUE(stats.dropped_by_sink.empty());
+}
+
+TEST(ChannelStats, TheSnapshotPathStillAllocatesNothing)
+{
+  auto channel = LogChannel::create("stats");
+  double value = 1.0;
+  channel->registerValue("value", &value);
+  channel->setPoolCapacity(4);
+  auto sink = manual<CountingSink>();
+  channel->addDataSink(sink);
+  channel->startLogging();
+  ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  {
+    DataTamerTest::AllocCounter::Scope scope;
+    for(int i = 0; i < 4; ++i)
+    {
+      ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
+    }
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::pool_exhausted);
+    EXPECT_EQ(scope.allocations(), 0u);
+  }
+  EXPECT_EQ(channel->snapshotAttempts(), 6u);
+  EXPECT_EQ(channel->snapshotsAccepted(), 5u);
+}
+
+TEST(ChannelStats, CountersAreExactWhileAnotherThreadReadsThem)
+{
+  auto channel = LogChannel::create("stats");
+  double value = 1.0;
+  channel->registerValue("value", &value);
+  channel->setPoolCapacity(8);
+  auto sink = attach<CountingSink>(Delivery::Threaded);
+  channel->addDataSink(sink);
+  channel->startLogging();
+
+  std::atomic<bool> done{ false };
+  std::thread reader([&] {
+    uint64_t previous = 0;
+    while(!done)
+    {
+      const auto stats = channel->stats();
+      EXPECT_LE(stats.accepted, stats.attempts) << "within one read";
+      EXPECT_GE(stats.attempts, previous);
+      previous = stats.attempts;
+    }
+  });
+  constexpr uint64_t kCalls = 20000;
+  uint64_t accepted = 0;
+  for(uint64_t i = 0; i < kCalls; ++i)
+  {
+    accepted += channel->tryTakeSnapshot() == SnapshotResult::ok;
+  }
+  done = true;
+  reader.join();
+  sink.drain();
+  const auto stats = channel->stats();
+  EXPECT_EQ(stats.attempts, kCalls);
+  EXPECT_EQ(stats.accepted, accepted);
+  EXPECT_EQ(sink.worker->stats().delivered, accepted);
+}
+
+TEST(SinkWorkerStats, DeliveredCountsSnapshotsHandedToTheSink)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  channel->setPoolCapacity(10);
+  auto sink = manual<CountingSink>();
+  channel->addDataSink(sink);
+
+  auto stats = sink.worker->stats();
+  EXPECT_EQ(stats.delivered, 0u);
+  EXPECT_EQ(stats.errors, 0u);
+  EXPECT_EQ(stats.queue_high_water, 0u);
+  EXPECT_TRUE(stats.last_error.empty());
+
+  for(int i = 0; i < 7; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
+  EXPECT_EQ(sink.worker->stats().delivered, 0u) << "queued, not yet delivered";
+  sink.drain();
+  stats = sink.worker->stats();
+  EXPECT_EQ(stats.delivered, 7u);
+  EXPECT_EQ(stats.delivered, sink.worker->delivered());
+  EXPECT_EQ(stats.errors, 0u);
+  EXPECT_EQ(stats.queue_high_water, 7u);
+
+  // The high-water mark only grows, and the counters survive stop() and start().
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  sink.worker->stop();
+  sink.worker->start();
+  stats = sink.worker->stats();
+  EXPECT_EQ(stats.delivered, 8u);
+  EXPECT_EQ(stats.queue_high_water, 7u);
+}
+
+TEST(SinkWorkerStats, ThrowingSinkIsCountedAndNotDelivered)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  auto sink = manual<CountingSink>();
+  sink->throw_every = 3;
+  channel->addDataSink(sink);
+  for(int i = 0; i < 9; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+    sink.drain();
+  }
+  const auto stats = sink.worker->stats();
+  EXPECT_EQ(sink->snapshots, 9);
+  EXPECT_EQ(stats.errors, 3u);
+  EXPECT_EQ(stats.delivered, 6u);
+  EXPECT_EQ(stats.last_error, "sink failed 9");
+  EXPECT_EQ(stats.errors, sink.worker->errors());
+  EXPECT_EQ(stats.last_error, sink.worker->lastError());
+}
+
+TEST(SinkWorkerStats, HighWaterIsTheDeepestChannelQueue)
+{
+  auto sink = manual<CountingSink>();
+  uint64_t value = 1;
+  auto shallow = LogChannel::create("shallow");
+  auto deep = LogChannel::create("deep");
+  shallow->registerValue("value", &value);
+  deep->registerValue("value", &value);
+  deep->setPoolCapacity(16);
+  shallow->addDataSink(sink);
+  deep->addDataSink(sink);
+  for(int i = 0; i < 3; ++i)
+  {
+    ASSERT_EQ(shallow->takeSnapshot(), SnapshotResult::ok);
+  }
+  for(int i = 0; i < 12; ++i)
+  {
+    ASSERT_EQ(deep->takeSnapshot(), SnapshotResult::ok);
+  }
+  sink.drain();
+  EXPECT_EQ(sink.worker->stats().delivered, 15u);
+  EXPECT_EQ(sink.worker->queueHighWater(), 12u);
+}
+
+TEST(SinkWorkerStats, ThreadedWorkerCountsEverythingItDelivers)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  channel->setPoolCapacity(64);
+  auto sink = attach<CountingSink>(Delivery::Threaded);
+  channel->addDataSink(sink);
+  channel->startLogging();
+  uint64_t accepted = 0;
+  for(int i = 0; i < 5000; ++i)
+  {
+    accepted += channel->tryTakeSnapshot() == SnapshotResult::ok;
+  }
+  sink.drain();
+  const auto stats = sink.worker->stats();
+  EXPECT_EQ(stats.delivered, accepted);
+  EXPECT_GT(accepted, 0u);
+  EXPECT_GE(stats.queue_high_water, 1u);
+  EXPECT_LE(stats.queue_high_water, 64u);
+}
+
+TEST(ChannelStats, RefusedLastPushWhileAnotherSinkAcceptsIsPartial)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  channel->setPoolCapacity(1);
+  // A channel fills its table from the highest slot down, so the first sink
+  // attached is the last one published to: the snapshot is moved into its push.
+  auto last = manual<CountingSink>();
+  auto first = manual<CountingSink>();
+  channel->addDataSink(last);
+  channel->addDataSink(first);
+  channel->startLogging();
+  last.worker->stop();
+
+  for(uint64_t round = 1; round <= 3; ++round)
+  {
+    // The single pool slot comes back each round: the refused push released its
+    // reference, and the accepting sink gives its own up when it drains.
+    ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::partial) << "round " << round;
+    first.drain();
+    const auto stats = channel->stats();
+    EXPECT_EQ(stats.attempts, round);
+    EXPECT_EQ(stats.accepted, round);
+    ASSERT_EQ(stats.dropped_by_sink.size(), 2u);
+    EXPECT_EQ(droppedBy(stats, last), round);
+    EXPECT_EQ(droppedBy(stats, first), 0u);
+    EXPECT_EQ(stats.pool_exhausted, 0u);
+  }
+  EXPECT_EQ(first.worker->stats().delivered, 3u);
+}
+
+TEST(ChannelStats, ACallThatThrowsCountsAsAnAttemptOnly)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  auto refusing = manual<SchemaRefusingSink>();
+  channel->addDataSink(refusing);
+  EXPECT_THROW((void)channel->takeSnapshot(), std::runtime_error);
+  auto stats = channel->stats();
+  EXPECT_EQ(stats.attempts, 1u);
+  EXPECT_EQ(stats.accepted, 0u);
+  EXPECT_THROW((void)channel->takeSnapshot(), std::runtime_error);
+  stats = channel->stats();
+  EXPECT_EQ(stats.attempts, 2u);
+  EXPECT_EQ(stats.accepted, 0u);
+}
+
+TEST(SinkWorkerStats, HighWaterSeesAQueueThatWrapsAroundItsRing)
+{
+  auto channel = LogChannel::create("stats");
+  uint64_t value = 1;
+  channel->registerValue("value", &value);
+  channel->setPoolCapacity(4);  // a ring of five entries
+  auto sink = manual<CountingSink>();
+  channel->addDataSink(sink);
+  for(int i = 0; i < 3; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
+  sink.drain();
+  EXPECT_EQ(sink.worker->queueHighWater(), 3u);
+  // The ring is empty at position 3: four more entries wrap past the end.
+  for(int i = 0; i < 4; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
+  sink.drain();
+  EXPECT_EQ(sink.worker->queueHighWater(), 4u);
+  EXPECT_EQ(sink.worker->delivered(), 7u);
+}

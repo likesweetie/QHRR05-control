@@ -34,6 +34,15 @@ processes:
     working_directory: ../..
     args: [config/control/control.yaml, "{shm_name}"]
 
+  - name: shm_logger
+    exec_path: shm_logger
+    working_directory: ../..
+    wait_ready: true
+    critical: false
+    restart_limit: 3
+    restart_delay_ms: 1000
+    args: [--config, config/shm_logger/shm_logger.yaml, --shm-name, "{shm_name}", --daemon-config, "{daemon_config}"]
+
 # Selected only by daemon --without-can; never used after a CAN startup failure.
 debug_processes:
   - name: simulation
@@ -46,3 +55,12 @@ debug_processes:
     exec_path: control
     working_directory: ../..
     args: [config/control/control.yaml, "{shm_name}", --without-can]
+
+  - name: shm_logger
+    exec_path: shm_logger
+    working_directory: ../..
+    wait_ready: true
+    critical: false
+    restart_limit: 3
+    restart_delay_ms: 1000
+    args: [--config, config/shm_logger/shm_logger.yaml, --shm-name, "{shm_name}", --daemon-config, "{daemon_config}"]

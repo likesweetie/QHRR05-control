@@ -1,0 +1,10 @@
+{
+  "extends": "@foxglove/tsconfig/node.json",
+  "include": ["./src/**/*"],
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist/esm",
+    "composite": true,
+    "erasableSyntaxOnly": false
+  }
+}

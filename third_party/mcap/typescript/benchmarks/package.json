@@ -1,0 +1,32 @@
+{
+  "name": "@foxglove/mcap-benchmarks",
+  "description": "MCAP benchmarks",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "lint:ci": "tsc -b && eslint --report-unused-disable-directives .",
+    "lint": "tsc -b && eslint --report-unused-disable-directives --fix .",
+    "bench": "tsc -b && node --huge-max-old-generation-size --expose-gc --import tsx index.ts",
+    "bench:debug": "tsc -b && node --huge-max-old-generation-size --inspect-brk --expose-gc --import tsx index.ts"
+  },
+  "devDependencies": {
+    "@foxglove/eslint-plugin": "1.0.1",
+    "@foxglove/tsconfig": "3.2.0",
+    "@mcap/core": "*",
+    "@types/node": "20.19.33",
+    "@typescript-eslint/eslint-plugin": "6.11.0",
+    "@typescript-eslint/parser": "6.11.0",
+    "commander": "12.1.0",
+    "eslint": "8.54.0",
+    "eslint-config-prettier": "9.0.0",
+    "eslint-plugin-es": "4.1.0",
+    "eslint-plugin-filenames": "1.3.2",
+    "eslint-plugin-import": "2.29.0",
+    "eslint-plugin-prettier": "5.0.1",
+    "prettier": "3.1.0",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  }
+}

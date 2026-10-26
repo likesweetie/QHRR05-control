@@ -25,7 +25,7 @@ return value;
 
 `apps/`는 실행 진입점, `src/`는 기능별 헤더·구현을 함께 둡니다. 헤더는 `ipc/shared_memory.hpp`, `control/control.hpp`처럼 `src/` 기준 모듈 경로로 포함합니다. `qhrr05_common`은 검색 경로만 제공하고 실제 라이브러리는 CMake에서 명시적으로 연결합니다.
 
-앱 디렉터리와 실행 파일은 `daemon`, `control`, `simulation`, `input`, `can_hal`, `shm_logger`로 맞춥니다. 분리된 구현은 같은 이름의 `src/<모듈>/`에 두고 라이브러리 타깃에는 `_core`를 붙입니다. 공용 모듈 `ipc`, `motion_controllers`, `motor_can_protocol`은 기능 이름을 유지합니다. 설정 경로는 `config/<모듈>/<모듈>.yaml`, 모터 규약은 `config/motor/<모델>.yaml`을 사용합니다. 설정이 필요 없는 앱에는 파일이나 빈 구현 디렉터리를 만들지 않습니다.
+앱 디렉터리와 실행 파일은 `daemon`, `control`, `simulation`, `input`, `can_hal`, `shm_logger`로 맞춥니다. 명세의 관리 CLI `qhrr-logctl`은 `apps/logctl/`에 둡니다. 분리된 구현은 같은 이름의 `src/<모듈>/`에 두고 라이브러리 타깃에는 `_core`를 붙입니다. 공용 모듈 `ipc`, `motion_controllers`, `motor_can_protocol`은 기능 이름을 유지합니다. 설정 경로는 `config/<모듈>/<모듈>.yaml`, 모터 규약은 `config/motor/<모델>.yaml`을 사용합니다. 설정이 필요 없는 앱에는 파일이나 빈 구현 디렉터리를 만들지 않습니다.
 
 TaskController는 모션 컨트롤러 인스턴스를 소유하고 입력·제어·출력·주기 대기를 호출합니다. 각 모션 컨트롤러는 생성자에서 받은 YAML 경로로 자신의 설정을 파싱·검증합니다. 공용 설정 파서나 작은 데이터 전달만을 위한 계약 구조체는 추가하지 않습니다.
 

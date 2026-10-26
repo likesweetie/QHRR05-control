@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.22)
 project(QHRR05 CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -9,8 +9,13 @@ set(MUJOCO_DIR ${PROJECT_SOURCE_DIR}/third_party/mujoco)
 
 find_package(PkgConfig REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 pkg_search_module(GLFW REQUIRED glfw3)
 pkg_check_modules(TERMINAL_X11 REQUIRED IMPORTED_TARGET x11 xrandr)
+
+# Offline, pinned DataTamer 2.0.0 and MCAP C++ 2.1.3; no build-time downloads.
+set(FETCHCONTENT_SOURCE_DIR_DATA_TAMER_MCAP ${PROJECT_SOURCE_DIR}/third_party/mcap)
+add_subdirectory(third_party/data_tamer/data_tamer_cpp EXCLUDE_FROM_ALL)
 
 # Header visibility only. Implementations are linked through their own targets below.
 add_library(qhrr05_common INTERFACE)
@@ -71,11 +76,47 @@ set_target_properties(simulation PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
 add_executable(input apps/input/main.cpp)
 target_link_libraries(input PRIVATE input_core)
 
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    OUTPUT_VARIABLE QHRR_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND git status --porcelain WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    OUTPUT_VARIABLE QHRR_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+set(QHRR_GIT_DIRTY 0)
+if(QHRR_GIT_STATUS)
+    set(QHRR_GIT_DIRTY 1)
+endif()
+add_library(shm_logger_core STATIC
+    src/shm_logger/shm_snapshot_reader.cpp src/shm_logger/log_schema.cpp
+    src/shm_logger/session_storage.cpp src/shm_logger/logger_service.cpp
+    src/shm_logger/csv_logger.cpp)
+target_link_libraries(shm_logger_core PUBLIC qhrr05_common data_tamer::data_tamer yaml-cpp OpenSSL::Crypto pthread)
+target_compile_definitions(shm_logger_core PRIVATE
+    QHRR_GIT_COMMIT="${QHRR_GIT_COMMIT}" QHRR_GIT_DIRTY=${QHRR_GIT_DIRTY}
+    QHRR_BUILD_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
+    QHRR_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 add_executable(shm_logger apps/shm_logger/main.cpp)
-target_link_libraries(shm_logger PRIVATE qhrr05_common pthread)
+target_link_libraries(shm_logger PRIVATE shm_logger_core)
+add_executable(qhrr_logctl apps/logctl/main.cpp)
+set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
+target_link_libraries(qhrr_logctl PRIVATE shm_logger_core)
+target_compile_definitions(qhrr_logctl PRIVATE
+    QHRR_DEFAULT_DAEMON_CONFIG="${PROJECT_SOURCE_DIR}/config/daemon/daemon.yaml")
+set(QHRR_ANALYSIS_PYTHON python3 CACHE STRING "Python interpreter with tools/analysis/requirements.txt installed")
+foreach(tool IN ITEMS inspect analyze benchmark)
+    file(GENERATE OUTPUT ${PROJECT_BINARY_DIR}/qhrr-log-${tool}
+        CONTENT "#!/usr/bin/env bash\nexec \"${QHRR_ANALYSIS_PYTHON}\" \"${PROJECT_SOURCE_DIR}/tools/analysis/log_${tool}.py\" \"$@\"\n"
+        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(logging_core_test tests/logging_core_test.cpp)
+    target_link_libraries(logging_core_test PRIVATE shm_logger_core)
+    add_test(NAME logging_core COMMAND logging_core_test)
+    add_executable(logging_test_producer tests/logging_test_producer.cpp)
+    target_link_libraries(logging_test_producer PRIVATE qhrr05_common pthread)
+    add_test(NAME logging_service COMMAND ${QHRR_ANALYSIS_PYTHON} ${PROJECT_SOURCE_DIR}/tests/logging_service_test.py)
+    add_test(NAME logging_daemon COMMAND ${QHRR_ANALYSIS_PYTHON} ${PROJECT_SOURCE_DIR}/tests/logging_daemon_test.py)
+    set_tests_properties(logging_service logging_daemon PROPERTIES TIMEOUT 90)
     add_test(NAME terminal_layout COMMAND bash
         ${PROJECT_SOURCE_DIR}/tests/run_gui_test.sh ${PROJECT_SOURCE_DIR}/tests/terminal_layout_test.py $<TARGET_FILE:daemon>)
     add_test(NAME simulator_gui COMMAND bash

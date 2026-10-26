@@ -35,7 +35,7 @@ def simulation_command(directory, shm_name, csv_path=None, duration=None, contro
     ]
 
     if csv_path:
-        processes.append(process('shm_logger', ['{shm_name}', str(csv_path)]))
+        processes.append(process('shm_logger', ['--csv', '{shm_name}', str(csv_path)]))
 
     path = Path(directory) / 'processes.json'
     path.write_text(

@@ -18,6 +18,7 @@
 #include <thread>
 #include <unistd.h>
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
 
 namespace {
 namespace fs = std::filesystem;
@@ -59,6 +60,8 @@ std::vector<ProcessSpec> LoadProcesses(
     for (const auto& process : processes) {
         ProcessSpec spec;
         spec.name = process["name"].as<std::string>();
+        if (process["critical"])
+            spec.critical = process["critical"].as<bool>();
         spec.exec_path =
             fs::absolute(ExecutableDirectory() / process["exec_path"].as<std::string>()).string();
         spec.args = process["args"].as<std::vector<std::string>>();
@@ -66,8 +69,10 @@ std::vector<ProcessSpec> LoadProcesses(
         for (auto& argument : spec.args)
             if (argument == "{shm_name}")
                 argument = shm_name;
+            else if (argument == "{daemon_config}")
+                argument = fs::absolute(path).string();
 
-        if (spec.name.empty() || !fs::is_regular_file(spec.exec_path))
+        if (spec.name.empty() || (spec.critical && !fs::is_regular_file(spec.exec_path)))
             throw std::runtime_error("invalid process name or executable: " + spec.name);
 
         if (spec.name.find_first_not_of(
@@ -98,7 +103,8 @@ std::vector<ProcessSpec> LoadProcesses(
             spec.terminal_exec =
                 fs::absolute(ExecutableDirectory() / terminal.as<std::string>()).string();
 
-            if (spec.terminal_title.empty() || !fs::is_regular_file(spec.terminal_exec))
+            if (spec.terminal_title.empty() ||
+                (spec.critical && !fs::is_regular_file(spec.terminal_exec)))
                 throw std::runtime_error("invalid terminal configuration: " + spec.name);
         }
 
@@ -107,6 +113,18 @@ std::vector<ProcessSpec> LoadProcesses(
 
         if (spec.ready_timeout_ms <= 0)
             throw std::runtime_error("ready_timeout_ms must be positive");
+
+        if (process["critical"])
+            spec.critical = process["critical"].as<bool>();
+        if (process["restart_limit"])
+            spec.restart_limit = process["restart_limit"].as<int>();
+        if (process["restart_delay_ms"])
+            spec.restart_delay_ms = process["restart_delay_ms"].as<int>();
+        if (spec.restart_limit < 0 || spec.restart_limit > 20 || spec.restart_delay_ms < 100 ||
+            spec.restart_delay_ms > 60000)
+            throw std::runtime_error("invalid process restart policy: " + spec.name);
+        if (spec.critical && spec.restart_limit)
+            throw std::runtime_error("only noncritical processes may restart: " + spec.name);
 
         if (process["env"])
             for (const auto& entry : process["env"])
@@ -197,7 +215,14 @@ void StartProcess(Daemon& daemon, const ProcessSpec& spec, std::vector<ProcessSp
         throw std::runtime_error(
             "process start failed: " + spec.name + ": " + std::strerror(daemon.LastErrno()));
 
-    children.push_back(spec);
+    const auto previous =
+        std::find_if(children.begin(), children.end(), [&](const ProcessSpec& old) {
+            return old.name == spec.name;
+        });
+    if (previous == children.end())
+        children.push_back(spec);
+    else
+        *previous = spec;
     daemon.WriteTerminalLog(
         "[daemon] " + spec.name + " started pid=" + std::to_string(*pid) + "\n");
 }
@@ -257,7 +282,7 @@ bool StopChildren(Daemon& daemon, const std::vector<ProcessSpec>& specs) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // The display relay forwards terminal signals to the supervising daemon.
+    // Critical terminals stop the daemon; optional terminals stop only their application.
     if (argc == 8 && std::string(argv[1]) == "--terminal-output")
         return Daemon::RelayTerminalOutput(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
 
@@ -354,13 +379,18 @@ int main(int argc, char** argv) {
             daemon.WriteTerminalLog(
                 "[daemon] explicit --no-terminals: child output uses this stream\n");
 
-        for (const auto& spec : specs) {
+        std::map<std::string, int> restart_count;
+        std::map<std::string, std::uint64_t> restart_at;
+        const auto launch = [&](const ProcessSpec& spec) {
             if (spec.terminal_title.empty()) {
                 StartProcess(daemon, spec, children);
             } else {
                 auto terminal = std::make_unique<ProcessTerminal>();
                 terminal->Open();
-                const auto log_path = log_directory / (spec.name + ".log");
+                const auto suffix = restart_count[spec.name]
+                                        ? ".restart-" + std::to_string(restart_count[spec.name])
+                                        : std::string{};
+                const auto log_path = log_directory / (spec.name + suffix + ".log");
                 const int log_fd =
                     ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 
@@ -385,6 +415,7 @@ int main(int argc, char** argv) {
                 ProcessSpec display;
                 display.name = spec.name + ".terminal";
                 display.terminal_viewer = true;
+                display.critical = spec.critical;
                 display.exec_path = spec.terminal_exec;
                 display.args = {"--wait",
                     "--window",
@@ -402,13 +433,26 @@ int main(int argc, char** argv) {
                     spec.name,
                     std::to_string(display_interval),
                     log_path.string(),
-                    std::to_string(::getpid())};
+                    std::to_string(spec.critical ? ::getpid() : daemon.Get(spec.name)->pid)};
                 display.pass_fd = terminal->master;
                 StartProcess(daemon, display, children);
                 daemon.PlaceTerminalWindow(spec);
                 terminals.push_back(std::move(terminal));
             }
+        };
 
+        for (const auto& spec : specs) {
+            try {
+                launch(spec);
+            } catch (const std::exception& e) {
+                if (spec.critical)
+                    throw;
+                daemon.WriteTerminalLog("[daemon] optional process startup ERROR: " + spec.name +
+                                        ": " + e.what() + "\n");
+                daemon.Signal(spec.name, SIGTERM);
+                restart_at[spec.name] =
+                    shm_utils::MonotonicNs() + std::uint64_t(spec.restart_delay_ms) * 1000000;
+            }
             if (stop_requested)
                 break;
         }
@@ -422,13 +466,59 @@ int main(int argc, char** argv) {
         while (!stop_requested && !completed) {
             for (const auto& name : daemon.Reap()) {
                 const auto info = daemon.Get(name).value();
+                const auto base = name.size() > 9 && name.substr(name.size() - 9) == ".terminal"
+                                      ? name.substr(0, name.size() - 9)
+                                      : name;
+                const auto spec =
+                    std::find_if(specs.begin(), specs.end(), [&](const ProcessSpec& item) {
+                        return item.name == base;
+                    });
+                if (spec != specs.end() && !spec->critical) {
+                    daemon.WriteTerminalLog("[daemon] optional process exited: " + name +
+                                            " code=" + std::to_string(info.exit_code) +
+                                            " signal=" + std::to_string(info.term_signal) + "\n");
+                    if (name != base)
+                        daemon.Signal(base, SIGTERM);
+                    if (!restart_at.count(base))
+                        restart_at[base] = shm_utils::MonotonicNs() +
+                                           std::uint64_t(spec->restart_delay_ms) * 1000000;
+                    continue;
+                }
                 completed = true;
-
                 if (info.exit_code || info.term_signal)
                     result = info.exit_code ? info.exit_code : 128 + info.term_signal;
             }
 
             const auto now = shm_utils::MonotonicNs();
+            if (!completed && !stop_requested) {
+                for (const auto& spec : specs) {
+                    if (spec.critical || !restart_at.count(spec.name) ||
+                        now < restart_at[spec.name])
+                        continue;
+                    const auto app = daemon.Get(spec.name),
+                               viewer = daemon.Get(spec.name + ".terminal");
+                    if ((app && app->running) || (viewer && viewer->running))
+                        continue;
+                    restart_at.erase(spec.name);
+                    if (restart_count[spec.name] >= spec.restart_limit) {
+                        daemon.WriteTerminalLog(
+                            "[daemon] optional restart limit reached: " + spec.name + "\n");
+                        continue;
+                    }
+                    ++restart_count[spec.name];
+                    daemon.WriteTerminalLog(
+                        "[daemon] restarting optional process: " + spec.name + "\n");
+                    try {
+                        launch(spec);
+                    } catch (const std::exception& e) {
+                        daemon.WriteTerminalLog("[daemon] optional restart ERROR: " + spec.name +
+                                                ": " + e.what() + "\n");
+                        daemon.Signal(spec.name, SIGTERM);
+                        restart_at[spec.name] =
+                            now + std::uint64_t(spec.restart_delay_ms) * 1000000;
+                    }
+                }
+            }
 
             if (now >= next_sample) {
                 statistics.Sample(*shared_memory->get());
@@ -455,10 +545,11 @@ int main(int argc, char** argv) {
                                         " exited code=" + std::to_string(info->exit_code) +
                                         " signal=" + std::to_string(info->term_signal) + "\n");
 
-            if (info && result == 0 && info->exit_code != 0)
+            if (spec.critical && info && result == 0 && info->exit_code != 0)
                 result = info->exit_code;
 
-            if (info && result == 0 && info->term_signal != 0 && info->term_signal != SIGTERM)
+            if (spec.critical && info && result == 0 && info->term_signal != 0 &&
+                info->term_signal != SIGTERM)
                 result = 128 + info->term_signal;
         }
 

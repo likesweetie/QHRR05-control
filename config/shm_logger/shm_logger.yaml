@@ -1,0 +1,31 @@
+# Paths are relative to this file. SHM name comes only from daemon arguments.
+logging:
+  enabled: true
+  auto_start: true
+  runtime_mode: simulation  # hardware omits all simulation Ground Truth fields.
+  session_label: experiment
+  sampling_rate_hz: 500.0
+  health_rate_hz: 10.0
+  display_interval_sec: 2.0
+  attach_timeout_sec: 10.0
+  pool_slots: 1024  # Bounded DataTamer slots per channel, allocated before collection.
+  output_dir: ../../logs/telemetry
+  continuous:
+    enabled: true
+    rotation_seconds: 600.0
+    segment_mib: 512.0
+    compression: false  # Binary DataTamer MCAP, no zstd compression.
+  flight_recorder:
+    enabled: true
+    pre_trigger_seconds: 5.0
+    post_trigger_seconds: 2.0
+    capacity_mib: 64.0  # Data capacity; MCAPRingSink allocates roughly twice this.
+  health:
+    stale_seconds: 0.1
+    can_timeout_seconds: 0.1
+  storage:
+    maximum_gib: 10.0
+    minimum_free_gib: 5.0
+    protect_fault_records: true
+# Standalone service: optionally list the actual files under sources/files.
+# Daemon mode discovers actual paths from --daemon-config instead.

@@ -28,7 +28,7 @@ int Run(const char* logger, const std::string& name, const std::string& csv) {
     Require(child >= 0, "fork failed");
 
     if (child == 0) {
-        ::execl(logger, logger, name.c_str(), csv.c_str(), static_cast<char*>(nullptr));
+        ::execl(logger, logger, "--csv", name.c_str(), csv.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
 

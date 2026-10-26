@@ -1,0 +1,46 @@
+name: sanitizers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan, rtsan]
+    steps:
+    - uses: actions/checkout@v4
+
+    # RealtimeSanitizer and -Wfunction-effects need Clang 20 or later; Ubuntu 24.04 has 18.
+    - name: Add the LLVM 21 repository
+      if: matrix.preset == 'rtsan'
+      run: |
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key |
+          sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" |
+          sudo tee /etc/apt/sources.list.d/llvm-21.list
+
+    - name: Install dependencies
+      run: >
+        sudo apt-get update && sudo apt-get install -y libgtest-dev libzstd-dev liblz4-dev
+        ${{ matrix.preset == 'rtsan' && 'clang-21 libclang-rt-21-dev' || '' }}
+
+    - name: Configure
+      working-directory: data_tamer_cpp
+      run: cmake --preset ${{ matrix.preset }}
+
+    - name: Build
+      working-directory: data_tamer_cpp
+      run: cmake --build --preset ${{ matrix.preset }}
+
+    - name: Test
+      working-directory: data_tamer_cpp
+      run: ctest --preset ${{ matrix.preset }}
