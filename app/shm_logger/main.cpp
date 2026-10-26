@@ -41,15 +41,17 @@ int LogCan(const char* name, const char* csv_path) {
         {
             shm_utils::Lock lock(shm);
 
-            while (shm.motors[shm.motor_sequence % 2].feedback_sequence == last_sequence &&
+            while (shm.motors[shm.motor_sequence % kShmBufferCount].feedback_sequence ==
+                       last_sequence &&
                    !shm.stopping)
                 lock.Wait();
 
-            if (shm.motors[shm.motor_sequence % 2].feedback_sequence == last_sequence &&
+            if (shm.motors[shm.motor_sequence % kShmBufferCount].feedback_sequence ==
+                    last_sequence &&
                 shm.stopping)
                 break;
 
-            state = shm.motors[shm.motor_sequence % 2];
+            state = shm.motors[shm.motor_sequence % kShmBufferCount];
             done = shm.stopping;
         }
 
@@ -96,7 +98,7 @@ int LogCan(const char* name, const char* csv_path) {
                 ",%llu,%llu,%d,%.12g,%.12g,%.12g,%.12g\n",
                 static_cast<unsigned long long>(missed),
                 static_cast<unsigned long long>(state.command_sequence),
-                target.enabled,
+                state.command_enabled[i],
                 target.position,
                 target.velocity,
                 target.kp,
@@ -181,7 +183,8 @@ int main(int argc, char** argv) {
                 shm_utils::Lock lock(shm);
 
                 while (shm.simulation_sequence == last_sequence &&
-                       shm.control[shm.control_sequence % 2].command_sequence == observed_command &&
+                       shm.control[shm.control_sequence % kShmBufferCount].command_sequence ==
+                           observed_command &&
                        !shm.stopping && !shm.simulation_finished)
                     lock.Wait();
 
@@ -192,10 +195,10 @@ int main(int argc, char** argv) {
                     (shm.stopping || shm.simulation_finished))
                     break;
 
-                sample = shm.simulation[shm.simulation_sequence % 2];
+                sample = shm.simulation[shm.simulation_sequence % kShmBufferCount];
                 sample_sequence = shm.simulation_sequence;
-                motors = shm.motors[shm.motor_sequence % 2];
-                command = shm.control[shm.control_sequence % 2];
+                motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+                command = shm.control[shm.control_sequence % kShmBufferCount];
                 has_sample = shm.simulation_sequence != last_sequence;
             }
 

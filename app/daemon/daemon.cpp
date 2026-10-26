@@ -4,17 +4,120 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <fcntl.h>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <poll.h>
+#include <sstream>
+#include <sys/ioctl.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 Daemon::~Daemon() {
+    ResetStatistics();
     TerminateAll(SIGTERM);
 }
 
-int Daemon::RelayTerminalOutput(const char* descriptor_text) {
+namespace {
+void WriteOutput(const std::string& text) {
+    std::size_t offset = 0;
+
+    while (offset < text.size()) {
+        const auto size = ::write(STDOUT_FILENO, text.data() + offset, text.size() - offset);
+
+        if (size < 0 && errno == EINTR)
+            continue;
+
+        if (size <= 0)
+            throw std::runtime_error("terminal output failed");
+
+        offset += size;
+    }
+}
+}
+
+void Daemon::DisplayStatistics(const std::string& text) {
+    if (!::isatty(STDOUT_FILENO)) {
+        WriteOutput(text);
+        return;
+    }
+
+    winsize size{};
+
+    if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) != 0)
+        throw std::runtime_error("cannot read statistics terminal size");
+
+    if (size.ws_row < 6 || size.ws_col < 20) {
+        if (statistics_rows_ != -1) {
+            ResetStatistics();
+            WriteOutput("[statistics] Waiting for terminal size >=20x6; logs remain active.\n");
+            statistics_rows_ = -1;
+        }
+
+        return;
+    }
+
+    std::vector<std::string> lines;
+    std::istringstream input(text);
+    std::string line;
+
+    while (std::getline(input, line))
+        lines.push_back(line);
+
+    const int rows = std::min<int>(lines.size() + 1, size.ws_row - 4);
+    std::ostringstream output;
+
+    if (statistics_rows_ != rows || terminal_rows_ != size.ws_row ||
+        terminal_columns_ != size.ws_col) {
+        // Reserve once (or on resize), before application logs start. Updates never scroll logs.
+        output << "\033[r\033[" << rows + 1 << ';' << size.ws_row << "r\033[" << rows + 1 << ";1H";
+        statistics_rows_ = rows;
+        terminal_rows_ = size.ws_row;
+        terminal_columns_ = size.ws_col;
+    }
+
+    output << "\0337";
+    bool clipped = int(lines.size()) >= rows;
+
+    for (int i = 0; i < rows; ++i) {
+        output << "\033[" << i + 1 << ";1H\033[2K";
+
+        if (i < rows - 1 && i < int(lines.size())) {
+            clipped |= lines[i].size() >= size.ws_col;
+            output << lines[i].substr(0, size.ws_col - 1);
+        } else if (i == rows - 1) {
+            const std::string separator =
+                clipped ? "--- LOGS (statistics clipped: enlarge terminal) ---"
+                        : "--- LOGS (statistics update in place) ---";
+            output << separator.substr(0, size.ws_col - 1);
+        }
+
+        output << "\033[0m";
+    }
+
+    output << "\0338";
+    WriteOutput(output.str());
+}
+
+void Daemon::ResetStatistics() {
+    if (statistics_rows_) {
+        // Destructors must not throw if the terminal has already closed.
+        const char reset[] = "\033[r";
+        (void)::write(STDOUT_FILENO, reset, sizeof(reset) - 1);
+        statistics_rows_ = 0;
+    }
+}
+
+int Daemon::RelayTerminalOutput(const char* descriptor_text,
+    const char* pid_text,
+    const char* process_name,
+    const char* interval_text,
+    const char* log_path) {
     try {
         char* end = nullptr;
         const long descriptor = std::strtol(descriptor_text, &end, 10);
@@ -22,14 +125,143 @@ int Daemon::RelayTerminalOutput(const char* descriptor_text) {
         if (!*descriptor_text || *end || descriptor < 3 || descriptor > 0x7fffffff)
             throw std::runtime_error("invalid terminal descriptor");
 
+        const long pid = std::strtol(pid_text, &end, 10);
+
+        if (!*pid_text || *end || pid <= 0 || pid > 0x7fffffff)
+            throw std::runtime_error("invalid terminal process PID");
+
+        const double interval_sec = std::strtod(interval_text, &end);
+
+        if (!*interval_text || *end || !std::isfinite(interval_sec) || interval_sec <= 1 ||
+            interval_sec > 60)
+            throw std::runtime_error("terminal statistics interval must be in (1, 60] seconds");
+
+        const long ticks_per_second = ::sysconf(_SC_CLK_TCK);
+        const long page_size = ::sysconf(_SC_PAGESIZE);
+
+        if (ticks_per_second <= 0 || page_size <= 0)
+            throw std::runtime_error("cannot read process statistics units");
+
+        Daemon display;
+        std::ofstream log(log_path, std::ios::app);
+
+        if (!log)
+            throw std::runtime_error("cannot open process log: " + std::string(log_path));
+
+        const auto write_log = [&](const std::string& text) {
+            if (text.empty())
+                return;
+
+            log << text << std::flush;
+
+            if (!log)
+                throw std::runtime_error("process log write failed: " + std::string(log_path));
+
+            WriteOutput(text);
+        };
+        const auto period = std::chrono::duration<double>(interval_sec);
+        auto next_display = std::chrono::steady_clock::now();
+        auto previous_time = next_display;
+        std::uint64_t previous_cpu_ticks = 0;
+        bool have_cpu_sample = false;
+        std::string pending, application_statistics;
+        const std::string marker = kStatisticsBegin;
+        bool in_statistics = false;
         char buffer[4096];
 
         while (true) {
+            const auto now = std::chrono::steady_clock::now();
+
+            if (now >= next_display) {
+                std::ifstream status("/proc/" + std::to_string(pid) + "/stat");
+                std::string record;
+                std::getline(status, record);
+                const auto closing = record.rfind(')');
+                std::ostringstream text;
+                text << process_name << " | PID " << pid << " | refresh " << interval_sec << " s\n";
+
+                if (closing == std::string::npos) {
+                    if (::kill(pid, 0) == 0 || errno != ESRCH)
+                        throw std::runtime_error(
+                            "cannot read process statistics: " + std::to_string(pid));
+
+                    text << "Process exited; draining remaining output.\n";
+                } else {
+                    std::istringstream fields(record.substr(closing + 2));
+                    std::vector<std::string> values;
+                    std::string value;
+
+                    while (fields >> value)
+                        values.push_back(value);
+
+                    if (values.size() < 22)
+                        throw std::runtime_error("invalid /proc process statistics");
+
+                    const auto cpu_ticks = std::stoull(values[11]) + std::stoull(values[12]);
+                    const double elapsed =
+                        std::chrono::duration<double>(now - previous_time).count();
+                    timespec boot_time{};
+
+                    if (::clock_gettime(CLOCK_BOOTTIME, &boot_time) != 0)
+                        throw std::runtime_error("cannot read process uptime clock");
+
+                    const double uptime = boot_time.tv_sec + boot_time.tv_nsec / 1e9 -
+                                          std::stoull(values[19]) / double(ticks_per_second);
+                    text << "state=" << values[0] << " CPU=";
+
+                    if (have_cpu_sample && elapsed > 0 && cpu_ticks >= previous_cpu_ticks)
+                        text << std::fixed << std::setprecision(1)
+                             << 100.0 * (cpu_ticks - previous_cpu_ticks) /
+                                    (ticks_per_second * elapsed)
+                             << '%';
+                    else
+                        text << "N/A (first sample)";
+
+                    text << " RSS=" << std::fixed << std::setprecision(1)
+                         << std::stoll(values[21]) * double(page_size) / (1024 * 1024)
+                         << " MiB threads=" << values[17] << " uptime=" << uptime << " s\n";
+                    previous_cpu_ticks = cpu_ticks;
+                    previous_time = now;
+                    have_cpu_sample = true;
+                }
+
+                text << "Log: " << log_path << '\n' << application_statistics;
+                // Keep the panel height stable before the first HAL statistics frame arrives.
+                std::string report = text.str();
+
+                while (std::count(report.begin(), report.end(), '\n') < 12)
+                    report += '\n';
+
+                display.DisplayStatistics(report);
+                next_display =
+                    now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);
+            }
+
+            const auto remaining = next_display - std::chrono::steady_clock::now();
+            const int timeout_ms = std::max(
+                0, int(std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count()));
+            pollfd source{int(descriptor), POLLIN, 0};
+            const int ready = ::poll(&source, 1, timeout_ms);
+
+            if (ready < 0 && errno == EINTR)
+                continue;
+
+            if (ready < 0)
+                throw std::runtime_error("terminal relay poll failed");
+
+            if (ready == 0)
+                continue;
+
             const auto count = ::read(int(descriptor), buffer, sizeof(buffer));
 
             // Linux PTY masters report EIO when all slave descriptors close.
-            if (count == 0 || (count < 0 && errno == EIO))
+            if (count == 0 || (count < 0 && errno == EIO)) {
+                if (in_statistics)
+                    throw std::runtime_error("incomplete terminal statistics frame");
+
+                write_log(pending);
                 return 0;
+            }
 
             if (count < 0 && errno == EINTR)
                 continue;
@@ -38,21 +270,46 @@ int Daemon::RelayTerminalOutput(const char* descriptor_text) {
                 throw std::runtime_error(
                     "terminal read failed: " + std::string(std::strerror(errno)));
 
-            ssize_t written = 0;
+            pending.append(buffer, count);
 
-            while (written < count) {
-                const auto size = ::write(STDOUT_FILENO, buffer + written, count - written);
+            for (;;) {
+                if (in_statistics) {
+                    const auto end = pending.find(kStatisticsEnd);
 
-                if (size < 0 && errno == EINTR)
-                    continue;
+                    if (end == std::string::npos) {
+                        if (pending.size() > 16384)
+                            throw std::runtime_error("terminal statistics frame too large");
 
-                if (size <= 0)
-                    throw std::runtime_error("terminal output failed");
+                        break;
+                    }
 
-                written += size;
+                    application_statistics = pending.substr(0, end);
+                    pending.erase(0, end + 1);
+                    in_statistics = false;
+                } else {
+                    const auto start = pending.find(marker);
+
+                    if (start != std::string::npos) {
+                        write_log(pending.substr(0, start));
+                        pending.erase(0, start + marker.size());
+                        in_statistics = true;
+                    } else {
+                        std::size_t keep = std::min(pending.size(), marker.size() - 1);
+
+                        while (keep &&
+                               pending.compare(pending.size() - keep, keep, marker, 0, keep) != 0)
+                            --keep;
+
+                        write_log(pending.substr(0, pending.size() - keep));
+                        pending.erase(0, pending.size() - keep);
+                        break;
+                    }
+                }
             }
         }
     } catch (const std::exception& error) {
+        std::ofstream log(log_path, std::ios::app);
+        log << "[terminal relay] " << error.what() << '\n';
         std::cerr << "[daemon] " << error.what() << '\n';
         return 1;
     }

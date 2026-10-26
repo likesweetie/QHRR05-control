@@ -6,8 +6,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <csignal>
+#include <cstring>
 #include <iomanip>
 #include <filesystem>
 #include <iostream>
@@ -15,9 +15,9 @@
 #include <linux/can/error.h>
 #include <linux/can/raw.h>
 #include <memory>
-#include <mutex>
 #include <net/if.h>
 #include <net/if_arp.h>
+#include <poll.h>
 #include <sstream>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -41,11 +41,21 @@ std::uint64_t Period(double frequency, const char* name) {
 
 class CanHal {
 public:
-    explicit CanHal(const std::string& hal_config_path) {
+    CanHal(const std::string& hal_config_path, const std::string& shm_name) {
         const auto config = YAML::LoadFile(hal_config_path);
+
+        if (config["shm_name"])
+            throw std::runtime_error(
+                "HAL shm_name moved to daemon config; pass SHM_NAME as an argument");
+
         interface_ = config["interface"].as<std::string>();
         period_ns_ = Period(config["frequency_hz"].as<double>(), "frequency_hz");
         display_period_ns_ = Period(config["statistics_hz"].as<double>(), "statistics_hz");
+        bus_load_bitrate_ = config["bus_load_bitrate"].as<unsigned>();
+
+        if (!bus_load_bitrate_ || bus_load_bitrate_ > 1000000)
+            throw std::runtime_error("bus_load_bitrate must be in [1, 1000000] bit/s");
+
         const auto ids = config["motor_ids"].as<std::vector<unsigned>>();
 
         if (ids.size() != 3 || interface_.empty() || interface_.size() >= IFNAMSIZ)
@@ -63,22 +73,13 @@ public:
                                 config["motor_config"].as<std::string>();
         const auto motor = YAML::LoadFile(motor_path.string());
         const auto mit = motor["mit"];
-        profile_.velocity_max = mit["velocity_max_rad_s"].as<double>();
-        profile_.torque_max = mit["torque_max_nm"].as<double>();
-        profile_.kt_output = mit["kt_output_nm_a"].as<double>();
-        profile_.gear_ratio = mit["gear_ratio"].as<double>();
-        profile_.kd_scale = mit["kd_scale"].as<unsigned>();
-
-        for (double value : {profile_.velocity_max, profile_.torque_max})
-            if (!std::isfinite(value) || value < 1 || value > 255 || value != std::floor(value))
-                throw std::runtime_error("MIT V_MAX and T_MAX must be integers in [1, 255]");
-
-        for (double value : {profile_.kt_output, profile_.gear_ratio})
-            if (!std::isfinite(value) || value <= 0)
-                throw std::runtime_error("MIT Kt_out and gear ratio must be positive and finite");
-
-        openrobot::EncodePosition({}, profile_);
-        state_.profile = profile_;
+        velocity_max_ = mit["velocity_max_rad_s"].as<double>();
+        kd_scale_ = mit["kd_scale"].as<unsigned>();
+        expected_parameters_ = openrobot::EncodeProfile(velocity_max_,
+            mit["torque_max_nm"].as<double>(),
+            mit["kt_output_nm_a"].as<double>(),
+            mit["gear_ratio"].as<double>(),
+            kd_scale_);
         state_.sample_dt = period_ns_ / 1e9;
 
         const unsigned index = ::if_nametoindex(interface_.c_str());
@@ -125,11 +126,38 @@ public:
             if (::bind(socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0)
                 shm_utils::Check(errno, "SocketCAN bind");
 
-            // HAL owns its transport SHM, independently of the supervisor.
-            mapping_ =
-                std::make_unique<shm_utils::Mapping>(config["shm_name"].as<std::string>(), true);
-            mapping_->get()->can_enabled = true;
+            // A receive-only socket observes every Classic CAN ID, including our
+            // own traffic via local loopback exactly once, outside the control loop.
+            monitor_socket_ = ::socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
+
+            if (monitor_socket_ < 0)
+                shm_utils::Check(errno, "CAN bus monitor socket");
+
+            const int overflow_reports = 1;
+
+            if (::setsockopt(monitor_socket_,
+                    SOL_SOCKET,
+                    SO_RXQ_OVFL,
+                    &overflow_reports,
+                    sizeof(overflow_reports)) < 0 ||
+                ::setsockopt(
+                    monitor_socket_, SOL_CAN_RAW, CAN_RAW_ERR_FILTER, &errors, sizeof(errors)) < 0)
+                shm_utils::Check(errno, "CAN bus monitor options");
+
+            if (::bind(monitor_socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0)
+                shm_utils::Check(errno, "CAN bus monitor bind");
+
+            mapping_ = std::make_unique<shm_utils::Mapping>(shm_name);
+            shm_utils::Lock lock(*mapping_->get());
+
+            if (!mapping_->get()->can_enabled || mapping_->get()->stopping ||
+                mapping_->get()->failed)
+                throw std::runtime_error("CAN HAL requires an active CAN shared-memory session");
         } catch (...) {
+            if (monitor_socket_ >= 0)
+                ::close(monitor_socket_);
+
+            monitor_socket_ = -1;
             ::close(socket_);
             socket_ = -1;
             throw;
@@ -137,12 +165,16 @@ public:
     }
 
     ~CanHal() {
+        if (monitor_socket_ >= 0)
+            ::close(monitor_socket_);
+
         if (socket_ >= 0)
             ::close(socket_);
     }
 
     void Run() {
         state_.running = true;
+        const auto statistics_started_ns = shm_utils::MonotonicNs();
 
         for (int i = 0; i < 3; ++i) {
             Send(i, {0xC2});
@@ -153,8 +185,6 @@ public:
         Daemon::NotifyReady();
         std::atomic<bool> display_done{false}, display_failed{false};
         std::atomic<std::uint64_t> display_drops{0};
-        std::mutex display_mutex;
-        std::condition_variable display_changed;
         std::thread display([&] {
             const int output =
                 ::open("/proc/self/fd/1", O_WRONLY | O_NONBLOCK | O_APPEND | O_CLOEXEC);
@@ -165,24 +195,86 @@ public:
             }
 
             std::array<std::uint64_t, 3> previous_tx{}, previous_rx{};
-            auto previous_time = shm_utils::MonotonicNs();
+            auto previous_time = statistics_started_ns;
+            auto next_display = previous_time + display_period_ns_;
+            std::uint64_t bus_frames = 0, bus_bits = 0, error_reports = 0;
+            std::uint32_t monitor_drops = 0;
+            const bool managed_terminal = std::getenv("QHRR_TERMINAL_STATISTICS") != nullptr;
             const bool terminal = ::isatty(output);
 
             try {
                 while (!display_done) {
+                    const auto before_poll = shm_utils::MonotonicNs();
+                    const auto remaining =
+                        next_display > before_poll ? next_display - before_poll : 0;
+                    const int timeout_ms =
+                        int(std::min<std::uint64_t>(50, (remaining + 999999) / 1000000));
+                    pollfd descriptor{monitor_socket_, POLLIN, 0};
+                    const int ready = ::poll(&descriptor, 1, timeout_ms);
+
+                    if (ready < 0 && errno == EINTR)
+                        continue;
+
+                    if (ready < 0 || descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))
+                        throw std::runtime_error("CAN bus monitor poll failed");
+
+                    for (unsigned batch = 0; batch < 4096; ++batch) {
+                        can_frame frame{};
+                        iovec payload{&frame, sizeof(frame)};
+                        alignas(cmsghdr) char ancillary[CMSG_SPACE(sizeof(std::uint32_t))]{};
+                        msghdr message{};
+                        message.msg_iov = &payload;
+                        message.msg_iovlen = 1;
+                        message.msg_control = ancillary;
+                        message.msg_controllen = sizeof(ancillary);
+                        const auto count = ::recvmsg(monitor_socket_, &message, MSG_DONTWAIT);
+
+                        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                            break;
+
+                        if (count < 0 && errno == EINTR)
+                            continue;
+
+                        if (count != sizeof(frame) || message.msg_flags & (MSG_TRUNC | MSG_CTRUNC))
+                            throw std::runtime_error("CAN bus monitor received an invalid record");
+
+                        for (auto* info = CMSG_FIRSTHDR(&message); info;
+                             info = CMSG_NXTHDR(&message, info)) {
+                            if (info->cmsg_level == SOL_SOCKET && info->cmsg_type == SO_RXQ_OVFL &&
+                                info->cmsg_len >= CMSG_LEN(sizeof(monitor_drops)))
+                                std::memcpy(&monitor_drops, CMSG_DATA(info), sizeof(monitor_drops));
+                        }
+
+                        if (frame.can_id & CAN_ERR_FLAG) {
+                            ++error_reports;
+                            continue;
+                        }
+
+                        // Classic CAN worst-case stuffing, ACK/EOF/intermission
+                        // included. RTR has no data field even when DLC is nonzero.
+                        const auto data_bytes = frame.can_id & CAN_RTR_FLAG ? 0 : frame.can_dlc;
+                        bus_bits += (frame.can_id & CAN_EFF_FLAG ? 80 : 55) + 10 * data_bytes;
+                        ++bus_frames;
+                    }
+
+                    const auto now = shm_utils::MonotonicNs();
+
+                    if (now < next_display)
+                        continue;
+
                     MotorData snapshot;
                     {
                         auto& shm = *mapping_->get();
                         shm_utils::Lock lock(shm);
-                        snapshot = shm.motors[shm.motor_sequence % 2];
+                        snapshot = shm.motors[shm.motor_sequence % kShmBufferCount];
                     }
 
-                    const auto now = shm_utils::MonotonicNs();
                     const double seconds = std::max(1e-9, (now - previous_time) / 1e9);
                     std::ostringstream text;
                     text
-                        << (terminal ? "\033[H\033[2J" : "") << "CAN HAL | " << interface_
-                        << " | MIT position / tau_ff=0 | cycle " << snapshot.cycles << '\n'
+                        << (managed_terminal ? Daemon::kStatisticsBegin : "") << "CAN HAL | "
+                        << interface_ << " | MIT position / tau_ff=0 | cycle " << snapshot.cycles
+                        << '\n'
                         << "SID   profile mode       TX       RX   TX/s   RX/s   q[rad]  dq[rad/s]  Iq[A] temp invalid\n";
 
                     for (int i = 0; i < 3; ++i) {
@@ -205,9 +297,31 @@ public:
                         previous_rx[i] = snapshot.rx_frames[i];
                     }
 
+                    const double load = 100.0 * bus_bits / (bus_load_bitrate_ * seconds);
+                    constexpr int bar_width = 30;
+                    const int filled =
+                        int(std::lround(std::clamp(load, 0.0, 100.0) * bar_width / 100));
+                    const char* color =
+                        load >= 80 ? "\033[31m" : (load >= 60 ? "\033[33m" : "\033[32m");
+                    text << '\n'
+                         << "BUS LOAD est. " << (terminal ? color : "") << '['
+                         << std::string(filled, '#') << std::string(bar_width - filled, '.') << "] "
+                         << std::fixed << std::setprecision(1) << load << '%'
+                         << (terminal ? "\033[0m" : "") << " | reference " << bus_load_bitrate_
+                         << " bit/s" << (load > 100 ? " | OVER CAPACITY" : "")
+                         << (monitor_drops ? " | INCOMPLETE" : "") << '\n'
+                         << "Classic CAN / max stuffing | window " << std::setprecision(2)
+                         << seconds * 1000 << " ms | frames " << bus_frames << " | bits "
+                         << bus_bits << " | monitor drops=" << monitor_drops
+                         << " | error reports=" << error_reports
+                         << " (error/retry wire time excluded)\n";
+
                     text << "socket errors=" << snapshot.socket_errors
                          << " | display drops=" << display_drops
                          << " | delay evaluation: shm_logger only\n";
+
+                    if (managed_terminal)
+                        text << Daemon::kStatisticsEnd;
                     const auto bytes = text.str();
                     const auto count = ::write(output, bytes.data(), bytes.size());
 
@@ -216,15 +330,18 @@ public:
                         break;
                     }
 
+                    if (count > 0 && count != static_cast<ssize_t>(bytes.size()) &&
+                        managed_terminal) {
+                        display_failed = true;
+                        break;
+                    }
+
                     if (count != static_cast<ssize_t>(bytes.size()))
                         ++display_drops;
 
+                    bus_frames = bus_bits = 0;
                     previous_time = now;
-                    std::unique_lock<std::mutex> lock(display_mutex);
-                    display_changed.wait_for(
-                        lock, std::chrono::nanoseconds(display_period_ns_), [&] {
-                            return display_done.load();
-                        });
+                    next_display = now + display_period_ns_;
                 }
 
             } catch (const std::exception& error) {
@@ -251,7 +368,7 @@ public:
                     if (shm.stopping)
                         break;
 
-                    targets = shm.motors[shm.motor_sequence % 2];
+                    targets = shm.motors[shm.motor_sequence % kShmBufferCount];
                 }
 
                 if (display_failed)
@@ -262,32 +379,34 @@ public:
 
                 // Validate the complete publication before transmitting any axis.
                 for (int i = 0; i < 3; ++i)
-                    frames[i] = openrobot::EncodePosition(targets.command[i], profile_);
+                    frames[i] =
+                        openrobot::EncodeMitCommand(targets.command[i], velocity_max_, kd_scale_);
 
                 for (int i = 0; i < 3; ++i) {
-                    const auto& target = targets.command[i];
+                    const bool command_enabled = targets.command_enabled[i];
 
                     // Periodic discovery/enable requests, not a response-age check.
                     if (state_.cycles && state_.cycles % 100 == 0) {
                         if (!state_.profile_verified[i])
                             Send(i, {0xC4});
-                        else if (target.enabled && state_.enable_requested[i] && !state_.enabled[i])
+                        else if (command_enabled && state_.enable_requested[i] &&
+                                 !state_.enabled[i])
                             Send(i, {0xC1});
                     }
 
-                    if (target.enabled && !state_.enable_requested[i]) {
+                    if (command_enabled && !state_.enable_requested[i]) {
                         if (!state_.profile_verified[i])
                             throw std::runtime_error(
                                 "enable requested before MIT C4 profile verification");
 
                         Send(i, {0xC1});
                         state_.enable_requested[i] = true;
-                    } else if (!target.enabled && state_.enable_requested[i]) {
+                    } else if (!command_enabled && state_.enable_requested[i]) {
                         Send(i, {0xC2});
                         state_.enable_requested[i] = state_.enabled[i] = false;
                     }
 
-                    if (target.enabled && state_.enabled[i])
+                    if (command_enabled && state_.enabled[i])
                         Send(i, frames[i]);
                 }
 
@@ -320,7 +439,6 @@ public:
             failure = std::current_exception();
         }
         display_done = true;
-        display_changed.notify_all();
         display.join();
         shm_utils::Stop(*mapping_->get(), bool(failure));
 
@@ -396,15 +514,21 @@ private:
             std::copy_n(frame.data, 8, bytes.begin());
 
             if (bytes[0] == 0xC4) {
-                openrobot::CheckProfile(bytes, profile_);
+                openrobot::CheckProfile(bytes, expected_parameters_);
+                // Use the conversion read back from the motor, never a SHM default.
+                motor_kt_output_[i] = (unsigned(bytes[3]) | (unsigned(bytes[4]) << 8)) * 0.001;
                 state_.profile_verified[i] = true;
             } else if (bytes[0] == 0xC1 && state_.enable_requested[i]) {
-                if (bytes[1] != profile_.kd_scale)
+                if (bytes[1] != kd_scale_)
                     throw std::runtime_error("MIT C1 kd_scale mismatch");
 
                 state_.enabled[i] = true;
             } else if (bytes[0] == 0xC0) {
+                if (!state_.profile_verified[i])
+                    throw std::runtime_error("MIT feedback received before C4 verification");
+
                 state_.feedback[i] = openrobot::DecodeFeedback(bytes);
+                state_.motor_torque[i] = state_.feedback[i].current * motor_kt_output_[i];
                 state_.received_ns[i] = shm_utils::MonotonicNs();
                 ++state_.received_sequence[i];
             } else if (bytes[0] != 0xC2) {
@@ -418,7 +542,6 @@ private:
         auto& shm = *mapping_->get();
         shm_utils::Lock lock(shm);
         auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
-        next.profile = state_.profile;
         next.sample_dt = state_.sample_dt;
         next.running = state_.running;
         next.feedback_sequence = ++state_.feedback_sequence;
@@ -429,6 +552,7 @@ private:
         next.socket_errors = state_.socket_errors;
 
         next.feedback = state_.feedback;
+        next.motor_torque = state_.motor_torque;
         next.received_ns = state_.received_ns;
         next.received_sequence = state_.received_sequence;
         next.tx_frames = state_.tx_frames;
@@ -442,10 +566,14 @@ private:
         shm_utils::Notify(shm);
     }
 
-    int socket_ = -1;
+    int socket_ = -1, monitor_socket_ = -1;
+    unsigned bus_load_bitrate_ = 0;
     std::string interface_;
     std::array<canid_t, 3> ids_{};
-    openrobot::MitProfile profile_;
+    double velocity_max_ = 0;
+    unsigned kd_scale_ = 0;
+    openrobot::Payload expected_parameters_{};  // Expected C4 response, local to HAL.
+    std::array<double, 3> motor_kt_output_{};  // Read back once via verified C4.
     std::unique_ptr<shm_utils::Mapping> mapping_;
     MotorData state_{};
     std::uint64_t period_ns_ = 0, display_period_ns_ = 0;
@@ -471,14 +599,13 @@ int main(int argc, char** argv) {
             auto& shm = *mapping.get();
             shm_utils::Lock lock(shm);
 
-            if (shm.stopping || !shm.motors[shm.motor_sequence % 2].running)
+            if (shm.stopping || !shm.motors[shm.motor_sequence % kShmBufferCount].running)
                 throw std::runtime_error("CAN HAL is not running");
 
-            auto targets = shm.motors[shm.motor_sequence % 2];
+            auto targets = shm.motors[shm.motor_sequence % kShmBufferCount];
 
             if (release) {
-                for (auto& target : targets.command)
-                    target.enabled = false;
+                targets.command_enabled.fill(false);
             } else {
                 const auto number = [](const char* value) {
                     std::size_t length = 0;
@@ -494,30 +621,30 @@ int main(int argc, char** argv) {
                 if (index < 0 || index > 2 || index != std::floor(index))
                     throw std::runtime_error("axis must be 0, 1 or 2");
 
-                const auto& state = shm.motors[shm.motor_sequence % 2];
+                const auto& state = shm.motors[shm.motor_sequence % kShmBufferCount];
 
                 if (!state.profile_verified[int(index)])
                     throw std::runtime_error("motor MIT profile has not been verified");
 
-                openrobot::PositionTarget target{
-                    true, number(argv[4]), number(argv[5]), number(argv[6]), number(argv[7])};
-                openrobot::EncodePosition(target, state.profile);
+                MitCommand target{
+                    number(argv[4]), number(argv[5]), number(argv[6]), number(argv[7]), 0};
                 targets.command[int(index)] = target;
+                targets.command_enabled[int(index)] = true;
             }
 
             ++targets.command_sequence;
             targets.command_published_ns = shm_utils::MonotonicNs();
-            shm.motors[(shm.motor_sequence + 1) % 2] = targets;
+            shm.motors[(shm.motor_sequence + 1) % kShmBufferCount] = targets;
             ++shm.motor_sequence;
             shm_utils::Notify(shm);
 
             return 0;
         }
 
-        if (argc != 2)
-            throw std::runtime_error("usage: can_hal HAL_CONFIG.yaml");
+        if (argc != 3)
+            throw std::runtime_error("usage: can_hal HAL_CONFIG.yaml SHM_NAME");
 
-        CanHal hal(argv[1]);
+        CanHal hal(argv[1], argv[2]);
         hal.Run();
 
         return 0;

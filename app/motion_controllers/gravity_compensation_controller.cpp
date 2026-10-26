@@ -15,6 +15,7 @@ GravityCompensationController::GravityCompensationController(const std::string& 
 
     const auto settings = config["gravity_compensation"];
     alpha_ = settings["alpha"].as<double>();
+    gravity_only_ = settings["gravity_only"].as<bool>();
 
     const auto read = [](const YAML::Node& value, std::array<double, 3>& result) {
         if (value.IsScalar())
@@ -53,15 +54,18 @@ void GravityCompensationController::Start(const double position[3]) {
 void GravityCompensationController::Compute(const double position[3],
     const double velocity[3],
     const double gravity[3],
+    const double bias[3],
     double torque[3],
     double reference[3]) const {
+    const double* compensation = gravity_only_ ? gravity : bias;
+
     for (int i = 0; i < 3; ++i) {
         if (!std::isfinite(position[i]) || !std::isfinite(velocity[i]) ||
-            !std::isfinite(gravity[i]))
+            !std::isfinite(compensation[i]))
             throw std::runtime_error("invalid joint input");
 
         const double tau_task = task_stiffness_[i] * (desired_[i] - position[i]);
-        const double q_surrogate = (alpha_ * gravity[i] + tau_task) / kp_motor_[i];
+        const double q_surrogate = (alpha_ * compensation[i] + tau_task) / kp_motor_[i];
         const double q_command = position[i] + q_surrogate;
 
         // The XML uses torque motors. Explicitly simulate the inner position servo;

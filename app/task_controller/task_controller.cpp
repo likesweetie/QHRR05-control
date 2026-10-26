@@ -14,7 +14,7 @@ TaskController::TaskController(
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
-        const auto& motors = shm.motors[shm.motor_sequence % 2];
+        const auto& motors = shm.motors[shm.motor_sequence % kShmBufferCount];
 
         if (shm.can_enabled == without_can_ ||
             (!without_can_ && (shm.failed || shm.stopping || !motors.running)))
@@ -37,7 +37,7 @@ TaskController::TaskController(
 }
 
 bool TaskController::ReadInput() {
-    MotionFeedback state;
+    std::array<std::uint64_t, 3> received_sequence, received_ns;
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
@@ -48,11 +48,35 @@ bool TaskController::ReadInput() {
         if (shm.stopping)
             return false;
 
-        static_cast<ModelData&>(state) = shm.model[shm.model_sequence % 2];
+        const auto& model = shm.model[shm.model_sequence % kShmBufferCount];
+        gravity_torque_ = model.gravity_torque;
+        bias_torque_ = model.bias_torque;
+        passive_torque_ = model.passive_torque;
+        friction_limit_ = model.friction_limit;
+        mass_matrix_ = model.mass;
+        jacobian_ = model.jacobian;
+        toe_position_ = model.toe_position;
+        joint_min_ = model.joint_min;
+        joint_max_ = model.joint_max;
         model_sequence_ = shm.model_sequence;
-        model_published_ns_ = state.published_ns;
-        motor_data_ = shm.motors[shm.motor_sequence % 2];
-        const auto& control = shm.control[shm.control_sequence % 2];
+        model_published_ns_ = model.published_ns;
+
+        const auto& motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+        motor_commands_enabled_ = !without_can_;
+
+        for (int i = 0; i < 3; ++i) {
+            encoder_origin_[i] = motors.position_offset[i];
+            joint_position_[i] = motors.position_offset[i] + motors.feedback[i].position;
+            joint_velocity_[i] = motors.feedback[i].velocity;
+            motor_torque_[i] = motors.motor_torque[i];
+            motor_commands_enabled_ &= motors.profile_verified[i];
+        }
+
+        received_sequence = motors.received_sequence;
+        received_ns = motors.received_ns;
+        measurement_dt_ = motors.sample_dt;
+
+        const auto& control = shm.control[shm.control_sequence % kShmBufferCount];
         requested_mode_ = control.requested_mode;
         request_sequence_ = control.motion_sequence;
         target_force_ = control.target_force;
@@ -65,53 +89,38 @@ bool TaskController::ReadInput() {
     std::uint64_t newest_ns = measurement_ns_;
 
     for (int i = 0; i < 3; ++i) {
-        encoder_origin_[i] = motor_data_.position_offset[i];
-        state.position[i] = motor_data_.position_offset[i] + motor_data_.feedback[i].position;
-        state.velocity[i] = motor_data_.feedback[i].velocity;
-        state.motor_torque[i] = motor_data_.feedback[i].current * motor_data_.profile.kt_output;
+        if (received_sequence[i] != previous_received_sequence_[i]) {
+            const auto samples = received_sequence[i] - previous_received_sequence_[i];
+            const double dt = without_can_ ? samples * measurement_dt_
+                                           : (received_ns[i] - previous_received_ns_[i]) / 1e9;
 
-        if (motor_data_.received_sequence[i] != received_sequence_[i]) {
-            const auto samples = motor_data_.received_sequence[i] - received_sequence_[i];
-            const double dt = without_can_ ? samples * motor_data_.sample_dt
-                                           : (motor_data_.received_ns[i] - received_ns_[i]) / 1e9;
+            if (previous_received_sequence_[i] && dt > 0)
+                joint_acceleration_[i] = (joint_velocity_[i] - previous_velocity_[i]) / dt;
 
-            if (received_sequence_[i] && dt > 0)
-                measured_acceleration_[i] =
-                    (motor_data_.feedback[i].velocity - measured_velocity_[i]) / dt;
-
-            received_sequence_[i] = motor_data_.received_sequence[i];
-            received_ns_[i] = motor_data_.received_ns[i];
-            measured_velocity_[i] = motor_data_.feedback[i].velocity;
-            newest_ns = std::max(newest_ns, motor_data_.received_ns[i]);
+            previous_received_sequence_[i] = received_sequence[i];
+            previous_received_ns_[i] = received_ns[i];
+            previous_velocity_[i] = joint_velocity_[i];
+            newest_ns = std::max(newest_ns, received_ns[i]);
             fresh = true;
         }
 
-        if (!std::isfinite(state.position[i]) || !std::isfinite(state.velocity[i]) ||
-            !std::isfinite(state.gravity_torque[i]))
+        if (!std::isfinite(joint_position_[i]) || !std::isfinite(joint_velocity_[i]) ||
+            !std::isfinite(gravity_torque_[i]))
             throw std::runtime_error("non-finite joint input");
     }
 
-    state.measurement_dt = motor_data_.sample_dt;
-
     if (fresh) {
         if (!without_can_ && measurement_ns_ && newest_ns > measurement_ns_)
-            state.measurement_dt = (newest_ns - measurement_ns_) / 1e9;
+            measurement_dt_ = (newest_ns - measurement_ns_) / 1e9;
 
         measurement_ns_ = newest_ns;
 
         if (without_can_)
-            measurement_sequence_ =
-                *std::max_element(received_sequence_.begin(), received_sequence_.end());
+            measurement_sequence_ = *std::max_element(
+                previous_received_sequence_.begin(), previous_received_sequence_.end());
         else
             ++measurement_sequence_;
     }
-
-    state.acceleration = measured_acceleration_;
-    state.measurement_sequence = measurement_sequence_;
-    feedback_ = state;
-    joint_position_ = state.position;
-    joint_velocity_ = state.velocity;
-    gravity_torque_ = state.gravity_torque;
 
     return true;
 }
@@ -125,7 +134,7 @@ void TaskController::Control() {
         else if (requested_mode_ == 1)
             gravity_->Start(joint_position_.data());
         else
-            magnetic_->Start(control_time_, feedback_);
+            magnetic_->Start(control_time_, toe_position_);
         mode_ = requested_mode_;
         active_request_sequence_ = request_sequence_;
     }
@@ -143,11 +152,29 @@ void TaskController::Control() {
         gravity_->Compute(joint_position_.data(),
             joint_velocity_.data(),
             gravity_torque_.data(),
+            bias_torque_.data(),
             torque_command_.data(),
             position_reference_.data());
     } else {
-        magnetic_->Compute(
-            control_time_, feedback_, target_force_, torque_command_, position_reference_);
+        magnetic_->Compute(control_time_,
+            joint_position_,
+            joint_velocity_,
+            joint_acceleration_,
+            motor_torque_,
+            gravity_torque_,
+            bias_torque_,
+            passive_torque_,
+            friction_limit_,
+            mass_matrix_,
+            jacobian_,
+            toe_position_,
+            joint_min_,
+            joint_max_,
+            measurement_sequence_,
+            measurement_dt_,
+            target_force_,
+            torque_command_,
+            position_reference_);
     }
 
     if (!without_can_) {
@@ -156,11 +183,6 @@ void TaskController::Control() {
         const auto& kd = mode_ == 0 ? homing_->kd()
                                     : (mode_ == 1 ? gravity_->kd_motor() : magnetic_->kd_motor());
         const auto home = homing_->Reference(control_time_);
-        bool profiles_ready = true;
-
-        for (bool verified : motor_data_.profile_verified)
-            profiles_ready &= verified;
-
         for (int i = 0; i < 3; ++i) {
             // Remove the motor D term already included in torque_command_, then
             // represent the resulting effort as an actual MIT position target.
@@ -168,12 +190,8 @@ void TaskController::Control() {
                 mode_ == 0 ? home.position[i]
                            : joint_position_[i] +
                                  (torque_command_[i] + kd[i] * joint_velocity_[i]) / kp[i];
-            motor_targets_[i] = {profiles_ready,
-                position - encoder_origin_[i],
-                mode_ == 0 ? home.velocity[i] : 0,
-                kp[i],
-                kd[i]};
-            openrobot::EncodePosition(motor_targets_[i], motor_data_.profile);
+            motor_targets_[i] = {
+                position - encoder_origin_[i], mode_ == 0 ? home.velocity[i] : 0, kp[i], kd[i], 0};
         }
     }
 }
@@ -194,6 +212,7 @@ void TaskController::WriteOutput() {
 
     for (int i = 0; i < 3; ++i) {
         motors.command[i] = motor_targets_[i];
+        motors.command_enabled[i] = motor_commands_enabled_;
         motors.debug_torque[i] = torque_command_[i];
         motors.reference[i] = position_reference_[i];
     }
@@ -226,8 +245,7 @@ void TaskController::Release() {
 
     auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
 
-    for (auto& target : motors.command)
-        target.enabled = false;
+    motors.command_enabled.fill(false);
 
     ++motors.command_sequence;
     motors.command_published_ns = shm_utils::MonotonicNs();

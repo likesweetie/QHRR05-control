@@ -25,7 +25,9 @@ add_library(motion_controllers STATIC
 target_include_directories(motion_controllers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/app ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(motion_controllers PUBLIC yaml-cpp)
 
-add_library(mujoco_simulation STATIC app/mujoco_simulate/simulation.cpp)
+add_library(mujoco_simulation STATIC
+    app/mujoco_simulate/simulation.cpp
+    app/mujoco_simulate/virtual_iq_sensor.cpp)
 target_include_directories(mujoco_simulation PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/app ${CMAKE_CURRENT_SOURCE_DIR}/include ${MUJOCO_DIR}/include)
 target_link_directories(mujoco_simulation PUBLIC ${MUJOCO_DIR}/lib)
@@ -34,6 +36,7 @@ target_link_libraries(mujoco_simulation PUBLIC openrobot_can yaml-cpp mujoco pth
 add_executable(daemon
     app/daemon/main.cpp
     app/daemon/daemon.cpp
+    app/daemon/statistics.cpp
 )
 target_include_directories(daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -46,7 +49,7 @@ target_compile_definitions(daemon PRIVATE
     QHRR05_DEFAULT_DAEMON_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/app_config/daemon_config.yaml")
 
 add_executable(task_controller app/task_controller/main.cpp app/task_controller/task_controller.cpp)
-target_link_libraries(task_controller PRIVATE motion_controllers openrobot_can pthread)
+target_link_libraries(task_controller PRIVATE motion_controllers pthread)
 
 set(SIMULATE_COPY ${CMAKE_CURRENT_SOURCE_DIR}/app/mujoco_simulate/simulate)
 add_executable(mujoco_simulate
@@ -82,6 +85,30 @@ target_link_libraries(shm_logger PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(daemon_statistics_test tests/daemon_statistics_test.cpp app/daemon/statistics.cpp)
+    target_include_directories(daemon_statistics_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/app ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(daemon_statistics_test PRIVATE pthread)
+    add_test(NAME daemon_statistics COMMAND daemon_statistics_test)
+    add_test(NAME terminal_statistics COMMAND python3
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/terminal_statistics_test.py $<TARGET_FILE:daemon>)
+    add_executable(virtual_iq_sensor_test tests/virtual_iq_sensor_test.cpp)
+    target_link_libraries(virtual_iq_sensor_test PRIVATE mujoco_simulation)
+    set_target_properties(virtual_iq_sensor_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME virtual_iq_sensor COMMAND virtual_iq_sensor_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation_config.yaml)
+    add_executable(virtual_iq_can_test tests/virtual_iq_can_test.cpp)
+    target_link_libraries(virtual_iq_can_test PRIVATE mujoco_simulation)
+    set_target_properties(virtual_iq_can_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME virtual_iq_can COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+        $<TARGET_FILE:virtual_iq_can_test>
+        ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/hal_config/can_hal.yaml
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation_config.yaml $<TARGET_FILE:can_hal>)
+    add_test(NAME can_bus_load COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+        python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/can_bus_load_test.py $<TARGET_FILE:can_hal>)
     add_test(NAME launcher_modes COMMAND unshare --user --map-root-user --net --
         python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_modes_test.py
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_daemon.sh)
@@ -94,7 +121,8 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/control_config.yaml
         ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
         ${CMAKE_CURRENT_SOURCE_DIR}/config/hal_config/can_hal.yaml
-        $<TARGET_FILE:can_hal> $<TARGET_FILE:task_controller>)
+        $<TARGET_FILE:can_hal> $<TARGET_FILE:task_controller>
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation_config.yaml)
     add_executable(can_hal_test tests/can_hal_test.cpp)
     target_link_libraries(can_hal_test PRIVATE openrobot_can pthread)
     add_test(NAME can_hal_vcan COMMAND bash

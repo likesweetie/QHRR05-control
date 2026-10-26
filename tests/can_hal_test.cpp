@@ -9,6 +9,7 @@
 #include <iostream>
 #include <linux/can.h>
 #include <limits>
+#include <memory>
 #include <net/if.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -23,6 +24,7 @@ int main(int argc, char** argv) {
     pid_t child = -1;
     pid_t logger = -1;
     int peer = -1;
+    std::unique_ptr<shm_utils::Mapping> owner;
     const std::string suffix = std::to_string(::getpid());
     const std::string name = "/qhrr05-can-test-" + suffix;
     const std::string config = "/tmp/qhrr05-can-test-" + suffix + ".yaml";
@@ -31,22 +33,51 @@ int main(int argc, char** argv) {
 
     try {
         Require(argc == 3, "expected can_hal and shm_logger executables");
-        const auto zero = openrobot::EncodePosition({}, {});
+        const auto zero = openrobot::EncodeMitCommand({}, 45, 1);
         Require(zero == openrobot::Payload{0xC0, 0x80, 0, 0x80, 0, 0, 0, 0x80},
             "MIT zero vector mismatch");
-        const auto limits = openrobot::EncodePosition({true, 12.5, -45, 500, 5}, {});
+        const auto limits = openrobot::EncodeMitCommand({12.5, -45, 500, 5, 0}, 45, 1);
         Require(limits == openrobot::Payload{0xC0, 255, 255, 0, 15, 255, 255, 128},
             "MIT boundary vector mismatch");
 
         for (double invalid : {13.0, std::numeric_limits<double>::quiet_NaN()}) {
             bool rejected = false;
             try {
-                openrobot::EncodePosition({true, invalid, 0, 1, 1}, {});
+                openrobot::EncodeMitCommand({invalid, 0, 1, 1, 0}, 45, 1);
             } catch (const std::exception&) {
                 rejected = true;
             }
             Require(rejected, "invalid position accepted");
         }
+
+        for (double invalid : {1.0,
+                 -1.0,
+                 std::numeric_limits<double>::quiet_NaN(),
+                 std::numeric_limits<double>::infinity()}) {
+            MitCommand command;
+            command.tau_ff = invalid;
+            bool rejected = false;
+
+            try {
+                openrobot::EncodeMitCommand(command, 45, 1);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+
+            Require(rejected, "unsupported torque FF was silently ignored");
+        }
+
+        auto invalid_ff = zero;
+        invalid_ff[7] = 0;
+        bool rejected_ff = false;
+
+        try {
+            openrobot::DecodeMitCommand(invalid_ff, 45, 1);
+        } catch (const std::runtime_error&) {
+            rejected_ff = true;
+        }
+
+        Require(rejected_ff, "virtual motor accepted a nonzero wire FF field");
 
         const openrobot::Payload feedback{0xC0, 26, 0, 0xFE, 0xA6, 0xFF, 0, 0xE0};
         const auto measured = openrobot::DecodeFeedback(feedback);
@@ -55,7 +86,7 @@ int main(int argc, char** argv) {
                     measured.current == -8.25,
             "signed feedback units mismatch");
         const openrobot::Payload profile{0xC4, 45, 53, 0xA0, 5, 0x84, 3, 1};
-        openrobot::CheckProfile(profile, {});
+        openrobot::CheckProfile(profile, openrobot::EncodeProfile(45, 53, 1.44, 9, 1));
 
         peer = ::socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
         Require(peer >= 0, "peer socket failed");
@@ -65,17 +96,19 @@ int main(int argc, char** argv) {
         Require(::bind(peer, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0,
             "peer bind failed");
         std::ofstream(motor_profile)
-            << "mit: {velocity_max_rad_s: 45, torque_max_nm: 53, kt_output_nm_a: 1.44, gear_ratio: 9, kd_scale: 1}\n";
+            << "mit: {velocity_max_rad_s: 45, torque_max_nm: 53, kt_output_nm_a: 1.4404, gear_ratio: 9, kd_scale: 1}\n";
         std::ofstream(config)
-            << "shm_name: " << name
-            << "\ninterface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nmotor_ids: [1, 2, 3]\nmotor_config: "
+            << "interface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nbus_load_bitrate: 1000000\nmotor_ids: [1, 2, 3]\nmotor_config: "
             << std::filesystem::path(motor_profile).filename().string() << "\n";
+
+        owner = std::make_unique<shm_utils::Mapping>(name, true);
+        owner->get()->can_enabled = true;
 
         child = ::fork();
         Require(child >= 0, "fork failed");
 
         if (child == 0) {
-            ::execl(argv[1], argv[1], config.c_str(), static_cast<char*>(nullptr));
+            ::execl(argv[1], argv[1], config.c_str(), name.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
 
@@ -158,7 +191,7 @@ int main(int argc, char** argv) {
         }
         const auto snapshot = [&] {
             shm_utils::Lock lock(shm);
-            return shm.motors[shm.motor_sequence % 2];
+            return shm.motors[shm.motor_sequence % kShmBufferCount];
         };
         until([&] {
             const auto s = snapshot();
@@ -197,14 +230,16 @@ int main(int argc, char** argv) {
 
         {
             shm_utils::Lock lock(shm);
-            auto target = shm.motors[shm.motor_sequence % 2];
+            auto target = shm.motors[shm.motor_sequence % kShmBufferCount];
             ++target.command_sequence;
             target.command_published_ns = shm_utils::MonotonicNs();
 
-            for (int i = 0; i < 3; ++i)
-                target.command[i] = {true, (i + 1) * 0.1, 0, 40, 0.3};
+            for (int i = 0; i < 3; ++i) {
+                target.command[i] = {(i + 1) * 0.1, 0, 40, 0.3, 0};
+                target.command_enabled[i] = true;
+            }
 
-            shm.motors[(shm.motor_sequence + 1) % 2] = target;
+            shm.motors[(shm.motor_sequence + 1) % kShmBufferCount] = target;
             ++shm.motor_sequence;
         }
 
@@ -216,6 +251,8 @@ int main(int argc, char** argv) {
         Require(
             state.feedback[0].current == -8.25 && state.feedback[0].position == measured.position,
             "feedback not published through SHM");
+        Require(std::abs(state.motor_torque[0] - measured.current * 1.44) < 1e-12,
+            "measured torque must use verified C4 Kt, not the unquantized YAML setting");
         const auto old_cycles = state.cycles;
         const auto old_feedback = state.received_sequence[0];
         const auto quiet_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
@@ -242,10 +279,10 @@ int main(int argc, char** argv) {
 
         {
             shm_utils::Lock lock(shm);
-            auto target = shm.motors[shm.motor_sequence % 2];
+            auto target = shm.motors[shm.motor_sequence % kShmBufferCount];
             ++target.command_sequence;
-            target.command[0].enabled = false;
-            shm.motors[(shm.motor_sequence + 1) % 2] = target;
+            target.command_enabled[0] = false;
+            shm.motors[(shm.motor_sequence + 1) % kShmBufferCount] = target;
             ++shm.motor_sequence;
         }
 
@@ -289,8 +326,11 @@ int main(int argc, char** argv) {
         Require(contents.find("observed_feedback_interval_us") != std::string::npos &&
                     contents.find("-8.25") != std::string::npos,
             "CAN CSV did not record feedback or timing");
+        Require(
+            std::filesystem::exists("/dev/shm/" + name.substr(1)), "HAL unlinked daemon-owned SHM");
+        owner.reset();
         Require(::shm_open(name.c_str(), O_RDWR, 0) < 0 && errno == ENOENT,
-            "HAL did not unlink owned SHM");
+            "SHM owner did not unlink its region");
         std::cout
             << "PASS: real vcan, MIT position/PD/zero-FF, signed feedback, no self echo, latest-value hold, malformed frame, Release, shutdown/unlink\n";
     } catch (const std::exception& error) {

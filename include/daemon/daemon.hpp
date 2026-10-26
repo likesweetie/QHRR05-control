@@ -22,6 +22,7 @@ struct ProcessSpec {
     bool wait_ready{false};
     int ready_timeout_ms{5000};
     bool create_process_group{true};
+    bool terminal_viewer{false};
 };
 
 struct ProcessInfo {
@@ -45,7 +46,16 @@ public:
     std::vector<std::string> Reap();
     std::optional<ProcessInfo> Get(const std::string& name) const;
 
-    static int RelayTerminalOutput(const char* descriptor_text);
+    // Statistics frames are separated from log output by the terminal relay.
+    static constexpr const char* kStatisticsBegin = "\033]777;qhrr-statistics;";
+    static constexpr char kStatisticsEnd = '\a';
+    static int RelayTerminalOutput(const char* descriptor_text,
+        const char* pid_text,
+        const char* process_name,
+        const char* interval_text,
+        const char* log_path);
+    void DisplayStatistics(const std::string& text);
+    void ResetStatistics();
 
     // One startup notification from the child, not a runtime response check.
     static void NotifyReady() {
@@ -81,4 +91,5 @@ public:
 private:
     std::map<std::string, ProcessInfo> processes_;
     int last_errno_{0};
+    int statistics_rows_{0}, terminal_rows_{0}, terminal_columns_{0};
 };

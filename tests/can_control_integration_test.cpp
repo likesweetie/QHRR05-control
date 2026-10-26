@@ -16,6 +16,7 @@ void Require(bool condition, const char* message) {
 
 int main(int argc, char** argv) {
     pid_t hal = -1, controller = -1;
+    std::unique_ptr<shm_utils::Mapping> can;
     std::filesystem::path directory;
     const auto stop = [](pid_t& child) {
         if (child <= 0)
@@ -38,7 +39,8 @@ int main(int argc, char** argv) {
     };
 
     try {
-        Require(argc == 6, "expected control/model/HAL-config/HAL/controller paths");
+        Require(
+            argc == 7, "expected control/model/HAL-config/HAL/controller/simulation-config paths");
         const std::string suffix = std::to_string(::getpid());
         directory = "/tmp/qhrr05-can-control-" + suffix;
         std::filesystem::create_directory(directory);
@@ -54,42 +56,34 @@ int main(int argc, char** argv) {
                                   hal_config["motor_config"].as<std::string>();
         std::ofstream(directory / "motor profile.yaml") << YAML::LoadFile(motor_source.string());
         hal_config["motor_config"] = "motor profile.yaml";
-        hal_config["shm_name"] = can_name;
         std::ofstream(hal_path) << hal_config;
 
         const openrobot::Payload bytes{0xC0, 26, 0, 0xFE, 0xA6, 0xFF, 0, 0xE0};
         Require(openrobot::EncodeFeedback(openrobot::DecodeFeedback(bytes)) == bytes,
             "signed encoder feedback encoding mismatch");
-        const auto decoded = openrobot::DecodePosition({0xC0, 255, 255, 0, 15, 255, 255, 128}, {});
+        const auto decoded =
+            openrobot::DecodeMitCommand({0xC0, 255, 255, 0, 15, 255, 255, 128}, 45, 1);
         Require(decoded.position == 12.5 && decoded.velocity == -45 && decoded.kp == 500 &&
-                    decoded.kd == 5,
+                    decoded.kd == 5 && decoded.tau_ff == 0,
             "MIT position decoding mismatch");
+
+        can = std::make_unique<shm_utils::Mapping>(can_name, true);
+        can->get()->can_enabled = true;
 
         hal = ::fork();
         Require(hal >= 0, "HAL fork failed");
 
         if (hal == 0) {
-            ::execl(argv[4], argv[4], hal_path.c_str(), static_cast<char*>(nullptr));
+            ::execl(
+                argv[4], argv[4], hal_path.c_str(), can_name.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-        std::unique_ptr<shm_utils::Mapping> can;
-
-        while (!can) {
-            if (std::filesystem::exists("/dev/shm/" + can_name.substr(1))) {
-                can = std::make_unique<shm_utils::Mapping>(can_name);
-                break;
-            }
-
-            Require(std::chrono::steady_clock::now() < deadline, "HAL did not create SHM");
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
         const auto snapshot = [&] {
             auto& shared = *can->get();
             shm_utils::Lock lock(shared);
-            return shared.motors[shared.motor_sequence % 2];
+            return shared.motors[shared.motor_sequence % kShmBufferCount];
         };
 
         while (!snapshot().running) {
@@ -121,7 +115,7 @@ int main(int argc, char** argv) {
 
             ++shm.motor_sequence;
         }
-        qhrr05::VirtualMotors motors(hal_path, origin, shm);
+        qhrr05::VirtualMotors motors(hal_path, argv[6], origin, shm);
         std::array<double, 3> reference{};
 
         const auto publish_model = [&] {
@@ -136,11 +130,11 @@ int main(int argc, char** argv) {
                 shm, model.get(), sensed.get(), gravity.get(), reference, 0, &feedback);
             shm_utils::Lock lock(shm);
             // Poison physics truth and debug effort; neither may drive CAN control.
-            auto& truth = shm.simulation[shm.simulation_sequence % 2];
+            auto& truth = shm.simulation[shm.simulation_sequence % kShmBufferCount];
             truth.position_gt.fill(std::numeric_limits<double>::quiet_NaN());
             truth.torque_gt = truth.position_gt;
 
-            shm.motors[shm.motor_sequence % 2].debug_torque.fill(1e6);
+            shm.motors[shm.motor_sequence % kShmBufferCount].debug_torque.fill(1e6);
         };
 
         publish_model();
@@ -166,7 +160,7 @@ int main(int argc, char** argv) {
         };
         const auto command = [&] {
             shm_utils::Lock lock(shm);
-            return shm.control[shm.control_sequence % 2];
+            return shm.control[shm.control_sequence % kShmBufferCount];
         };
         auto next = std::chrono::steady_clock::now();
         const auto tick = [&](bool integrate = true) {
@@ -293,7 +287,11 @@ int main(int argc, char** argv) {
                 "controller exit did not release virtual motor");
 
         stop(hal);
-        Require(!std::filesystem::exists("/dev/shm/" + can_name.substr(1)), "HAL left owned SHM");
+        Require(std::filesystem::exists("/dev/shm/" + can_name.substr(1)),
+            "HAL unlinked daemon-owned SHM");
+        can.reset();
+        Require(
+            !std::filesystem::exists("/dev/shm/" + can_name.substr(1)), "owner left SHM behind");
         std::filesystem::remove_all(directory);
         std::cout << "PASS: release and CAN ownership cleanup\n";
         return 0;

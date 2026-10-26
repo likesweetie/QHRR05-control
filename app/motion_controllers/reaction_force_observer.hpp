@@ -1,21 +1,24 @@
 #pragma once
 
-#include "shared_memory.hpp"
+#include <array>
+#include <cstdint>
 #include <string>
 
 namespace qhrr05 {
-// Local controller input, not another SHM channel or motor-data source.
-struct MotionFeedback : ModelData {
-    std::array<double, 3> position{}, velocity{}, acceleration{}, motor_torque{};
-    std::uint64_t measurement_sequence = 0;
-    double measurement_dt = .001;
-};
-
 class ReactionForceObserver {
 public:
     explicit ReactionForceObserver(const std::string& config_path);
     void Reset();
-    void Update(const MotionFeedback& feedback);
+    void Update(std::uint64_t measurement_sequence,
+        double measurement_dt,
+        const std::array<double, 3>& joint_velocity,
+        const std::array<double, 3>& joint_acceleration,
+        const std::array<double, 3>& motor_torque,
+        const std::array<double, 9>& mass_matrix,
+        const std::array<double, 9>& jacobian,
+        const std::array<double, 3>& bias_torque,
+        const std::array<double, 3>& passive_torque,
+        const std::array<double, 3>& friction_limit);
 
     bool valid() const {
         return valid_;

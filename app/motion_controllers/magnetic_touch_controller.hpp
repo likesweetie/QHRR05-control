@@ -1,6 +1,7 @@
 #pragma once
 
 #include "reaction_force_observer.hpp"
+#include "control_types.hpp"
 #include <string>
 
 namespace qhrr05 {
@@ -16,9 +17,23 @@ public:
         return kd_motor_;
     }
 
-    void Start(double time, const MotionFeedback& feedback);
+    void Start(double time, const std::array<double, 3>& toe_position);
     void Compute(double time,
-        const MotionFeedback& feedback,
+        const std::array<double, 3>& joint_position,
+        const std::array<double, 3>& joint_velocity,
+        const std::array<double, 3>& joint_acceleration,
+        const std::array<double, 3>& motor_torque,
+        const std::array<double, 3>& gravity_torque,
+        const std::array<double, 3>& bias_torque,
+        const std::array<double, 3>& passive_torque,
+        const std::array<double, 3>& friction_limit,
+        const std::array<double, 9>& mass_matrix,
+        const std::array<double, 9>& jacobian,
+        const std::array<double, 3>& toe_position,
+        const std::array<double, 3>& joint_min,
+        const std::array<double, 3>& joint_max,
+        std::uint64_t measurement_sequence,
+        double measurement_dt,
         double target_force,
         std::array<double, 3>& torque,
         std::array<double, 3>& reference);
@@ -64,6 +79,7 @@ private:
     double ramp_from_ = 0;
     double ramp_to_ = 0;
     double ramped_force_ = 0;
+    bool gravity_only_;
     bool armed_ = true;
 };
 }  // namespace qhrr05

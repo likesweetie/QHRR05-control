@@ -24,10 +24,9 @@ void OnSignal(int) {
 }
 
 struct Options {
-    std::string model, config, shm_name, hal_config;
+    std::string model, config, shm_name, hal_config, simulation_config;
     bool without_can = false;
     bool headless = false;
-    bool create_shm = false;
     double duration = 0;
 };
 
@@ -39,11 +38,6 @@ Options Parse(int argc, char** argv) {
 
         if (arg == "--without-can") {
             options.without_can = true;
-            continue;
-        }
-
-        if (arg == "--create-shm") {
-            options.create_shm = true;
             continue;
         }
 
@@ -65,6 +59,8 @@ Options Parse(int argc, char** argv) {
             options.shm_name = value;
         else if (arg == "--hal-config")
             options.hal_config = value;
+        else if (arg == "--simulation-config")
+            options.simulation_config = value;
         else if (arg == "--duration") {
             std::size_t count = 0;
             options.duration = std::stod(value, &count);
@@ -85,6 +81,11 @@ Options Parse(int argc, char** argv) {
         (!options.without_can && options.hal_config.empty()))
         throw std::runtime_error("select --hal-config YAML or explicit --without-can");
 
+    if ((options.without_can && !options.simulation_config.empty()) ||
+        (!options.without_can && options.simulation_config.empty()))
+        throw std::runtime_error(
+            "--simulation-config is required in CAN mode and unavailable with --without-can");
+
     return options;
 }
 }  // namespace
@@ -96,9 +97,6 @@ int main(int argc, char** argv) {
     try {
         const auto options = Parse(argc, argv);
 
-        if (!options.without_can &&
-            YAML::LoadFile(options.hal_config)["shm_name"].as<std::string>() != options.shm_name)
-            throw std::runtime_error("simulator SHM name must match HAL configuration");
         const auto config = YAML::LoadFile(options.config);
 
         if (config["robot"].as<std::string>() != "qhrr-05")
@@ -111,7 +109,7 @@ int main(int argc, char** argv) {
             history_sec <= 0 || sample_hz * history_sec > mjMAXLINEPNT)
             throw std::runtime_error("invalid plot sampling or history length");
 
-        shm_utils::Mapping mapping(options.shm_name, options.create_shm);
+        shm_utils::Mapping mapping(options.shm_name);
         auto& shm = *mapping.get();
 
         char error[2048] = {};
@@ -164,8 +162,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<mjData, decltype(&mj_deleteData)> model_data(nullptr, mj_deleteData);
 
         if (!options.without_can) {
-            virtual_motors =
-                std::make_unique<qhrr05::VirtualMotors>(options.hal_config, initial, shm);
+            virtual_motors = std::make_unique<qhrr05::VirtualMotors>(
+                options.hal_config, options.simulation_config, initial, shm);
             model_data.reset(mj_makeData(model.get()));
 
             if (!model_data)
@@ -272,20 +270,17 @@ int main(int argc, char** argv) {
             std::copy_n(ground_truth.begin(), 3, frame.contact_force.begin());
             std::copy_n(ground_truth.begin() + 3, 3, frame.contact_torque.begin());
 
-            for (int i = 0; i < 3; ++i) {
-                frame.position[i] = data->qpos[i];
-                frame.torque[i] = data->actuator_force[i];
-            }
-
-            plots->Push(frame);
+            std::copy_n(data->qpos, 3, frame.position.begin());
 
             {
                 shm_utils::Lock lock(shm);
+                frame.measured_torque =
+                    shm.motors[shm.motor_sequence % kShmBufferCount].motor_torque;
                 auto& snapshot = shm_utils::Next(shm.simulation, shm.simulation_sequence);
                 snapshot.run_id = frame.run_id;
                 snapshot.time = frame.time;
                 snapshot.position_gt = frame.position;
-                snapshot.torque_gt = frame.torque;
+                std::copy_n(data->actuator_force, 3, snapshot.torque_gt.begin());
                 snapshot.toe_position = frame.toe_position;
                 snapshot.contact_force = frame.contact_force;
                 snapshot.contact_torque = frame.contact_torque;
@@ -302,6 +297,8 @@ int main(int argc, char** argv) {
                 ++shm.simulation_sequence;
                 shm_utils::Notify(shm);
             }
+
+            plots->Push(frame);
         };
 
         const auto check_holding = [&] {

@@ -28,9 +28,9 @@ def wait_for(predicate, message, timeout=8):
     raise AssertionError(message())
 
 
-def find_window():
+def find_window(title='QHRR05-CAN-HAL'):
     result = subprocess.run(
-        ['xdotool', 'search', '--name', '^QHRR05-CAN-HAL$'], capture_output=True, text=True
+        ['xdotool', 'search', '--name', '^' + title + '$'], capture_output=True, text=True
     )
     return result.stdout.splitlines()[-1] if result.returncode == 0 else None
 
@@ -64,6 +64,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
         'daemon-stop',
         'hal-stop',
         'window-close',
+        'controller-window-close',
+        'simulator-window-close',
         'terminal-failure',
         'hal-startup-failure',
         'without-can',
@@ -76,15 +78,21 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
         config = directory / f'{action}-can.json'
         settings = yaml.safe_load((ROOT / 'config/hal_config/can_hal.yaml').read_text())
         settings['motor_config'] = 'motor profile.json'
-        settings['shm_name'] = name
 
         if action == 'hal-startup-failure':
             settings['interface'] = 'no_such_can'
 
         config.write_text(json.dumps(settings))
 
+        simulation_config = directory / f'{action}-simulation.json'
+        simulation = yaml.safe_load((ROOT / 'tests/fixtures/simulation_config.yaml').read_text())
+        simulation['iq_sensor']['enabled'] = action == 'daemon-stop'
+        simulation_config.write_text(json.dumps(simulation))
+
         manifest = directory / f'{action}-processes.json'
         processes = yaml.safe_load((ROOT / 'config/app_config/daemon_config.yaml').read_text())
+        processes['shm_name'] = name
+        processes['log_directory'] = str(directory / 'logs')
         control = str(ROOT / 'tests/fixtures/control_config.yaml')
 
         for spec in processes['processes'] + processes['debug_processes']:
@@ -92,7 +100,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
             spec['working_directory'] = str(ROOT)
 
             if spec['name'] == 'can_hal':
-                spec['args'] = [str(config)]
+                spec['args'] = [str(config), '{shm_name}']
 
                 if action == 'terminal-failure':
                     spec['terminal_exec'] = '/bin/false'
@@ -100,18 +108,22 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
             elif spec['name'] == 'mujoco_simulate':
                 args = spec['args']
                 args[args.index('--control-config') + 1] = control
-                args[args.index('--shm-name') + 1] = sim_name
+
+                if '--simulation-config' in args:
+                    args[args.index('--simulation-config') + 1] = str(simulation_config)
 
                 if '--hal-config' in args:
                     args[args.index('--hal-config') + 1] = str(config)
             elif spec['name'] == 'task_controller':
-                spec['args'] = [control, sim_name] + (
+                spec['args'] = [control, '{shm_name}'] + (
                     ['--without-can'] if '--without-can' in spec['args'] else []
                 )
 
         manifest.write_text(json.dumps(processes))
         log = directory / f'{action}.log'
         environment = os.environ.copy()
+        environment['GDK_BACKEND'] = 'x11'
+        environment.pop('WAYLAND_DISPLAY', None)
 
         if action in ['vcan-startup-failure', 'without-can']:
             fake_bin = directory / f'{action}-bin'
@@ -130,6 +142,16 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
 
             if action == 'without-can':
                 command.append('--without-can')
+                # Use this test's display; never reuse the host desktop's terminal server.
+                command = ['dbus-run-session', '--', *command]
+                environment.pop('GNOME_TERMINAL_SERVICE', None)
+                environment.pop('GNOME_TERMINAL_SCREEN', None)
+                runtime = directory / 'without-can-runtime'
+                runtime.mkdir(mode=0o700)
+                environment['XDG_RUNTIME_DIR'] = str(runtime)
+                environment['NO_AT_BRIDGE'] = '1'
+                environment['GIO_USE_VFS'] = 'local'
+                environment['GTK_USE_PORTAL'] = '0'
             else:
                 command.append('--isolated-vcan')
 
@@ -176,9 +198,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
                 assert process.poll() is None, log.read_text()
 
                 if action == 'without-can':
-                    return len(children) == 2 and sim_shm.exists()
+                    return len(children) == 4 and sim_shm.exists()
 
-                return len(children) == 4 and shm.exists() and sim_shm.exists()
+                return len(children) == 6 and shm.exists() and sim_shm.exists()
 
             wait_for(started, log.read_text)
             assert (
@@ -193,6 +215,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
                 '/proc/self/ns/net'
             )
 
+            for title in ['QHRR05-mujoco_simulate', 'QHRR05-task_controller']:
+                wait_for(lambda: find_window(title), log.read_text)
+
             if action == 'without-can':
                 assert same_network, 'Debug execution created an unnecessary CAN namespace'
                 assert not find_window(), log.read_text()
@@ -200,8 +225,22 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
                 os.kill(daemon_pid, signal.SIGTERM)
                 assert process.wait(timeout=8) == 0, log.read_text()
                 assert not sim_shm.exists(), log.read_text()
-                print('PASS: explicit --without-can, no HAL/window/namespace, clean shutdown')
+                print(
+                    'PASS: explicit --without-can, two application terminals, no HAL/namespace, clean shutdown'
+                )
                 continue
+
+            if action == 'daemon-stop':
+                runs = sorted((directory / 'logs').glob('run-*'))
+                sim_log = runs[-1] / 'mujoco_simulate.log'
+                wait_for(
+                    lambda: '[simulation] Iq sensor ENABLED' in sim_log.read_text(),
+                    lambda: log.read_text()
+                    + '\nRELAY LOGS:\n'
+                    + '\n'.join(
+                        str(path) + '\n' + path.read_text() for path in runs[-1].glob('*.log')
+                    ),
+                )
 
             assert not same_network, 'Explicit --isolated-vcan did not isolate its vcan bus'
             assert 'vcan0:' in Path(f'/proc/{daemon_pid}/net/dev').read_text()
@@ -213,24 +252,48 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
             if action == 'daemon-stop':
                 from PIL import ImageGrab
 
+                subprocess.run(['xdotool', 'windowraise', window], check=True)
+                time.sleep(4.3)
                 ImageGrab.grab().save('/tmp/qhrr05-can-terminal.png')
                 os.kill(daemon_pid, signal.SIGTERM)
             elif action == 'hal-stop':
                 os.kill(children['can_hal'], signal.SIGTERM)
+            elif action == 'controller-window-close':
+                subprocess.run(
+                    ['xdotool', 'windowclose', find_window('QHRR05-task_controller')], check=True
+                )
+            elif action == 'simulator-window-close':
+                subprocess.run(
+                    ['xdotool', 'windowclose', find_window('QHRR05-mujoco_simulate')], check=True
+                )
             else:
                 subprocess.run(['xdotool', 'windowclose', window], check=True)
 
             code = process.wait(timeout=8)
 
-            if action != 'window-close':
+            if 'window-close' not in action:
                 assert code == 0, log.read_text()
+
+            if action == 'daemon-stop':
+                assert '[simulate] stopped at t=' in sim_log.read_text(), sim_log.read_text()
+                assert 'STATISTICS' not in sim_log.read_text()
 
             assert not shm.exists() and not sim_shm.exists(), log.read_text()
             assert all(
                 not Path(f'/proc/{pid}').exists() for pid in children.values()
             ), log.read_text()
-            wait_for(lambda: not find_window(), lambda: 'Statistics window remains open')
-            print('PASS:', action, 'one daemon, four direct children, SHM and window cleanup')
+            wait_for(
+                lambda: not any(
+                    find_window(title)
+                    for title in [
+                        'QHRR05-CAN-HAL',
+                        'QHRR05-mujoco_simulate',
+                        'QHRR05-task_controller',
+                    ]
+                ),
+                lambda: 'Application statistics window remains open',
+            )
+            print('PASS:', action, 'one daemon, six direct children, SHM and window cleanup')
         finally:
             if process.poll() is None:
                 if daemon_pid:

@@ -3,6 +3,7 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 process_config="$project_dir/config/app_config/daemon_config.yaml"
 mode=host
+daemon_options=()
 
 while (($#)); do
     case "$1" in
@@ -15,6 +16,7 @@ while (($#)); do
             mode="${1#--}"
             shift
             ;;
+        --no-terminals) daemon_options+=(--no-terminals); shift ;;
         --process-config)
             if (($# < 2)); then
                 echo '--process-config requires a YAML path' >&2
@@ -24,12 +26,12 @@ while (($#)); do
             process_config="$(realpath -- "$2")"
             shift 2
             ;;
-        *) echo 'usage: run_daemon.sh [--existing-can | --isolated-vcan | --without-can] [--process-config YAML]' >&2; exit 1 ;;
+        *) echo 'usage: run_daemon.sh [--existing-can | --isolated-vcan | --without-can] [--process-config YAML] [--no-terminals]' >&2; exit 1 ;;
     esac
 done
 
 if [[ "$mode" == without-can ]]; then
-    exec "$project_dir/build/daemon" --config "$process_config" --without-can
+    exec "$project_dir/build/daemon" --config "$process_config" --without-can "${daemon_options[@]}"
 fi
 
 if [[ "$mode" == isolated-vcan ]]; then
@@ -45,7 +47,7 @@ if [[ "$mode" == isolated-vcan ]]; then
         export NO_AT_BRIDGE=1 GIO_USE_VFS=local GTK_USE_PORTAL=0
         trap "rm -rf -- \"$runtime_dir\"" EXIT
         dbus-run-session -- "$@"
-    ' sh "$project_dir/build/daemon" --config "$process_config"
+    ' sh "$project_dir/build/daemon" --config "$process_config" "${daemon_options[@]}"
 fi
 
 if [[ "$mode" == host ]]; then
@@ -91,4 +93,4 @@ else
     echo "[launcher] Existing CAN: $(readlink /proc/self/ns/net); no interface setup"
 fi
 
-exec "$project_dir/build/daemon" --config "$process_config"
+exec "$project_dir/build/daemon" --config "$process_config" "${daemon_options[@]}"

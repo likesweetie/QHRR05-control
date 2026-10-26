@@ -13,14 +13,16 @@ homing:
   duration_sec: 3.0
 
 gravity_compensation:
+  gravity_only: false  # false: compensate full bias (gravity + Coriolis/centrifugal).
   kp_motor: [2.0, 2.0, 2.0]  # Simulated inner position servo, N*m/rad.
   kd_motor: [0.3, 0.3, 0.3]    # N*m*s/rad.
-  alpha: 1.0  # Gravity compensation ratio, 0..1.
+  alpha: 1.0  # Scale the selected gravity/bias compensation, 0..1.
   # N*m/rad; desired pose is captured when entering gravity mode.
   # Zero stiffness allows manual motion; kd_motor still damps velocity.
   task_stiffness: [0.0, 0.0, 0.0]
 
 magnetic_touch:
+  gravity_only: false  # Physical friction/damping remain in either setting.
   kp_motor: [40.0, 40.0, 40.0]  # MIT inner position servo; other tuning is unchanged.
   kd_motor: [0.3, 0.3, 0.3]
   target_force_n: 10.0

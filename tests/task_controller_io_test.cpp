@@ -18,12 +18,12 @@ void Require(bool value, const char* message) {
 
 ControlData Latest(ShmData& shm) {
     shm_utils::Lock lock(shm);
-    return shm.control[shm.control_sequence % 2];
+    return shm.control[shm.control_sequence % kShmBufferCount];
 }
 
 MotorData Motors(ShmData& shm) {
     shm_utils::Lock lock(shm);
-    return shm.motors[shm.motor_sequence % 2];
+    return shm.motors[shm.motor_sequence % kShmBufferCount];
 }
 
 template <class Predicate> ControlData WaitCommand(ShmData& shm, Predicate predicate) {
@@ -217,7 +217,7 @@ int main(int argc, char** argv) {
             shm_utils::Stop(shm);
             WaitExit(worker, 0);
             worker = -1;
-            Require(shm.control[shm.control_sequence % 2].command_sequence != 0,
+            Require(shm.control[shm.control_sequence % kShmBufferCount].command_sequence != 0,
                 "commands were not published to double buffers");
             std::cout << "observed 100 Hz cycles in 150ms=" << cycles << '\n';
         }
@@ -262,7 +262,7 @@ int main(int argc, char** argv) {
             {
                 shm_utils::Lock lock(shm);
                 shm.control[0].command_sequence = 7;
-                shm.motors[shm.motor_sequence % 2].debug_torque[0] = 1000;
+                shm.motors[shm.motor_sequence % kShmBufferCount].debug_torque[0] = 1000;
             }
 
             const auto command =
@@ -272,7 +272,7 @@ int main(int argc, char** argv) {
             Require(data->ctrl[0] == model->actuator_ctrlrange[1], "motor torque limit was lost");
             {
                 shm_utils::Lock lock(shm);
-                shm.motors[shm.motor_sequence % 2].debug_torque[0] =
+                shm.motors[shm.motor_sequence % kShmBufferCount].debug_torque[0] =
                     std::numeric_limits<double>::quiet_NaN();
             }
 

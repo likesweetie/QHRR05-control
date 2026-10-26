@@ -15,9 +15,13 @@
 
 namespace qhrr05 {
 VirtualMotors::VirtualMotors(const std::string& hal_config_path,
+    const std::string& simulation_config_path,
     const std::array<double, 3>& encoder_origin,
     ShmData& shared)
-    : encoder_origin_(encoder_origin), shared_(shared) {
+    : encoder_origin_(encoder_origin), iq_sensors_{VirtualIqSensor(simulation_config_path, 0),
+                                           VirtualIqSensor(simulation_config_path, 1),
+                                           VirtualIqSensor(simulation_config_path, 2)},
+      shared_(shared) {
     const auto config = YAML::LoadFile(hal_config_path);
     const auto interface = config["interface"].as<std::string>();
     const auto ids = config["motor_ids"].as<std::vector<unsigned>>();
@@ -37,20 +41,50 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
         ids_[i] = 0x140 + ids[i];
     }
 
-    profile_.velocity_max = mit["velocity_max_rad_s"].as<double>();
-    profile_.torque_max = mit["torque_max_nm"].as<double>();
-    profile_.kt_output = mit["kt_output_nm_a"].as<double>();
-    profile_.gear_ratio = mit["gear_ratio"].as<double>();
-    profile_.kd_scale = mit["kd_scale"].as<unsigned>();
-    openrobot::EncodePosition({}, profile_);
-    openrobot::EncodeProfile(profile_);
+    velocity_max_ = mit["velocity_max_rad_s"].as<double>();
+    torque_max_ = mit["torque_max_nm"].as<double>();
+    kt_output_ = mit["kt_output_nm_a"].as<double>();
+    kd_scale_ = mit["kd_scale"].as<unsigned>();
+    rom_parameters_ = openrobot::EncodeProfile(
+        velocity_max_, torque_max_, kt_output_, mit["gear_ratio"].as<double>(), kd_scale_);
+
+    const auto simulation = YAML::LoadFile(simulation_config_path);
+    const auto actual_motor = simulation["motor"];
+    const auto axis_value = [&](const char* key, int axis) {
+        const auto values = actual_motor[key];
+
+        if (!values.IsSequence() || values.size() != 3)
+            throw std::runtime_error(std::string("expected three simulation motor values: ") + key);
+
+        const double result = values[axis].as<double>();
+
+        if (!std::isfinite(result))
+            throw std::runtime_error(std::string("simulation motor value must be finite: ") + key);
+
+        return result;
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        const double kt_motor = axis_value("kt_motor_nm_a", i);
+        gear_ratio_[i] = axis_value("gear_ratio", i);
+        actual_kt_output_[i] = kt_motor * gear_ratio_[i];
+        pole_pairs_[i] = axis_value("pole_pairs", i);
+        electrical_zero_[i] = axis_value("electrical_zero_rad", i);
+
+        if (kt_motor <= 0 || gear_ratio_[i] <= 0 || !std::isfinite(actual_kt_output_[i]) ||
+            actual_kt_output_[i] <= 0 || pole_pairs_[i] < 1 ||
+            pole_pairs_[i] != std::floor(pole_pairs_[i]))
+            throw std::runtime_error("simulation motor Kt/gear/pole-pairs must be positive");
+    }
+
+    std::cout << "[simulation] Iq sensor "
+              << (iq_sensors_[0].enabled() ? "ENABLED" : "DISABLED (ideal CAN feedback)") << " | "
+              << simulation_config_path << std::endl;
 
     const auto peer = ReadFeedback();
 
     if (!peer.running)
         throw std::runtime_error("CAN HAL is not running");
-
-    openrobot::CheckProfile(openrobot::EncodeProfile(profile_), peer.profile);
 
     const auto index = ::if_nametoindex(interface.c_str());
 
@@ -109,7 +143,7 @@ VirtualMotors::~VirtualMotors() {
 MotorData VirtualMotors::ReadFeedback() const {
     auto& shm = shared_;
     shm_utils::Lock lock(shm);
-    auto state = shm.motors[shm.motor_sequence % 2];
+    auto state = shm.motors[shm.motor_sequence % kShmBufferCount];
 
     if (shm.failed)
         throw std::runtime_error("CAN HAL failed");
@@ -136,6 +170,25 @@ void VirtualMotors::Reply(int axis, const openrobot::Payload& bytes) {
 }
 
 void VirtualMotors::Update(const mjModel* model, mjData* data) {
+    if (sensor_time_ < 0 || data->time != sensor_time_) {
+        const bool reset = sensor_time_ < 0 || data->time < sensor_time_;
+        const double dt = reset ? model->opt.timestep : data->time - sensor_time_;
+
+        for (int i = 0; i < 3; ++i) {
+            if (reset)
+                iq_sensors_[i].Reset();
+
+            const double kt = iq_sensors_[i].enabled() ? actual_kt_output_[i] : kt_output_;
+            const double iq_true = data->qfrc_actuator[i] / kt;
+            const double theta_e = std::remainder(
+                pole_pairs_[i] * gear_ratio_[i] * data->qpos[i] + electrical_zero_[i],
+                2 * 3.141592653589793);
+            reported_iq_[i] = iq_sensors_[i].Sample(iq_true, theta_e, dt);
+        }
+
+        sensor_time_ = data->time;
+    }
+
     for (unsigned batch = 0; batch < 256; ++batch) {
         can_frame frame{};
         const auto count = ::read(socket_, &frame, sizeof(frame));
@@ -164,16 +217,16 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
         std::copy_n(frame.data, 8, bytes.begin());
 
         if (bytes[0] == 0xC4)
-            Reply(axis, openrobot::EncodeProfile(profile_));
+            Reply(axis, rom_parameters_);
         else if (bytes[0] == 0xC1) {
             enabled_[axis] = true;
-            Reply(axis, {0xC1, std::uint8_t(profile_.kd_scale)});
+            Reply(axis, {0xC1, std::uint8_t(kd_scale_)});
         } else if (bytes[0] == 0xC2) {
             enabled_[axis] = false;
             targets_[axis] = {};
             Reply(axis, {0xC2});
         } else if (bytes[0] == 0xC0) {
-            const auto target = openrobot::DecodePosition(bytes, profile_);
+            const auto target = openrobot::DecodeMitCommand(bytes, velocity_max_, kd_scale_);
 
             if (enabled_[axis])
                 targets_[axis] = target;
@@ -181,7 +234,8 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
             Reply(axis,
                 openrobot::EncodeFeedback({data->qpos[axis] - encoder_origin_[axis],
                     data->qvel[axis],
-                    data->qfrc_actuator[axis] / profile_.kt_output,
+                    iq_sensors_[axis].enabled() ? reported_iq_[axis]
+                                                : data->qfrc_actuator[axis] / kt_output_,
                     25}));
         } else
             throw std::runtime_error(
@@ -192,12 +246,11 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
     for (int i = 0; i < 3; ++i) {
         const auto& target = targets_[i];
         const double torque =
-            enabled_[i] && target.enabled
-                ? target.kp * (target.position - (data->qpos[i] - encoder_origin_[i])) +
-                      target.kd * (target.velocity - data->qvel[i])
-                : 0;
-        const double minimum = std::max(-profile_.torque_max, model->actuator_ctrlrange[2 * i]);
-        const double maximum = std::min(profile_.torque_max, model->actuator_ctrlrange[2 * i + 1]);
+            enabled_[i] ? target.kp * (target.position - (data->qpos[i] - encoder_origin_[i])) +
+                              target.kd * (target.velocity - data->qvel[i])
+                        : 0;
+        const double minimum = std::max(-torque_max_, model->actuator_ctrlrange[2 * i]);
+        const double maximum = std::min(torque_max_, model->actuator_ctrlrange[2 * i + 1]);
         data->ctrl[i] = std::clamp(torque, minimum, maximum);
     }
 }
@@ -237,7 +290,8 @@ ControlData UpdateControlIO(ShmData& shm,
     mj_forward(model, data);
     mju_copy(gravity_data->qpos, data->qpos, model->nq);
     mju_zero(gravity_data->qvel, model->nv);
-    mj_forward(model, gravity_data);
+    mj_fwdPosition(model, gravity_data);
+    mj_fwdVelocity(model, gravity_data);
 
     ModelData state;
     std::copy_n(gravity_data->qfrc_bias, 3, state.gravity_torque.begin());
@@ -267,7 +321,7 @@ ControlData UpdateControlIO(ShmData& shm,
             throw std::runtime_error("SHM stopped during control");
 
         state.published_ns = shm_utils::MonotonicNs();
-        shm.model[(shm.model_sequence + 1) % 2] = state;
+        shm.model[(shm.model_sequence + 1) % kShmBufferCount] = state;
         ++shm.model_sequence;
 
         if (!can_feedback) {
@@ -279,8 +333,9 @@ ControlData UpdateControlIO(ShmData& shm,
             for (int i = 0; i < 3; ++i) {
                 next.feedback[i] = {data->qpos[i] - next.position_offset[i],
                     data->qvel[i],
-                    data->qfrc_actuator[i] / next.profile.kt_output,
+                    0,  // No current measurement in explicit direct-torque debug mode.
                     25};
+                next.motor_torque[i] = data->qfrc_actuator[i];
 
                 if (next.received_sequence[i] != measurement_sequence || !next.received_ns[i])
                     next.received_ns[i] = state.published_ns;
@@ -291,8 +346,8 @@ ControlData UpdateControlIO(ShmData& shm,
             ++shm.motor_sequence;
         }
 
-        motors = shm.motors[shm.motor_sequence % 2];
-        control = shm.control[shm.control_sequence % 2];
+        motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+        control = shm.control[shm.control_sequence % kShmBufferCount];
         shm_utils::Notify(shm);
     }
 
