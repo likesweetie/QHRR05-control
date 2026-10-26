@@ -11,7 +11,7 @@
 
 ## Git / tooling
 
-- User authorized checkpoint of all accumulated active_control work, merge into main (--no-ff), then create/switch logger_and_dashboard. Previous main checkpoint f14a1e1 from zero_gravity6a5af53. Keep historical branches. User .vscode/launch.json is a placeholder template: preserve locally and ignore explicitly, do not commit. README names logger_and_dashboard as continuing branch. This note is part of checkpoint; verify actual refs/status after git operations, no push requested.
+- CURRENT branch logger_and_dashboard. Accumulated implementation committed on active_control as3588eb5; merged --no-ff into main atc7ec1e5, then new branch created/switched at that merge. Historical active_control and zero_gravity retained. New branch starts with a docs-only handover record of these results. User .vscode/launch.json placeholder preserved locally and now explicitly ignored, not committed. README names logger_and_dashboard as continuing branch. No push requested/performed. No further commit authorization inferred for future tasks.
 - Build: cmake --build build --parallel 2. CTest requires escalated exec for /dev/shm and private vcan/user/net namespaces. Do not request sudo credentials or change sudoers.
 - clang-format18.1.8 at /tmp/qhrr05-format-packages/clang_format/data/bin/clang-format. Black24.10 via PYTHONPATH=/tmp/qhrr05-format-packages BLACK_CACHE_DIR=/tmp/qhrr05-black-cache; run ONE FILE per invocation (even --workers1 multipath hangs under sandbox). Never format copied MuJoCo simulate/vendor sources.
 
