@@ -29,10 +29,13 @@ def simulator(directory, name):
 
         def ready():
             assert process.poll() is None, log.read_text()
-            return find_window('MuJoCo simulate.*qhrr-05') if 'HOLD:' in log.read_text() else None
+            return find_window('MuJoCo simulate.*qhrr-05') if '[control] DAMPING target captured:' in log.read_text() else None
 
         window = wait_for(ready, log.read_text, timeout=25)
         event('windowsize', window, 1600, 900)
+        assert 'HOLD:' not in log.read_text(), 'Startup unexpectedly ran homing'
+        event('key', '--window', window, 'h')
+        wait_for(lambda: 'HOLD:' in log.read_text(), log.read_text)
         yield window, process, log, telemetry
     finally:
         event('mouseup', 1, 'mouseup', 3, 'keyup', 'Control_L', 'Shift_L')
@@ -53,6 +56,13 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-simulator-gui-') as tmp:
     with simulator(directory, 'controls') as (window, process, log, telemetry):
         key = lambda value: event('key', '--window', window, value)
         click = lambda x, y: event('mousemove', '--window', window, x, y, 'click', 1)
+        key('w')
+        wait_for(lambda: '[workspace] ready:' in log.read_text(), log.read_text)
+        assert '[workspace] ERROR:' not in log.read_text(), log.read_text()
+        key('w')
+        wait_for(lambda: '[workspace] OFF' in log.read_text(), log.read_text)
+        key('w')  # Cached geometry can be shown again without rebuilding it.
+        wait_for(lambda: log.read_text().count('[workspace] ON') == 2, log.read_text)
         click(185, 735)  # Native Gravity button.
         wait_for(lambda: '[control] GRAVITY' in log.read_text(), log.read_text)
         key('space')
@@ -72,19 +82,55 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-simulator-gui-') as tmp:
         wait_for(lambda: log.read_text().count('[control] GRAVITY') >= 2, log.read_text)
         key('m')
         wait_for(lambda: log.read_text().count('[control] MAGNETIC') >= 2, log.read_text)
+        holds = log.read_text().count('HOLD:')
+        key('h')
+        wait_for(lambda: log.read_text().count('HOLD:') > holds, log.read_text)
+        click(65, 825)  # Native Tracking button, below the force slider.
+        wait_for(lambda: '[control] TRACKING' in log.read_text(), log.read_text)
+        wait_for(
+            lambda: sum(r['controller'] == 'tracking' for r in rows(telemetry)) > 120,
+            log.read_text,
+        )
+        key('g')
+        wait_for(lambda: log.read_text().count('[control] GRAVITY') >= 3, log.read_text)
+        key('t')
+        wait_for(lambda: log.read_text().count('[control] TRACKING') >= 2, log.read_text)
+        for shortcut, plane in [('2', 'XZ'), ('3', 'YZ'), ('1', 'XY')]:
+            key(shortcut)
+            wait_for(lambda: f'[control] TRACKING {plane}' in log.read_text(), log.read_text)
+            time.sleep(0.4)
+        holds = log.read_text().count('HOLD:')
+        key('h')
+        wait_for(lambda: log.read_text().count('HOLD:') > holds, log.read_text)
+        click(185, 825)  # Native Ball follow button shares Tracking's row.
+        wait_for(lambda: '[control] BALL FOLLOWING' in log.read_text(), log.read_text)
+        wait_for(lambda: sum(r['controller'] == 'ball' for r in rows(telemetry)) > 40,
+                 log.read_text)
+        key('g')
+        key('b')
+        wait_for(lambda: log.read_text().count('[control] BALL FOLLOWING') >= 2, log.read_text)
+        captured = log.read_text().count('[control] DAMPING target captured:')
+        key('d')
+        wait_for(lambda: log.read_text().count('[control] DAMPING target captured:') > captured,
+                 log.read_text)
+        wait_for(lambda: rows(telemetry)[-1]['controller'] == 'damping', log.read_text)
         key('r')
-        wait_for(lambda: any(r['run_id'] == '1' for r in rows(telemetry)), log.read_text)
+        wait_for(lambda: any(r['run_id'] == '1' and r['controller'] == 'damping'
+                            for r in rows(telemetry)), log.read_text)
+        holds = log.read_text().count('HOLD:')
+        time.sleep(.2)
+        assert log.read_text().count('HOLD:') == holds, 'Reset automatically ran homing'
         key('Escape')
         assert process.wait(timeout=8) == 0, log.read_text()
         data = rows(telemetry)
-        assert {'homing', 'gravity', 'magnetic'} <= {r['controller'] for r in data}
+        assert {'damping', 'homing', 'gravity', 'magnetic', 'tracking', 'ball'} <= {r['controller'] for r in data}
         first = [r for r in data if r['run_id'] == '0']
         assert any(
             float(b['control_time']) - float(a['control_time'])
             > float(b['sim_time']) - float(a['sim_time']) + 0.1
             for a, b in zip(first, first[1:])
         ), 'Controller stopped with paused physics'
-        print('PASS: native H/G/M controls, slider without restart, pause independence, reset/exit')
+        print('PASS: native H/G/M/T controls, slider without restart, pause independence, reset/exit')
 
     # Fresh sessions keep the default camera deterministic; the second case covers resize.
     for button, width, height, x, y in [(3, 1600, 900, 750, 565), (1, 1400, 800, 672, 502)]:
@@ -107,6 +153,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-simulator-gui-') as tmp:
                 time.sleep(0.05)
             event('mouseup', button, 'keyup', 'Control_L')
             time.sleep(0.2)
+            if button == 1:
+                event('key', '--window', window, 'w')  # Closing during generation must cancel cleanly.
             event('key', '--window', window, 'Escape')
             assert process.wait(timeout=8) == 0, log.read_text()
             data = [r for r in rows(telemetry) if int(r['sample_seq']) >= first_sequence]

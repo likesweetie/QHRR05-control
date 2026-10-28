@@ -40,7 +40,13 @@ int main(int argc, char** argv) {
 
     try {
         Require(
-            argc == 7, "expected control/model/HAL-config/HAL/controller/simulation-config paths");
+            argc == 7 || argc == 8, "expected control/model/HAL-config/HAL/controller/simulation-config paths [ctc|impedance]");
+        const std::string method = argc == 8 ? argv[7] : "inverse_dynamics";
+        Require(method == "inverse_dynamics" || method == "ctc" || method == "impedance",
+            "unknown CAN test tracking method");
+        const bool use_ilc = method != "inverse_dynamics";
+        const auto tracking_method = method == "ctc" ? TrackingMethod::CTC
+            : method == "impedance" ? TrackingMethod::Impedance : TrackingMethod::InverseDynamics;
         const std::string suffix = std::to_string(::getpid());
         directory = "/tmp/qhrr05-can-control-" + suffix;
         std::filesystem::create_directory(directory);
@@ -49,6 +55,15 @@ int main(int argc, char** argv) {
         const std::string sim_name = "/qhrr05-can-control-" + suffix;
         const std::string can_name = sim_name + "-bus";
         auto config = YAML::LoadFile(argv[1]);
+        config["tracking"]["mode"] = method;
+        if (use_ilc) {
+            // Exercise the independent ILC switch over real CAN while retaining
+            // the inverse-dynamics case as the unchanged ILC-OFF baseline.
+            config["tracking"]["ilc"]["enabled"] = true;
+            config["tracking"]["ilc"]["warmup_cycles"] = 0;
+            config["tracking"]["ilc"]["phase_bins"] = 32;
+        }
+        config["model_path"] = std::filesystem::absolute(argv[2]).string();
         config["homing"]["duration_sec"] = .35;
         std::ofstream(control_path) << config;
         auto hal_config = YAML::LoadFile(argv[3]);
@@ -117,6 +132,7 @@ int main(int argc, char** argv) {
         }
         qhrr05::VirtualMotors motors(hal_path, argv[6], origin, shm);
         std::array<double, 3> reference{};
+        bool force_unreachable_model = false;
 
         const auto publish_model = [&] {
             const auto feedback = snapshot();
@@ -135,6 +151,9 @@ int main(int argc, char** argv) {
             truth.torque_gt = truth.position_gt;
 
             shm.motors[shm.motor_sequence % kShmBufferCount].debug_torque.fill(1e6);
+
+            if (force_unreachable_model)
+                shm.model[shm.model_sequence % kShmBufferCount].toe_position = {10, 10, 10};
         };
 
         publish_model();
@@ -177,7 +196,41 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_until(next);
         };
 
-        for (int step = 0; step < 1500; ++step)
+        for (int step = 0; step < 6000 && !command().command_sequence; ++step)
+            tick(false);
+
+        Require(command().mode == 5 && !command().holding && command().damping_reference_valid,
+            "CAN controller automatically homed instead of starting in damping");
+        const auto initial_toe = command().damping_toe_reference;
+
+        for (int i = 0; i < 3; ++i) {
+            const auto target = snapshot().command[i];
+            Require(target.kp == 0 && target.kd == 1 && target.velocity == 0 && target.tau_ff == 0,
+                "startup MIT command is not kp=0/kd=1/velocity=0/FF=0");
+            physical->qpos[i] += .01;
+            physical->qvel[i] = .2 * (i + 1);
+        }
+
+        mj_forward(model.get(), physical.get());
+
+        for (int step = 0; step < 50; ++step)
+            tick(false);
+
+        Require(command().damping_toe_reference == initial_toe,
+            "CAN damping changed its captured toe target");
+
+        for (int i = 0; i < 3; ++i)
+            Require(std::abs(physical->ctrl[i] + physical->qvel[i]) < .03,
+                "actual MIT CAN damping is not pure -kd*dq");
+
+        qhrr05::ResetSimulation(origin, model.get(), physical.get());
+        std::cout << "PASS: actual CAN startup kp=0/kd=1, captured toe target, no position/gravity kick\n";
+        request(0);  // Homing now requires an explicit request.
+
+        for (int step = 0; step < 6000 && !command().holding; ++step)
+            tick();
+
+        for (int step = 0; step < 500; ++step)
             tick();
 
         Require(command().holding, "CAN homing never reached HOLD");
@@ -192,6 +245,189 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "PASS: real CAN homing with poisoned legacy joint feedback/torque\n";
+        for (const auto plane : {TrackingPlane::XY, TrackingPlane::XZ, TrackingPlane::YZ}) {
+            {
+                shm_utils::Lock lock(shm);
+                auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+                control.requested_tracking_plane = plane;
+                control.requested_mode = 3;
+                ++control.motion_sequence;
+                ++shm.control_sequence;
+            }
+
+            double tracking_error_squared = 0;
+            bool observed_ilc_torque = false;
+            bool observed_checking = false;
+            int tracking_samples = 0;
+            const int tracking_site = mj_name2id(model.get(), mjOBJ_SITE, "FL_foot");
+
+            for (int step = 0; step < 3000; ++step) {
+                tick();
+                const auto control = command();
+
+                if (control.tracking_checking) {
+                    observed_checking = true;
+                    Require(!control.tracking_idff_enabled && !control.tracking_ik_failed &&
+                                control.tracking_check_progress >= 0 && control.tracking_check_progress < 1 &&
+                                control.tracking_inverse_dynamics_torque == std::array<double, 3>{} &&
+                                control.tracking_ctc_torque == std::array<double, 3>{} &&
+                                control.tracking_ilc_torque == std::array<double, 3>{},
+                        "CAN preflight published active trajectory/feedforward instead of holding");
+                }
+
+                for (double value : control.tracking_ilc_torque)
+                    observed_ilc_torque |= std::abs(value) > 1e-5;
+
+                if (step > 1500) {
+                    Require(control.mode == 3 && control.tracking_plane == plane,
+                        "Tracking mode did not run over CAN");
+                    Require(control.tracking_idff_enabled == (tracking_method == TrackingMethod::InverseDynamics) &&
+                                control.tracking_method == tracking_method &&
+                                !control.tracking_ik_failed && control.tracking_ik_error_m <= 1e-5,
+                        "CAN Tracking did not publish the selected method and valid IK");
+
+                    if (tracking_method == TrackingMethod::Impedance)
+                        Require(control.tracking_inverse_dynamics_torque == std::array<double, 3>{} &&
+                                    control.tracking_ctc_torque == std::array<double, 3>{},
+                            "CAN impedance mode included dynamics feedforward torque");
+
+                    for (int i = 0; i < 3; ++i) {
+                        const double error = control.tracking_position_reference[i] -
+                                             physical->site_xpos[3 * tracking_site + i];
+                        tracking_error_squared += error * error;
+                        Require(snapshot().command[i].tau_ff == 0,
+                            "Tracking sent nonzero torque feedforward");
+                    }
+
+                    ++tracking_samples;
+                }
+            }
+
+            const double tracking_rmse = std::sqrt(tracking_error_squared / tracking_samples);
+            Require(observed_checking && !command().tracking_checking && command().tracking_check_progress == 1,
+                "CAN tracking did not publish a complete preflight before running");
+            if (use_ilc)
+                Require(command().tracking_ilc_updates > 0 && observed_ilc_torque,
+                    "ILC did not learn or publish a nonzero correction over actual CAN");
+            std::cout << "CAN tracking " << method << " " << TrackingPlaneName(plane)
+                      << " RMSE=" << 1000 * tracking_rmse << " mm\n";
+            Require(tracking_rmse < .025, "CAN tracking did not follow the Cartesian trajectory");
+        }
+
+        request(0);
+
+        for (int step = 0; step < 1000; ++step)
+            tick();
+
+        Require(command().holding, "Tracking could not return to homing");
+
+        request(4);
+
+        for (int step = 0; step < 100; ++step)
+            tick();
+
+        Require(command().mode == 4, "Ball mode did not start over CAN");
+        const auto initial_ball = command().ball_position;
+        const int ball_site = mj_name2id(model.get(), mjOBJ_SITE, "FL_foot");
+        const std::array<double, 3> ball_start_toe{
+            physical->site_xpos[3 * ball_site], physical->site_xpos[3 * ball_site + 1],
+            physical->site_xpos[3 * ball_site + 2]};
+        {
+            shm_utils::Lock lock(shm);
+            auto& control = shm_utils::Next(shm.control, shm.control_sequence);
+            control.requested_ball_position = {1.5, .14, .2};
+            ++control.ball_target_sequence;
+            ++shm.control_sequence;
+        }
+
+        for (int step = 0; step < 1000; ++step) {
+            tick();
+            const auto state = snapshot();
+
+            for (int i = 0; i < 3; ++i)
+                Require(state.command[i].tau_ff == 0 && std::isfinite(state.command[i].position),
+                    "Ball mode bypassed MIT position commands");
+        }
+
+        Require(command().ball_workspace_limited && command().ball_position[0] == 1.5,
+            "Ball outside target was lost/clamped rather than projected for the foot");
+        double ball_motion_squared = 0;
+
+        for (int i = 0; i < 3; ++i)
+            ball_motion_squared += std::pow(physical->site_xpos[3 * ball_site + i] - ball_start_toe[i], 2);
+
+        Require(std::sqrt(ball_motion_squared) > .01, "Ball mode did not move the physical foot over CAN");
+        request(0);
+
+        for (int step = 0; step < 1000; ++step)
+            tick();
+
+        request(4);
+
+        for (int step = 0; step < 50; ++step)
+            tick();
+
+        Require(command().ball_position[0] < .6,
+            "Ball mode reentry retained the old unreachable target");
+        request(0);
+
+        for (int step = 0; step < 1000; ++step)
+            tick();
+
+        std::cout << "PASS: Ball following MIT commands, outside target, reentry reset\n";
+
+        force_unreachable_model = true;
+        publish_model();
+        request(3);
+
+        for (int step = 0; step < 100; ++step)
+            tick();
+
+        Require(command().tracking_ik_failed && !command().tracking_idff_enabled,
+            "runtime IK failure did not publish HOLD with IDFF disabled");
+        if (use_ilc)
+            Require(command().tracking_ilc_state == TrackingILCState::IKHold &&
+                        command().tracking_ilc_torque == std::array<double, 3>{},
+                "IK failure retained an active ILC correction");
+        const auto stopped_reference = snapshot().reference;
+        const auto hold_sequence = command().command_sequence;
+        force_unreachable_model = false;
+
+        for (int step = 0; step < 500; ++step)
+            tick();
+
+        Require(command().tracking_ik_failed && command().command_sequence > hold_sequence + 100 &&
+                    snapshot().reference == stopped_reference,
+            "IK hold terminated control, resumed tracking or changed its captured target");
+
+        for (int i = 0; i < 3; ++i) {
+            Require(snapshot().command[i].tau_ff == 0 && snapshot().enabled[i],
+                "IK hold disabled the motor or used torque FF instead of holding");
+            Require(std::abs(physical->qpos[i] - stopped_reference[i]) < .05,
+                "actual CAN IK hold moved away from its captured pose");
+        }
+
+        request(0);
+
+        for (int step = 0; step < 1000; ++step)
+            tick();
+
+        request(3);
+
+        for (int step = 0; step < 100; ++step)
+            tick();
+
+        Require(command().mode == 3 && !command().tracking_ik_failed,
+            "Tracking reentry did not clear IK hold");
+        Require(command().tracking_ilc_updates == 0,
+            "Tracking reentry reused ILC corrections from the failed trajectory");
+        request(0);
+
+        for (int step = 0; step < 1000; ++step)
+            tick();
+
+        std::cout << "PASS: real CAN IK failure -> latched measured-pose hold, running loop, restart\n";
+
         ::kill(hal, SIGSTOP);
         mju_zero(physical->qvel, 3);
         std::this_thread::sleep_for(std::chrono::milliseconds(3));

@@ -1,6 +1,6 @@
 # Runtime transport and axis-to-CAN mapping. SHM is configured and owned by daemon.
 interface: vcan0
-frequency_hz: 500.0
+frequency_hz: 1000.0
 statistics_hz: 0.5
 # Reference bits/s for the load estimate; does not configure the CAN interface.
 bus_load_bitrate: 1000000

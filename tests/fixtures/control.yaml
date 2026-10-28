@@ -1,4 +1,8 @@
 robot: qhrr-05
+model_path: ../../models/qhrr-05/qhrr-05.xml  # Shared by all controller model calculations.
+
+workspace:  # 트래킹 실행 검사와 공 추종·W 오버레이가 함께 사용하는 기준
+  maximum_condition_number: 10.0  # 위치 야코비안 σ_max/σ_min 상한; 초과하는 트래킹 궤적은 시작 거부
 
 control:
   frequency_hz: 1000.0  # Independent monotonic wall-clock control loop.
@@ -51,6 +55,62 @@ magnetic_touch:
     minimum_singular_value_m: 0.01
     maximum_estimate_n: 50.0
     friction_velocity_rad_s: 0.01
+
+# World XY/XZ/YZ figure eight, centered at the toe on entry; GUI keys 1/2/3.
+tracking:  # 월드 XY/XZ/YZ 무한대 궤적 추종; 단축키 1/2/3, 변경 후 재시작
+  mode: inverse_dynamics  # inverse_dynamics / ctc / impedance; 기본 제어 방식은 이 항목 하나로 선택
+  trajectory:  # 궤적 생성; 월드 X/Y/Z, 제어 방식과 공통
+    timing: uniform_acceleration  # 가속도 크기 편차 완화; constant_speed: 기존 호 길이 정속
+    period_sec: 1.0  # 진입 이후 한 바퀴 주기(s); 두 timing 방식 모두 동일
+    ramp_sec: 1.0  # 진입 시 프로파일 진행 속도를 0부터 올리는 시간(s)
+    amplitude_m: [0.04, 0.02, 0.02]  # 월드 X/Y/Z 반폭(m); 전체 폭은 2배
+    arc_length_samples: 4096  # 경로·시간 적분 표 구간 수(정속 64..65536, 가속도 프로파일 256 이상)
+  ik:  # 모든 모드의 궤적 사전 검사; IDFF/CTC/ILC의 실행 중 관절 목표 생성에도 사용
+    tolerance_m: 1.0e-05  # IK 수렴 위치 오차(m)
+    max_iterations: 20  # 한 점을 푸는 IK 갱신 횟수 상한
+    trajectory_samples: 512  # 시작 전에 전체 경로를 검사하는 위상 구간 수(64..16384)
+    step_limit_rad: 0.2  # IK 1회 갱신의 관절 변화 벡터 크기 상한(rad)
+    damping_min_m: 0.001  # 비특이 자세의 기본 DLS 감쇠 λ_min(m)
+    damping_max_m: 0.03  # 특이점 접근 시 감쇠 상한 λ_max(m)
+    singularity_threshold_m: 0.02  # 최소 특이값이 이 값 미만이면 감쇠 증가(m)
+  motor:  # MIT 위치 surrogate 출력의 공통 내부 서보 게인; HR/HP/KP
+    kp_nm_rad: [40.0, 40.0, 40.0]  # 내부 위치 P(N·m/rad); 토크를 목표 각도로 환산
+    kd_nm_s_rad: [0.3, 0.3, 0.3]  # 내부 속도 D(N·m·s/rad); 토크 환산 시 중복 감쇠 보정
+  output_torque_limit_nm: [23.7, 23.7, 45.43]  # 기본 제어+ILC 합산 후 최종 관절 토크 상한(N·m); 모터 물리 제한과 별개
+  impedance:  # inverse_dynamics/impedance 모드의 작업공간 피드백; CTC에서는 사용하지 않음
+    stiffness_n_m: [1200.0, 1200.0, 1200.0]  # 월드 X/Y/Z 위치 오차 복원 강성(N/m)
+    damping_ns_m: [35.0, 35.0, 35.0]  # 월드 X/Y/Z 목표·현재 속도 오차 감쇠(N·s/m)
+  inverse_dynamics:  # mode=inverse_dynamics에서만 사용
+    alpha: 1.0  # 0: 현재 자세 중력, 1: 목표 상태 전체 역동역학; 중간값은 보간
+  ctc:  # mode=ctc에서만 사용; HR/HP/KP, 모터 서보 게인과 별개
+    kp_per_s2: [1600.0, 1600.0, 1600.0]  # 관절 위치 오차→목표 가속도 이득(1/s²)
+    kd_per_s: [80.0, 80.0, 80.0]  # 관절 속도 오차→목표 가속도 이득(1/s)
+  ilc:  # 모든 tracking 모드에 독립적으로 더하는 반복 학습 토크; HR/HP/KP
+    enabled: false  # true: 사용, false: 보상·학습 OFF
+    phase_bins: 128  # 한 주기의 학습 구간 수; 주기×제어 주파수 이하
+    warmup_cycles: 1  # 속도 램프와 위상 정렬 후 건너뛸 주기 수
+    position_gain_nm_rad: [4.0, 4.0, 4.0]  # 관절 위치 오차→다음 주기 학습 토크(N·m/rad); 유효 게인
+    velocity_gain_nm_s_rad: [0.1, 0.1, 0.1]  # 관절 속도 오차→다음 주기 학습 토크(N·m·s/rad); 유효 게인
+    retention: 1.0  # 기존 학습값 유지율(0 초과..1)
+    phase_lead_bins: 1  # 뒤쪽 위상 오차를 앞쪽 보상에 반영할 구간 수
+    smoothing_passes: 2  # 위상 방향 순환 대칭 3점 Q 필터의 반복 횟수
+    correction_limit_nm: [5.0, 5.0, 5.0]  # ILC 보상 자체의 절댓값 상한(N·m)
+    update_limit_nm: [0.5, 0.5, 0.5]  # 한 주기의 학습 갱신에서 구간별 보상 변화 상한(N·m)
+    blend_sec: 0.05  # 주기 경계의 이전·새 학습값 연결 시간(s); 위상 필터와 별개
+
+ball_following:  # 조이스틱 공 추종; GUI B, FK 격자와 관절 보간 사용
+  enabled: true  # 공 추종 모드 사용; false이면 B 진입 시 명시적 오류
+  workspace_margin_m: 0.02  # FK 작업공간 경계에서 안쪽으로 확보할 여유(m)
+  workspace_sampling_padding_m: 0.002  # 경계 메시·경로 샘플링 오차의 추가 여유(m)
+  workspace_grid_points: 19  # 각 관절 축의 FK 격자 개수; 증가 시 정확도·초기화 비용 증가
+  foot_speed_m_s: 0.08  # 공 속도와 독립적인 발끝 참조 경로 이동 속도(m/s)
+  ball_slow_speed_m_s: 0.03  # L2를 누를 때 공 이동 속도(m/s)
+  ball_normal_speed_m_s: 0.10  # 트리거를 누르지 않을 때 공 이동 속도(m/s)
+  ball_fast_speed_m_s: 0.30  # R2를 누를 때 공 이동 속도(m/s)
+  trigger_threshold: 0.3  # 트리거 눌림 판정(0..1); 둘 다 누르면 느린 속도 우선
+  kp_motor: [40.0, 40.0, 40.0]  # HR/HP/KP 관절 위치 P(N·m/rad)
+  kd_motor: [1.0, 1.0, 1.0]  # HR/HP/KP 관절 속도 D(N·m·s/rad)
+  torque_limit_nm: [23.7, 23.7, 45.43]  # 중력+PD 합산 토크 절댓값 상한(N·m)
 
 plots:
   history_sec: 10.0

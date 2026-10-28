@@ -1519,6 +1519,15 @@ void UiEvent(mjuiState* state) {
       case 15:            // Project magnetic touch controller
         if (sim->user_controller_callback_) sim->user_controller_callback_(it->itemid-13);
         break;
+      case 18:            // Project joystick ball following controller
+        if (sim->user_controller_callback_) sim->user_controller_callback_(4);
+        break;
+      case 19:            // Project pure damping controller
+        if (sim->user_controller_callback_) sim->user_controller_callback_(5);
+        break;
+      case 17:            // Project workspace tracking controller
+        if (sim->user_controller_callback_) sim->user_controller_callback_(3);
+        break;
       case 16:            // Live target force, without restarting the motion
         if (sim->user_force_callback_) sim->user_force_callback_(sim->user_target_force_);
         break;
@@ -2167,6 +2176,7 @@ void Simulate::Sync() {
   // update scene
   if (!is_passive_) {
     mjv_updateScene(m_, d_, &this->opt, &this->pert, &this->cam, mjCAT_ALL, &this->scn);
+    if (user_scene_callback_) user_scene_callback_(scn);
   } else {
     mjv_updateSceneState(m_, d_, &this->opt, &scnstate_);
 

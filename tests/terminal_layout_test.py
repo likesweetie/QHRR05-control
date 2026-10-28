@@ -213,10 +213,13 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             if caller:
                 wait_for(restored.exists, log_path.read_text)
                 assert restored.read_text() == '0', restored.read_text()
-                restored_title = subprocess.check_output(
-                    ['xprop', '-id', windows[0], '_NET_WM_NAME'], text=True
-                )
-                assert 'QHRR05-RESTORE-CHECK' in restored_title, restored_title
+                # Process exit precedes GNOME consuming the final PTY title sequence.
+                def restored_title():
+                    return subprocess.check_output(
+                        ['xprop', '-id', windows[0], '_NET_WM_NAME'], text=True
+                    )
+
+                wait_for(lambda: 'QHRR05-RESTORE-CHECK' in restored_title(), restored_title)
                 subprocess.run(['xdotool', 'windowclose', windows[0]], check=True)
                 process.wait(timeout=8)
                 print(

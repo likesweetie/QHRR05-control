@@ -2,6 +2,7 @@
 #include "simulation/simulation.hpp"
 #include "daemon/daemon.hpp"
 #include "simulation/telemetry.hpp"
+#include "simulation/workspace_overlay.hpp"
 #include "simulate.h"
 #include "glfw_adapter.h"
 
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -170,6 +172,26 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("could not allocate CAN model state");
         }
 
+        const auto configured_limits = config["tracking"]["output_torque_limit_nm"].as<std::vector<double>>();
+
+        if (configured_limits.size() != 3)
+            throw std::runtime_error("torque headroom needs three tracking torque limits");
+
+        std::array<double, 3> torque_limits;
+
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(configured_limits[i]) || configured_limits[i] <= 0 ||
+                !model->actuator_ctrllimited[i] || model->actuator_ctrlrange[2 * i] >= 0 ||
+                model->actuator_ctrlrange[2 * i + 1] <= 0)
+                throw std::runtime_error("invalid controller/model torque limits for headroom");
+
+            torque_limits[i] = std::min({configured_limits[i], -model->actuator_ctrlrange[2 * i],
+                model->actuator_ctrlrange[2 * i + 1]});
+
+            if (virtual_motors)
+                torque_limits[i] = std::min(torque_limits[i], virtual_motors->torque_limit_nm());
+        }
+
         const auto update_io = [&] {
             if (!virtual_motors)
                 return qhrr05::UpdateControlIO(shm,
@@ -213,7 +235,8 @@ int main(int argc, char** argv) {
         ControlData applied_command = update_io();
 
         std::uint64_t request_sequence = 0;
-        int mode = 0;  // Mutually exclusive: homing or gravity compensation.
+        int mode = 5;  // Startup/reset is pure damping. H explicitly starts homing.
+        TrackingPlane tracking_plane = TrackingPlane::XY;
         double next_sample = 0;
         bool holding_reported = false;
 
@@ -221,6 +244,7 @@ int main(int argc, char** argv) {
             shm_utils::Lock lock(shm);
             auto& control = shm_utils::Next(shm.control, shm.control_sequence);
             control.requested_mode = requested;
+            control.requested_tracking_plane = tracking_plane;
             control.target_force = target_force;
             ++control.motion_sequence;
             ++shm.control_sequence;
@@ -236,7 +260,7 @@ int main(int argc, char** argv) {
             reference = initial;
             next_sample = 0;
             holding_reported = false;
-            mode = 0;
+            mode = 5;
 
             request_sequence = request_control(mode);
             applied_command = update_io();
@@ -251,7 +275,24 @@ int main(int argc, char** argv) {
             holding_reported = false;
 
             std::cout << "[control] "
-                      << (mode == 0 ? "HOMING" : (mode == 1 ? "GRAVITY" : "MAGNETIC"))
+                      << (mode == 0 ? "HOMING" : mode == 1 ? "GRAVITY"
+                                              : mode == 2 ? "MAGNETIC"
+                                              : mode == 3 ? "TRACKING"
+                                              : mode == 4 ? "BALL FOLLOWING" : "DAMPING")
+                      << " at t=" << data->time << std::endl;
+        };
+
+        const auto select_tracking_plane = [&](TrackingPlane plane) {
+            if (mode == 3 && plane == tracking_plane)
+                return;
+
+            tracking_plane = plane;
+            mode = 3;
+            plots->Clear();
+            request_sequence = request_control(mode);
+            holding_reported = false;
+
+            std::cout << "[control] TRACKING " << TrackingPlaneName(plane)
                       << " at t=" << data->time << std::endl;
         };
 
@@ -259,10 +300,7 @@ int main(int argc, char** argv) {
             qhrr05::viewer::Sample frame;
             frame.time = data->time;
             frame.run_id = run_id;
-            frame.mode = applied_command.mode;
-            frame.control_time = applied_command.control_time;
             frame.reference = reference;
-            frame.magnetic = applied_command.magnetic;
 
             std::copy_n(data->mocap_pos + 3 * object_mocap, 3, frame.object_position.begin());
             const auto ground_truth = qhrr05::ReadContactGroundTruth(model.get(), data.get());
@@ -274,8 +312,24 @@ int main(int argc, char** argv) {
 
             {
                 shm_utils::Lock lock(shm);
-                frame.measured_torque =
-                    shm.motors[shm.motor_sequence % kShmBufferCount].motor_torque;
+                const auto& control = shm.control[shm.control_sequence % kShmBufferCount];
+                const auto& motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+                frame.mode = control.mode;
+                frame.control_time = control.control_time;
+                frame.magnetic = control.magnetic;
+                frame.tracking_reference = control.tracking_position_reference;
+                frame.tracking_plane = control.tracking_plane;
+                frame.motion_sequence = control.active_motion_sequence;
+                frame.tracking_method = control.tracking_method;
+                const bool ctc = control.tracking_method == TrackingMethod::CTC;
+                frame.dynamics_enabled = ctc ? control.mode == 3 && !control.tracking_ik_failed && !control.tracking_checking
+                                            : control.tracking_idff_enabled;
+                frame.dynamics_torque = ctc ? control.tracking_ctc_torque
+                                           : control.tracking_inverse_dynamics_torque;
+                frame.commanded_torque = motors.debug_torque;
+                frame.measured_torque = motors.motor_torque;
+                frame.ball_position = control.ball_position;
+                frame.ball_reference = control.ball_toe_reference;
                 auto& snapshot = shm_utils::Next(shm.simulation, shm.simulation_sequence);
                 snapshot.run_id = frame.run_id;
                 snapshot.time = frame.time;
@@ -365,6 +419,7 @@ int main(int argc, char** argv) {
             auto sim = std::make_unique<mujoco::Simulate>(
                 std::make_unique<mujoco::GlfwAdapter>(), &camera, &visual, &perturb, false);
             std::atomic<bool> failed{false};
+            qhrr05::viewer::WorkspaceOverlay workspace_overlay;
 
             sim->user_panel_percent_ = 40;
             sim->user_target_force_ = target_force;
@@ -383,6 +438,29 @@ int main(int argc, char** argv) {
 
             sim->user_reset_callback_ = [&] {
                 guarded(reset);
+            };
+
+            sim->user_scene_callback_ = [&](mjvScene& scene) {
+                guarded([&] {
+                    plots->AddToeTrail(scene);
+                    workspace_overlay.Draw(scene);
+
+                    if (applied_command.mode == 4) {
+                        if (scene.ngeom == scene.maxgeom)
+                            throw std::runtime_error("MuJoCo scene has no room for the target ball");
+
+                        // Slightly larger than the foot so the initial target remains visible.
+                        const double size[] = {.025, .025, .025};
+                        const float rgba[] = {.25f, .75f, 1.f, .35f};
+                        auto& ball = scene.geoms[scene.ngeom++];
+                        mjv_initGeom(&ball, mjGEOM_SPHERE, size,
+                            applied_command.ball_position.data(), nullptr, rgba);
+                        ball.category = mjCAT_DECOR;
+                        ball.objtype = mjOBJ_UNKNOWN;
+                        ball.objid = ball.segid = -1;
+                        ball.emission = .3f;
+                    }
+                });
             };
 
             sim->user_step_callback_ = [&] {
@@ -430,6 +508,11 @@ int main(int argc, char** argv) {
                     return true;
                 }
 
+                if (key == 'D' || key == 'd') {
+                    sim->user_controller_callback_(5);
+                    return true;
+                }
+
                 if (key == 'G' || key == 'g') {
                     sim->user_controller_callback_(1);
                     return true;
@@ -437,6 +520,32 @@ int main(int argc, char** argv) {
 
                 if (key == 'M' || key == 'm') {
                     sim->user_controller_callback_(2);
+                    return true;
+                }
+
+                if (key == 'T' || key == 't') {
+                    sim->user_controller_callback_(3);
+                    return true;
+                }
+
+                if (key == 'B' || key == 'b') {
+                    sim->user_controller_callback_(4);
+                    return true;
+                }
+
+                if ((key == 'W' || key == 'w') && !sim->ui0.editsect && !sim->ui1.editsect &&
+                    !sim->uistate.control && !sim->uistate.alt) {
+                    guarded([&] {
+                        workspace_overlay.Toggle(options.config);
+                    });
+                    return true;
+                }
+
+                if (key >= '1' && key <= '3' && !sim->ui0.editsect && !sim->ui1.editsect &&
+                    !sim->uistate.control && !sim->uistate.alt) {
+                    guarded([&] {
+                        select_tracking_plane(static_cast<TrackingPlane>(key - '1'));
+                    });
                     return true;
                 }
 
@@ -452,14 +561,14 @@ int main(int argc, char** argv) {
                 const auto rect = sim->uistate.rect[3];
                 const int width = rect.width * sim->user_panel_percent_ / 100;
                 plots->Draw({rect.left + rect.width - width, rect.bottom, width, rect.height},
-                    &sim->platform_ui->mjr_context());
+                    &sim->platform_ui->mjr_context(), torque_limits);
 
                 double max_error = 0;
 
                 for (int i = 0; i < 3; ++i)
                     max_error = std::max(max_error, std::abs(home[i] - data->qpos[i]));
 
-                char status[512];
+                char status[2048];
                 std::snprintf(status,
                     sizeof(status),
                     "%s%s | sim=%.2f s ctrl=%.2f s | home error=%.4f rad",
@@ -470,7 +579,91 @@ int main(int argc, char** argv) {
                     applied_command.control_time,
                     max_error);
 
-                if (mode == 2) {
+                if (mode == 5) {
+                    const auto& target = applied_command.damping_toe_reference;
+
+                    if (applied_command.mode == 5 && applied_command.damping_reference_valid)
+                        std::snprintf(status, sizeof(status),
+                            "DAMPING%s | kp=0 kd=1 | no position stiffness\n"
+                            "Toe target: %.3f / %.3f / %.3f m\nsim=%.2f ctrl=%.2f",
+                            !sim->run ? " / PAUSED" : "", target[0], target[1], target[2],
+                            data->time, applied_command.control_time);
+                    else
+                        std::snprintf(status, sizeof(status),
+                            "DAMPING | kp=0 kd=1 | awaiting controller/model sample");
+                } else if (mode == 4) {
+                    double error_squared = 0;
+
+                    for (int i = 0; i < 3; ++i)
+                        error_squared += std::pow(applied_command.ball_position[i] -
+                                                  data->site_xpos[3 * toe_site + i], 2);
+
+                    std::snprintf(status, sizeof(status),
+                        "BALL FOLLOWING%s | %s\nBall error=%.1f mm | ball speed=%.2f m/s\n%s | torque=%s",
+                        !sim->run ? " / PAUSED" : "",
+                        applied_command.joystick_connected ? "JOYSTICK CONNECTED" : "NO JOYSTICK",
+                        1000 * std::sqrt(error_squared), applied_command.ball_speed_m_s,
+                        applied_command.ball_entering_workspace ? "ENTERING SAFE WORKSPACE"
+                        : applied_command.ball_workspace_limited ? "TARGET PROJECTED TO FK WORKSPACE"
+                                                                : "FOLLOWING",
+                        applied_command.ball_torque_saturated ? "SATURATED" : "OK");
+                } else if (mode == 3) {
+                    double error_squared = 0;
+                    bool reference_outside_limits = false;
+                    const bool ctc = applied_command.tracking_method == TrackingMethod::CTC;
+                    const bool impedance = applied_command.tracking_method == TrackingMethod::Impedance;
+                    const bool controller_enabled = applied_command.mode == 3 &&
+                        !applied_command.tracking_ik_failed && !applied_command.tracking_checking &&
+                        (ctc || impedance || applied_command.tracking_idff_enabled);
+
+                    for (int i = 0; i < 3; ++i) {
+                        const double error = applied_command.tracking_position_reference[i] -
+                                             data->site_xpos[3 * toe_site + i];
+                        error_squared += error * error;
+                        reference_outside_limits |= reference[i] < model->jnt_range[2 * i] ||
+                                                    reference[i] > model->jnt_range[2 * i + 1];
+                    }
+
+                    std::snprintf(status,
+                        sizeof(status),
+                        "%s %s%s | sim=%.2f ctrl=%.2f\nToe error=%.2f mm | torque=%s\n%s=%s | IK error=%.3f mm | q_d=%s | check=%.0f%%",
+                        applied_command.tracking_checking ? "CHECKING TRAJECTORY - HOLD"
+                            : applied_command.tracking_ik_failed ? "IK / CONDITION BLOCKED - HOLD" : "TRACKING",
+                        TrackingPlaneName(applied_command.tracking_plane),
+                        !sim->run ? " / PAUSED" : "",
+                        data->time,
+                        applied_command.control_time,
+                        1000 * std::sqrt(error_squared),
+                        applied_command.tracking_torque_saturated ? "SATURATED" : "OK",
+                        ctc ? "CTC" : impedance ? "IMPEDANCE" : "IDFF",
+                        controller_enabled ? "ON" : "OFF",
+                        1000 * applied_command.tracking_ik_error_m,
+                        reference_outside_limits ? "OUTSIDE LIMITS" : "OK",
+                        100 * applied_command.tracking_check_progress);
+
+                    const auto used = std::strlen(status);
+
+                    if (applied_command.tracking_ilc_state == TrackingILCState::Off) {
+                        std::snprintf(status + used, sizeof(status) - used, "\nILC: OFF");
+                    } else {
+                        char rmse[32];
+
+                        if (std::isfinite(applied_command.tracking_ilc_last_rmse_m))
+                            std::snprintf(rmse, sizeof(rmse), "%.2f mm", 1000 * applied_command.tracking_ilc_last_rmse_m);
+                        else
+                            std::snprintf(rmse, sizeof(rmse), "N/A");
+
+                        const auto& ilc_torque = applied_command.tracking_ilc_torque;
+                        std::snprintf(status + used, sizeof(status) - used,
+                            "\nILC: %s | updates=%llu skip=%llu | lap RMS=%s"
+                            "\nILC HR/HP/KP: %+.2f / %+.2f / %+.2f Nm%s",
+                            TrackingILCStateName(applied_command.tracking_ilc_state),
+                            static_cast<unsigned long long>(applied_command.tracking_ilc_updates),
+                            static_cast<unsigned long long>(applied_command.tracking_ilc_skipped_cycles),
+                            rmse, ilc_torque[0], ilc_torque[1], ilc_torque[2],
+                            applied_command.tracking_ilc_limited ? " [ILC LIMIT]" : "");
+                    }
+                } else if (mode == 2) {
                     const auto& magnetic = applied_command.magnetic;
                     const auto truth = qhrr05::ReadContactGroundTruth(model.get(), data.get());
                     const double moment =
@@ -491,7 +684,16 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(magnetic.event_sequence));
                 }
 
+                if (mode == 3) {
+                    const auto headroom = plots->TorqueHeadroom(torque_limits, sample_hz);
+                    const auto used = std::strlen(status);
+                    std::snprintf(status + used, sizeof(status) - used, "%s", headroom.c_str());
+                }
+
                 const mjrRect scene_rect{rect.left, rect.bottom, rect.width - width, rect.height};
+                const auto used = std::strlen(status);
+                std::snprintf(status + used, sizeof(status) - used, "\nWorkspace [W]: %s",
+                    workspace_overlay.Status().c_str());
                 mjr_overlay(mjFONT_NORMAL,
                     mjGRID_TOPLEFT,
                     scene_rect,
@@ -501,7 +703,7 @@ int main(int argc, char** argv) {
                 mjr_overlay(mjFONT_NORMAL,
                     mjGRID_BOTTOMLEFT,
                     scene_rect,
-                    "H: home  G: gravity  M: magnetic  SPACE: pause  R: reset  ESC: exit",
+                    "D: damping  H: home  G: gravity  M: magnetic  T: tracking  B: ball\n1: XY  2: XZ  3: YZ  W: workspace  L2: slow ball  R2: fast ball\nSPACE: pause  R: reset to damping  ESC: exit",
                     nullptr,
                     &sim->platform_ui->mjr_context());
             };

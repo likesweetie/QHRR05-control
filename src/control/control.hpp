@@ -3,6 +3,8 @@
 #include "motion_controllers/homing_controller.hpp"
 #include "motion_controllers/gravity_compensation_controller.hpp"
 #include "motion_controllers/magnetic_touch_controller.hpp"
+#include "motion_controllers/tracking_controller.hpp"
+#include "motion_controllers/ball_following_controller.hpp"
 #include <array>
 #include <memory>
 #include <string>
@@ -42,15 +44,24 @@ private:
     std::array<double, 3> previous_velocity_{};
 
     double target_force_ = 3.0;
-    int mode_ = -1, requested_mode_ = 0;
+    int mode_ = -1, requested_mode_ = 5;
+    TrackingPlane requested_tracking_plane_ = TrackingPlane::XY;
     std::uint64_t request_sequence_ = 0, active_request_sequence_ = 0;
     std::uint64_t started_ns_ = 0, next_cycle_ns_ = 0, period_ns_ = 0;
     double control_time_ = 0;
     bool holding_ = false;
+    std::array<double, 3> damping_toe_reference_{};
+    bool damping_reference_valid_ = false;
+    std::array<double, 3> joystick_direction_{}, requested_ball_position_{};
+    double joystick_l2_ = 0, joystick_r2_ = 0;
+    bool joystick_connected_ = false;
+    std::uint64_t ball_target_sequence_ = 0, active_ball_target_sequence_ = 0;
 
     std::unique_ptr<HomingController> homing_;
     std::unique_ptr<GravityCompensationController> gravity_;
     std::unique_ptr<MagneticTouchController> magnetic_;
+    std::unique_ptr<TrackingController> tracking_;
+    std::unique_ptr<BallFollowingController> ball_;
 
     std::array<double, 3> torque_command_{}, position_reference_{};
     std::array<MitCommand, 3> motor_targets_{};

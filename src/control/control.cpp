@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iostream>
 #include <yaml-cpp/yaml.h>
 
 namespace qhrr05 {
@@ -10,7 +11,9 @@ TaskController::TaskController(
     : shm_(shm_name), without_can_(without_can),
       homing_(std::make_unique<HomingController>(config_path)),
       gravity_(std::make_unique<GravityCompensationController>(config_path)),
-      magnetic_(std::make_unique<MagneticTouchController>(config_path)) {
+      magnetic_(std::make_unique<MagneticTouchController>(config_path)),
+      tracking_(std::make_unique<TrackingController>(config_path)),
+      ball_(std::make_unique<BallFollowingController>(config_path)) {
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
@@ -77,12 +80,21 @@ bool TaskController::ReadInput() {
 
         const auto& control = shm.control[shm.control_sequence % kShmBufferCount];
         requested_mode_ = control.requested_mode;
+        requested_tracking_plane_ = control.requested_tracking_plane;
         request_sequence_ = control.motion_sequence;
         target_force_ = control.target_force;
+        joystick_direction_ = control.joystick_axes;
+        joystick_l2_ = control.joystick_l2;
+        joystick_r2_ = control.joystick_r2;
+        joystick_connected_ = control.joystick_connected;
+        requested_ball_position_ = control.requested_ball_position;
+        ball_target_sequence_ = control.ball_target_sequence;
     }
 
-    if (requested_mode_ < 0 || requested_mode_ > 2)
+    if (requested_mode_ < 0 || requested_mode_ > 5)
         throw std::runtime_error("invalid controller mode");
+
+    TrackingPlaneAxes(requested_tracking_plane_);
 
     bool fresh = false;
     std::uint64_t newest_ns = measurement_ns_;
@@ -127,13 +139,26 @@ bool TaskController::ReadInput() {
 void TaskController::Control() {
     control_time_ = (shm_utils::MonotonicNs() - started_ns_) / 1e9;
 
-    if (requested_mode_ != mode_ || request_sequence_ != active_request_sequence_) {
+    if (requested_mode_ != mode_ || request_sequence_ != active_request_sequence_ ||
+        (requested_mode_ == 3 && requested_tracking_plane_ != tracking_->plane())) {
         if (requested_mode_ == 0)
             homing_->Start(control_time_, joint_position_.data());
         else if (requested_mode_ == 1)
             gravity_->Start(joint_position_.data());
-        else
+        else if (requested_mode_ == 2)
             magnetic_->Start(control_time_, toe_position_);
+        else if (requested_mode_ == 3)
+            tracking_->Start(control_time_, toe_position_, joint_position_, requested_tracking_plane_);
+        else if (requested_mode_ == 4) {
+            ball_->Start(joint_position_);
+            active_ball_target_sequence_ = ball_target_sequence_;
+        } else {
+            position_reference_ = joint_position_;
+            damping_toe_reference_.fill(0);
+            damping_reference_valid_ = false;
+            std::cout << "[control] DAMPING kp=0 kd=1; awaiting initial model sample" << std::endl;
+        }
+
         mode_ = requested_mode_;
         active_request_sequence_ = request_sequence_;
     }
@@ -154,7 +179,7 @@ void TaskController::Control() {
             bias_torque_.data(),
             torque_command_.data(),
             position_reference_.data());
-    } else {
+    } else if (mode_ == 2) {
         magnetic_->Compute(control_time_,
             joint_position_,
             joint_velocity_,
@@ -174,14 +199,58 @@ void TaskController::Control() {
             target_force_,
             torque_command_,
             position_reference_);
+    } else if (mode_ == 3) {
+        tracking_->Compute(control_time_,
+            joint_position_,
+            joint_velocity_,
+            gravity_torque_,
+            jacobian_,
+            toe_position_,
+            torque_command_);
+
+        position_reference_ = tracking_->joint_reference();
+    } else if (mode_ == 4) {
+        if (ball_target_sequence_ != active_ball_target_sequence_) {
+            ball_->SetBallPosition(requested_ball_position_);
+            active_ball_target_sequence_ = ball_target_sequence_;
+        }
+
+        ball_->Compute(period_ns_ / 1e9, joystick_direction_, joystick_l2_, joystick_r2_,
+            joystick_connected_, joint_position_, joint_velocity_, gravity_torque_, torque_command_);
+        position_reference_ = ball_->joint_reference();
+    } else {
+        if (!damping_reference_valid_ && model_sequence_) {
+            for (double value : toe_position_)
+                if (!std::isfinite(value))
+                    throw std::runtime_error("non-finite damping entry toe position");
+
+            position_reference_ = joint_position_;
+            damping_toe_reference_ = toe_position_;
+            damping_reference_valid_ = true;
+            std::cout << "[control] DAMPING target captured: [" << damping_toe_reference_[0] << ", "
+                      << damping_toe_reference_[1] << ", " << damping_toe_reference_[2]
+                      << "] m (no position stiffness)" << std::endl;
+        }
+
+        for (int i = 0; i < 3; ++i)
+            torque_command_[i] = -joint_velocity_[i];
     }
 
-    if (!without_can_) {
+    if (!without_can_ && mode_ == 5) {
+        // Pure MIT damping has no position surrogate and never divides by kp=0.
+        for (int i = 0; i < 3; ++i)
+            motor_targets_[i] = {position_reference_[i] - encoder_origin_[i], 0, 0, 1, 0};
+    } else if (!without_can_) {
         const auto& kp = mode_ == 0 ? homing_->kp()
-                                    : (mode_ == 1 ? gravity_->kp_motor() : magnetic_->kp_motor());
+                        : mode_ == 1 ? gravity_->kp_motor()
+                        : mode_ == 2 ? magnetic_->kp_motor()
+                        : mode_ == 3 ? tracking_->kp_motor() : ball_->kp_motor();
         const auto& kd = mode_ == 0 ? homing_->kd()
-                                    : (mode_ == 1 ? gravity_->kd_motor() : magnetic_->kd_motor());
+                        : mode_ == 1 ? gravity_->kd_motor()
+                        : mode_ == 2 ? magnetic_->kd_motor()
+                        : mode_ == 3 ? tracking_->kd_motor() : ball_->kd_motor();
         const auto home = homing_->Reference(control_time_);
+
         for (int i = 0; i < 3; ++i) {
             // Remove the motor D term already included in torque_command_, then
             // represent the resulting effort as an actual MIT position target.
@@ -225,7 +294,44 @@ void TaskController::WriteOutput() {
     control.control_time = control_time_;
     control.mode = mode_;
     control.holding = holding_;
+    control.damping_toe_reference = mode_ == 5 ? damping_toe_reference_ : std::array<double, 3>{};
+    control.damping_reference_valid = mode_ == 5 && damping_reference_valid_;
     control.magnetic = mode_ == 2 ? magnetic_->telemetry() : MagneticTelemetry{};
+    control.tracking_position_reference = mode_ == 3 ? tracking_->toe_reference()
+                                                    : std::array<double, 3>{};
+    control.tracking_velocity_reference = mode_ == 3 ? tracking_->toe_velocity_reference()
+                                                    : std::array<double, 3>{};
+    control.tracking_torque_saturated = mode_ == 3 && tracking_->torque_saturated();
+    control.tracking_plane = tracking_->plane();
+    control.tracking_method = tracking_->method();
+    control.tracking_acceleration_reference = mode_ == 3 ? tracking_->toe_acceleration_reference()
+                                                        : std::array<double, 3>{};
+    control.tracking_joint_velocity_reference = mode_ == 3 ? tracking_->joint_velocity_reference()
+                                                          : std::array<double, 3>{};
+    control.tracking_joint_acceleration_reference =
+        mode_ == 3 ? tracking_->joint_acceleration_reference() : std::array<double, 3>{};
+    control.tracking_inverse_dynamics_torque = mode_ == 3 ? tracking_->inverse_dynamics_torque()
+                                                         : std::array<double, 3>{};
+    control.tracking_ctc_torque = mode_ == 3 ? tracking_->ctc_torque() : std::array<double, 3>{};
+    control.tracking_ilc_state = mode_ == 3 ? tracking_->ilc().state() : TrackingILCState::Off;
+    control.tracking_ilc_torque = mode_ == 3 ? tracking_->ilc().torque() : std::array<double, 3>{};
+    control.tracking_ilc_updates = mode_ == 3 ? tracking_->ilc().updates() : 0;
+    control.tracking_ilc_skipped_cycles = mode_ == 3 ? tracking_->ilc().skipped_cycles() : 0;
+    control.tracking_ilc_limited = mode_ == 3 && tracking_->ilc().limited();
+    control.tracking_ilc_last_rmse_m = mode_ == 3 ? tracking_->ilc().last_rmse_m() : 0;
+    control.tracking_idff_enabled = mode_ == 3 && tracking_->inverse_dynamics_enabled() &&
+        !tracking_->ik_failed() && !tracking_->checking();
+    control.tracking_ik_failed = mode_ == 3 && tracking_->ik_failed();
+    control.tracking_checking = mode_ == 3 && tracking_->checking();
+    control.tracking_check_progress = mode_ == 3 ? tracking_->check_progress() : 0;
+    control.tracking_ik_error_m = mode_ == 3 ? tracking_->ik_error() : 0;
+    control.ball_position = mode_ == 4 ? ball_->ball_position() : std::array<double, 3>{};
+    control.ball_toe_reference = mode_ == 4 ? ball_->toe_reference() : std::array<double, 3>{};
+    control.ball_nearest_position = mode_ == 4 ? ball_->nearest_position() : std::array<double, 3>{};
+    control.ball_workspace_limited = mode_ == 4 && ball_->workspace_limited();
+    control.ball_entering_workspace = mode_ == 4 && ball_->entering_workspace();
+    control.ball_torque_saturated = mode_ == 4 && ball_->torque_saturated();
+    control.ball_speed_m_s = mode_ == 4 ? ball_->ball_speed() : 0;
 
     ++shm.motor_sequence;
     ++shm.control_sequence;

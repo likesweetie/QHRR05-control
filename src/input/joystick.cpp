@@ -4,6 +4,9 @@
 #include <cerrno>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
+#include <vector>
+#include <yaml-cpp/yaml.h>
 
 /*
  * Xbox Controller index map on Linux joystick API (/dev/input/jsX)
@@ -86,8 +89,40 @@
  *
  */
 
-Joystick::Joystick(const char* device_id, ShmData* shared_memory)
-    : device_id_(device_id), shared_memory_(shared_memory) {
+Joystick::Joystick(const char* config_path, ShmData* shared_memory)
+    : shared_memory_(shared_memory) {
+    const auto config = YAML::LoadFile(config_path);
+    device_id_ = config["device"].as<std::string>();
+    const auto indices = config["direction_axes"].as<std::vector<int>>();
+    const auto invert = config["direction_invert"].as<std::vector<bool>>();
+    const double deadband = config["deadband"].as<double>();
+    const auto triggers = config["trigger_axes"].as<std::vector<int>>();
+    const auto rest = config["trigger_rest"].as<std::vector<double>>();
+    const auto pressed = config["trigger_pressed"].as<std::vector<double>>();
+
+    if (device_id_.empty() || indices.size() != 3 || invert.size() != 3 ||
+        triggers.size() != 2 || rest.size() != 2 || pressed.size() != 2 ||
+        !std::isfinite(deadband) || deadband < 0 || deadband >= 1)
+        throw std::runtime_error("invalid joystick mapping configuration");
+
+    for (int i = 0; i < 3; ++i) {
+        if (indices[i] < 0 || indices[i] >= int(kMaxAxes))
+            throw std::runtime_error("joystick direction axis out of range");
+
+        axis_mappings_[i] = {static_cast<uint8_t>(indices[i]), TargetType::LinVel,
+            static_cast<uint8_t>(i), 1.f, invert[i], static_cast<float>(deadband)};
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        if (triggers[i] < 0 || triggers[i] >= int(kMaxAxes) || !std::isfinite(rest[i]) ||
+            !std::isfinite(pressed[i]) || rest[i] < -1 || rest[i] > 1 ||
+            pressed[i] < -1 || pressed[i] > 1 || pressed[i] == rest[i])
+            throw std::runtime_error("invalid joystick trigger mapping");
+
+        trigger_axes_[i] = triggers[i];
+        trigger_rest_[i] = rest[i];
+        trigger_pressed_[i] = pressed[i];
+    }
 }
 
 void Joystick::initialize() {
@@ -96,7 +131,10 @@ void Joystick::initialize() {
     axes_.fill(0.0f);
     buttons_.fill(false);
 
-    js_ = open(device_id_, O_RDONLY | O_NONBLOCK);
+    for (int i = 0; i < 2; ++i)
+        axes_[trigger_axes_[i]] = trigger_rest_[i];
+
+    js_ = open(device_id_.c_str(), O_RDONLY | O_NONBLOCK);
 
     if (js_ == -1) {
         std::cerr << "Failed to open joystick device: " << device_id_ << ", errno: " << errno
@@ -105,6 +143,7 @@ void Joystick::initialize() {
     }
 
     std::cout << "Joystick device opened: " << device_id_ << std::endl;
+    Publish();
 }
 
 void Joystick::start() {
@@ -220,6 +259,12 @@ void* Joystick::loop() {
 
     running_ = false;
 
+    try {
+        Publish(false);
+    } catch (const std::exception& error) {
+        std::cerr << "[joystick] disconnect publication failed: " << error.what() << std::endl;
+    }
+
     return nullptr;
 }
 
@@ -241,7 +286,7 @@ void Joystick::processEvent_(const js_event& event) {
     }
 }
 
-void Joystick::Publish() {
+void Joystick::Publish(bool connected) {
     ControlData input;
 
     for (const auto& mapping : axis_mappings_) {
@@ -269,6 +314,19 @@ void Joystick::Publish() {
     auto& next = shm_utils::Next(shared_memory_->control, shared_memory_->control_sequence);
     next.joystick_axes = input.joystick_axes;
     next.joystick_buttons = input.joystick_buttons;
+    next.joystick_connected = connected;
+    next.joystick_l2 = connected ? std::clamp(
+        (axes_[trigger_axes_[0]] - trigger_rest_[0]) /
+            (trigger_pressed_[0] - trigger_rest_[0]), 0.0, 1.0) : 0;
+    next.joystick_r2 = connected ? std::clamp(
+        (axes_[trigger_axes_[1]] - trigger_rest_[1]) /
+            (trigger_pressed_[1] - trigger_rest_[1]), 0.0, 1.0) : 0;
+
+    if (!connected) {
+        next.joystick_axes.fill(0);
+        next.joystick_buttons.fill(false);
+    }
+
     ++next.joystick_sequence;
     next.joystick_published_ns = shm_utils::MonotonicNs();
     ++shared_memory_->control_sequence;

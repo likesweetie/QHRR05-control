@@ -1,6 +1,6 @@
 # qhrr-05 제어 검증
 
-고정 베이스 3자유도 다리(HR / HP / KP)의 호밍·중력보상·Magnetic Touch를 검증하는 C++ 프로그램입니다. 모델은 Go2 몸통과 FL 다리만 사용합니다.
+고정 베이스 3자유도 다리(HR / HP / KP)의 호밍·중력보상·Magnetic Touch·작업공간 Tracking·조이스틱 공 추종을 검증하는 C++ 프로그램입니다. 모델은 Go2 몸통과 FL 다리만 사용합니다.
 
 기본 제어 경로는 **TaskController → SHM → CAN HAL → vcan → MuJoCo 가상 모터**입니다. 모터는 수신한 MIT 위치·속도 목표와 kp/kd로 내부 PD를 계산합니다. 관절 위치·속도·Iq는 CAN 응답으로 돌아오며 제어기는 이를 사용합니다. tau_ff는 사용하지 않습니다. 기존 SHM 토크 구동은 `--without-can` 디버깅 모드에만 남겼습니다.
 
@@ -16,7 +16,7 @@ cmake --build build --parallel 2
 ./scripts/run_daemon.sh
 ```
 
-daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·시뮬레이터·TaskController·shm_logger를 직접 자식으로 실행**하고 종료·자식 회수를 관리합니다. 각 프로그램의 출력과 기본 프로세스 통계를 별도 GNOME 터미널에 표시하며, CAN 창에는 채널 점유율 바도 표시합니다. 창에서는 동일 실행 파일의 출력 전용 함수만 실행하고, 프로세스 수명 관리는 원래 daemon 하나가 담당합니다. 핵심 프로세스의 Ctrl+C·터미널/시뮬레이터 종료 시 나머지도 정리합니다. 선택적 로거의 종료·창 닫기는 로거만 재시작하며 제어를 중단하지 않습니다.
+daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·시뮬레이터·TaskController·조이스틱 입력·shm_logger를 직접 자식으로 실행**하고 종료·자식 회수를 관리합니다. 각 프로그램의 출력과 기본 프로세스 통계를 별도 GNOME 터미널에 표시하며, CAN 창에는 채널 점유율 바도 표시합니다. 창에서는 동일 실행 파일의 출력 전용 함수만 실행하고, 프로세스 수명 관리는 원래 daemon 하나가 담당합니다. 핵심 프로세스의 Ctrl+C·터미널/시뮬레이터 종료 시 나머지도 정리합니다. 선택적 로거의 종료·창 닫기는 로거만 재시작하며 제어를 중단하지 않습니다.
 
 기본 런처는 **호스트 네트워크에 vcan0를 생성하고 UP으로 올린 뒤** daemon을 실행합니다. 이미 UP인 vcan은 재사용하고, DOWN이면 활성화합니다. 같은 이름의 다른 종류 장치는 변경하지 않고 실패합니다. 최초 생성·활성화에 권한이 필요하면 해당 `ip link` 명령에만 sudo를 사용하며 daemon·GUI·제어기는 현재 사용자로 실행합니다. vcan 준비나 HAL 시작 실패를 디버깅 경로로 대체하지 않습니다.
 
@@ -41,6 +41,45 @@ daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·
 ./build/qhrr-logctl status
 ./build/qhrr-logctl trigger
 ```
+
+## 제어 모드 빠른 사용
+
+시작·리셋은 **Damping**이며 자동 호밍하지 않습니다. **H로 호밍 후 T/1/2/3 또는 B**를 선택합니다. 트래킹은 전체 경로 검사 통과 후 실행하며, 거부 시 이유를 표시하고 자세를 유지합니다.
+
+| 키 | 기능 |
+| --- | --- |
+| D / H | 감쇠 / 호밍 |
+| G / M | 중력 또는 전체 bias 보상 / Magnetic Touch |
+| T / 1 / 2 / 3 | 마지막 평면 / XY / XZ / YZ 무한대 궤적 |
+| B / W | 조이스틱 공 추종 / 조건수 기반 작업공간 표시 |
+| Space / R / Esc | 물리 일시정지 / Damping으로 리셋 / 종료 |
+
+Ctrl+오른쪽 드래그로 선택한 다리에 외력을 주거나 주황색 물체를 이동합니다. **상태 머신·IDFF/CTC/ILC·가속도 프로파일·검사 기준·조이스틱·Iq 센서**는 [제어 모드와 시뮬레이션](docs/control.md)에서 관리합니다.
+
+## 설정과 코드 위치
+
+| 파일·디렉터리 | 역할 |
+| --- | --- |
+| [control.yaml](config/control/control.yaml) | 제어 주파수, 각 모션의 게인·목표·한계, RFOB, 그래프 주기 |
+| [input.yaml](config/input/input.yaml) | 조이스틱 장치·축·트리거·데드밴드 |
+| [daemon.yaml](config/daemon/daemon.yaml) | SHM 이름·기본 `processes`와 명시적 CAN 없는 `debug_processes` |
+| [can_hal.yaml](config/can_hal/can_hal.yaml) | HAL 인터페이스·주기·CAN ID 배치·모터 설정 경로 |
+| [simulation.yaml](config/simulation/simulation.yaml) | 시뮬레이션 실제 모터 특성·가상 Iq 센서 ON/OFF·오차 파라미터 |
+| [ak10_9_v3.yaml](config/motor/ak10_9_v3.yaml) | 모터 MIT 규약: V_MAX·T_MAX·Kt·감속비·Kd scale |
+| [shm_logger.yaml](config/shm_logger/shm_logger.yaml) | 500 Hz MCAP·Flight Recorder·저장 한계·건전성·세션 설정 |
+| [apps/](apps/) | daemon·TaskController·CAN HAL·MuJoCo·로거·입력 프로그램의 실행 진입점 |
+| [src/ipc/](src/ipc/) | SHM 전체 배치·메모리 매핑/동기화·공유 값 타입 |
+| [src/control/](src/control/) | `TaskController`의 제어기 핸들 소유, 입력 → 제어 → 출력 → 주기 대기 |
+| [src/motion_controllers/](src/motion_controllers/) | 호밍·중력보상·Magnetic·Tracking/ILC·공 추종·외력 관측기 |
+| [src/simulation/](src/simulation/) | 물리·모델 IO·가상 Iq 센서·그래프 |
+| [src/motor_can_protocol/](src/motor_can_protocol/) | OpenRobot MIT 코덱 |
+| [src/daemon/](src/daemon/) | 기존 `Daemon` 프로세스 관리·터미널 릴레이·SHM 통계 |
+| [src/input/](src/input/) | 조이스틱 입력 |
+| [src/shm_logger/](src/shm_logger/) | SHM 복사·명시적 스키마·MCAP/RAM 이력·세션/저장 정책·관리 소켓 |
+| [third_party/mujoco_simulate/](third_party/mujoco_simulate/) | 프로젝트에서 사용하는 MuJoCo GUI 복사본·출처·해시 |
+| [tests/](tests/) | 기능·CAN·SHM·프로세스·GUI 회귀 시험 |
+
+실행 진입점은 `apps/<프로그램>/main.cpp`, 구현·헤더는 `src/<모듈>/`에 둡니다. `TaskController`는 별도 런타임 래퍼 없이 입력 → 제어 → 출력 → 주기 대기를 수행하며 모션 제어기를 소유합니다. 각 모션 클래스는 전달받은 YAML 경로에서 자기 설정을 읽습니다. 공통 조건수 상한은 `workspace.maximum_condition_number`, 계산 모델은 최상위 `model_path` 하나를 사용합니다.
 
 ## 프로세스 터미널과 SHM 통계
 
@@ -100,114 +139,11 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 | IPC Overhead | 작성자의 copy/publish/unlock 비용과 소비자의 lock/read/copy 비용을 각각 계측해야 합니다. 전달 지연을 따로 구하려면 동일 시퀀스의 발행 완료·수신 완료 시각도 연결해야 합니다. 현재 타임스탬프 차이는 순수 IPC 비용이 아닙니다. |
 | 발행별 실제 지터·소비자별 누락 수 | 작성자/소비자에서 모든 발행·읽기 이벤트를 계측하고, 로컬 집계값이나 별도 trace ring으로 내보내야 합니다. 최신값 두 슬롯만으로 중간 이벤트를 복원할 수 없습니다. |
 
-## GUI 조작
-
-| 입력 | 동작 |
-| --- | --- |
-| H | 5차 보간 호밍 후 순수 PD 자세 유지 |
-| G | 중력보상. 자세 강성·감쇠는 설정값 사용 |
-| M | Magnetic Touch: FREE → 접촉 후보 → 힘 추종 → 해제 |
-| Target [N] | 목표 접촉력 변경. 접촉 상태는 유지 |
-| Space | 물리 일시정지·재개. 제어 루프는 계속 동작 |
-| R | 물리 초기화와 재호밍 요청 |
-| Esc | 종료 |
-
-몸체를 왼쪽 더블클릭하여 선택한 뒤 Ctrl+오른쪽 드래그로 외력을 가합니다. 주황색 물체도 같은 방식으로 선택·이동하며, Ctrl+Shift+오른쪽 드래그는 수평면 이동입니다. Magnetic 모드에서 물체를 발끝에 접촉시키고 천천히 이동하면 자동으로 힘 추종에 진입합니다. 접촉 해제·작업영역·추종 거리 등 설정 한계를 넘으면 FREE로 복귀합니다.
-
-H/G 화면은 관절각과 피드백 측정 토크를 표시합니다. CAN 모드의 토크 그래프는 반환 Iq와 C4 Kt로 환산한 값을 사용하므로 가상 Iq 센서의 오차·노이즈·CAN 양자화가 반영됩니다. 검증용 CSV의 실제 토크(GT)는 물리 출력으로 별도 기록합니다. M 화면은 추정/실제/목표/명령 힘, 발끝 실제·목표 위치, 추종 오차와 전환 사유를 표시합니다.
-
-![Magnetic Touch 화면](docs/magnetic_touch_preview.png)
-
-## 설정과 코드 위치
-
-| 파일·디렉터리 | 역할 |
-| --- | --- |
-| [control.yaml](config/control/control.yaml) | 제어 주파수, 각 모션의 게인·목표·한계, RFOB, 그래프 주기 |
-| [daemon.yaml](config/daemon/daemon.yaml) | SHM 이름·기본 `processes`와 명시적 CAN 없는 `debug_processes` |
-| [can_hal.yaml](config/can_hal/can_hal.yaml) | HAL 인터페이스·주기·CAN ID 배치·모터 설정 경로 |
-| [simulation.yaml](config/simulation/simulation.yaml) | 시뮬레이션 실제 모터 특성·가상 Iq 센서 ON/OFF·오차 파라미터 |
-| [ak10_9_v3.yaml](config/motor/ak10_9_v3.yaml) | 모터 MIT 규약: V_MAX·T_MAX·Kt·감속비·Kd scale |
-| [shm_logger.yaml](config/shm_logger/shm_logger.yaml) | 500 Hz MCAP·Flight Recorder·저장 한계·건전성·세션 설정 |
-| [apps/](apps/) | daemon·TaskController·CAN HAL·MuJoCo·로거·입력 프로그램의 실행 진입점 |
-| [src/ipc/](src/ipc/) | SHM 전체 배치·메모리 매핑/동기화·공유 값 타입 |
-| [src/control/](src/control/) | `TaskController`의 제어기 핸들 소유, 입력 → 제어 → 출력 → 주기 대기 |
-| [src/motion_controllers/](src/motion_controllers/) | 호밍·중력보상·Magnetic Touch와 외력 관측기 |
-| [src/simulation/](src/simulation/) | 물리·모델 IO·가상 Iq 센서·그래프 |
-| [src/motor_can_protocol/](src/motor_can_protocol/) | OpenRobot MIT 코덱 |
-| [src/daemon/](src/daemon/) | 기존 `Daemon` 프로세스 관리·터미널 릴레이·SHM 통계 |
-| [src/input/](src/input/) | 조이스틱 입력 |
-| [src/shm_logger/](src/shm_logger/) | SHM 복사·명시적 스키마·MCAP/RAM 이력·세션/저장 정책·관리 소켓 |
-| [third_party/mujoco_simulate/](third_party/mujoco_simulate/) | 프로젝트에서 사용하는 MuJoCo GUI 복사본·출처·해시 |
-| [tests/](tests/) | 기능·CAN·SHM·프로세스·GUI 회귀 시험 |
-
-프로젝트는 `apps/`에 실행 프로그램별 `main.cpp`, `src/`에 기능별 구현과 헤더를 함께 둡니다. `TaskController` 클래스는 `src/control/control.hpp/.cpp`, 기존 `Daemon` 클래스는 `src/daemon/daemon.hpp/.cpp`로 옮겼습니다. 별도의 제어 런타임 래퍼는 추가하지 않았습니다.
-
-프로젝트 헤더는 `#include "ipc/shared_memory.hpp"`처럼 `src/` 기준 경로를 씁니다. `qhrr05_common` INTERFACE 타깃은 이 검색 경로만 전달합니다. 실제 구현은 `motion_controllers`, `control_core`, `motor_can_protocol`, `simulation_core`, `daemon_core`, `input_core` 등의 라이브러리로 명시적으로 연결합니다.
-
-앱 디렉터리·실행 파일·구현 모듈은 같은 기능 이름을 사용합니다. config 디렉터리에도 같은 이름을 사용하고, 모터 규약은 `config/motor/`에 둡니다.
-
-| 실행 파일 | 진입점 | 구현 | 설정 |
-| --- | --- | --- | --- |
-| `daemon` | `apps/daemon/main.cpp` | `src/daemon/` | `config/daemon/daemon.yaml` |
-| `control` | `apps/control/main.cpp` | `src/control/` | `config/control/control.yaml` |
-| `simulation` | `apps/simulation/main.cpp` | `src/simulation/` | `config/simulation/simulation.yaml` |
-| `input` | `apps/input/main.cpp` | `src/input/` | CLI의 SHM 이름·장치 경로 |
-| `can_hal` | `apps/can_hal/main.cpp` | 진입점 내부 HAL 및 `src/motor_can_protocol/` | `config/can_hal/can_hal.yaml` |
-| `shm_logger` | `apps/shm_logger/main.cpp` | `src/shm_logger/` | `config/shm_logger/shm_logger.yaml` |
-| `qhrr-logctl` | `apps/logctl/main.cpp` | 관리 소켓 클라이언트 | CLI의 소켓 경로 또는 기본 daemon 설정 |
-
-이전 실행 파일 `task_controller`, `mujoco_simulate`, `aux_reader`는 각각 `control`, `simulation`, `input`으로 변경했습니다. 제어 주파수 YAML 키도 `control.frequency_hz`를 사용합니다. 별도 daemon 설정은 런처와 daemon 모두 `--config FILE.yaml`로 지정합니다.
-
-HAL 설정의 `motor_config: ../motor/ak10_9_v3.yaml`은 **HAL YAML 디렉터리 기준**으로 해석합니다. HAL과 가상 모터는 같은 HAL 설정을 받아 각자 필요한 항목을 읽습니다. 시뮬레이터 인자는 `--hal-config config/can_hal/can_hal.yaml`입니다. 모터 파일에는 인터페이스·SHM·실행 주기·CAN ID 배치를 넣지 않습니다.
-
-TaskController는 각 모션 클래스의 초기화 인자로 YAML **경로**를 넘깁니다. 각 클래스가 자기 항목을 파싱·검증합니다. 설정을 바꾼 뒤 프로그램을 재시작합니다. 관절 배열 순서는 HR(FL hip) / HP(thigh) / KP(calf)입니다. 게인과 목표값은 위 YAML을 기준으로 합니다.
-
-제어 입력은 TaskController의 이름 있는 상태 배열 한 벌로 보관합니다. `ReadInput()`이 같은 SHM 잠금 안에서 각 모델·관절 값을 명시적으로 읽고, 미분용 이전 샘플은 별도로 유지합니다. Magnetic의 `Start()`는 발끝 위치만 받으며 `Compute()`와 RFOB의 `Update()`는 사용하는 배열·측정 번호·주기를 각각 인자로 받습니다. 모션 제어기는 SHM 데이터 구조를 포함하거나 상속하지 않습니다.
-
-Homing은 보간 위치·속도와 자신의 kp/kd를 MIT 목표로 보냅니다. Gravity는 원래 surrogate 위치 목표를, Magnetic은 `q + (tau + kd_motor*dq)/kp_motor`를 보냅니다. 후자의 kd 항은 이미 계산된 감쇠를 모터 PD에서 중복 적용하지 않기 위한 항입니다. Magnetic의 내부 서보 게인은 `magnetic_touch.kp_motor/kd_motor`에서 설정합니다.
-
-두 모드의 동역학 보상항은 각 설정의 `gravity_only`로 따로 선택합니다. 설정 변경 후 데몬을 재시작합니다.
-
-```yaml
-gravity_compensation:
-  gravity_only: true
-magnetic_touch:
-  gravity_only: true
-```
-
-`true`는 별도 `mjData`에 qpos를 복사하고 qvel을 0으로 둔 뒤 `mj_fwdPosition()`·`mj_fwdVelocity()`로 구한 순수 중력을 사용합니다. `false`는 실제 속도에서 계산한 전체 `qfrc_bias`(중력+코리올리·원심력)를 사용합니다. Gravity의 `alpha`는 선택한 보상항 전체에 적용합니다. 두 설정 모두 물리 마찰·감쇠와 기존 자세·힘 추종 제어 항을 유지합니다. RFOB는 설정과 관계없이 실제 속도에서의 전체 동역학을 사용합니다. 옵션 누락·잘못된 bool 값은 오류로 처리합니다.
-
-가상 엔코더는 시작 자세에서 상대각 0으로 시작합니다. `MotorData.position_offset[i]`은 시뮬레이션 시작 자세로 초기화하고 제어기가 이를 사용합니다. **실기 영점 보정은 아니며 스토퍼 호밍은 미구현**입니다.
-
-## 가상 Iq 센서
-
-[simulation.yaml](config/simulation/simulation.yaml)의 `iq_sensor.enabled: true`로 켭니다. 현재 기본값은 `true`이며 시작 로그에 ENABLED/DISABLED를 표시합니다. 설정을 바꾼 뒤 데몬을 재시작합니다. 기본 daemon은 시뮬레이터에 `--simulation-config` 경로를 전달합니다. CAN 모드에서 이 경로는 필수이며, 직접 토크 디버깅 `--without-can`에는 적용하지 않습니다.
-
-```yaml
-iq_sensor:
-  enabled: true
-  gain: 1.0
-  offset_a: 0.0
-  noise_std_a: 0.02
-  ripple_amplitude_a: 0.01
-  bandwidth_hz: 200.0
-  quantization_a: 0.005
-  current_limit_a: 40.0
-```
-
-위 항목을 기존 파일에서 조정합니다. 이득·오프셋·가우시안 노이즈·전기각 리플·1차 저역통과 필터·센서 양자화·측정 범위를 설정할 수 있습니다. `enabled` 외 센서 값은 스칼라 또는 HR/HP/KP 세 값 배열을 받습니다. `random_seed`는 같은 입력 샘플 순서에서 노이즈를 재현합니다. 대역폭·양자화가 0이면 해당 단계만 생략합니다. CAN 자체의 전류 양자화는 항상 적용됩니다.
-
-물리 스텝마다 MuJoCo 실제 actuator torque에서 `iq_true = tau_actual / (gear_actual * Kt_motor_actual)`를 구합니다. 전기각은 `pole_pairs * gear_actual * q_joint + electrical_zero_rad`입니다. 센서 출력은 CAN Iq 필드로 반환하고 HAL이 `tau_measured = Kt_output_C4 * iq_reported_CAN`을 계산합니다. 센서값을 물리 토크에 직접 주입하지 않습니다. 제어기가 이 피드백에 반응하면서 이후 궤적·토크는 달라질 수 있습니다.
-
-`motor` 항목은 시뮬레이션 실제 특성이며 모터 규약 파일의 C4 보고값과 독립적입니다. 기본은 Kt_motor=0.16 Nm/A·감속비=9로 C4의 1.44 Nm/A와 맞췄습니다. Kt 오차도 별도로 시험할 수 있습니다. `pole_pairs: 1`은 시뮬레이션 위상 설정이며 실기 식별값이 아닙니다. 센서를 끄면 기존 `actuator torque / C4 Kt`의 이상적 CAN 피드백으로 복귀합니다.
-
-센서는 CAN 요청 횟수와 독립적으로 물리 시각마다 한 번 샘플링합니다. 동일 시각의 반복 요청·일시정지는 값을 유지하고, 시뮬레이션 시간 리셋은 필터와 난수 상태도 초기화합니다. CAN HAL 터미널·`shm_logger --can`에서 보고 Iq를 확인할 수 있습니다.
-
 ## SHM과 주기
 
 공유 영역은 기본 **`/qhrr05` 하나**이며 이름은 daemon 설정의 `shm_name`으로 지정합니다. CAN 사용 여부와 관계없이 daemon이 자식 실행 전에 생성·초기화하고, 모든 자식을 종료한 뒤 해제합니다. HAL·시뮬레이터·제어기·로거는 연결만 하며, 영역이 없으면 명시적으로 실패합니다. 기존 객체는 재사용·삭제하지 않습니다. daemon이 SIGKILL되면 정리할 수 없으므로 남은 객체는 다음 실행에서 충돌로 보고합니다.
 
-[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`SimulationData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
+[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`SimulationData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **11**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
 
 | 영역 | 데이터와 작성자 |
 | --- | --- |
@@ -222,7 +158,7 @@ iq_sensor:
 
 제어 주파수는 `control.frequency_hz`로 설정합니다. 제어기는 monotonic 시간으로 동작하며 새 측정이나 물리 run/pause를 기다리지 않고 최신 입력을 사용합니다. 물리 간격은 모델의 `timestep`, 그래프·계측 주기는 `plots.sample_hz`의 시뮬레이션 시간 기준입니다. 물리 일시정지 중에도 제어 시간은 진행합니다. 제어 경로는 응답 지연·관측 누락으로 동작을 바꾸지 않습니다. CSV 평가는 **shm_logger**, 읽기 전용 실시간 SHM 관측은 daemon이 담당합니다. 더블버퍼는 모든 중간 프레임의 기록을 보장하지 않습니다.
 
-RFOB는 새 측정에서만 필터를 갱신합니다. 접촉 GT 힘·모멘트와 물체 좌표는 `simulation`에만 있으며 제어 입력으로 사용하지 않습니다. 현재 관측기는 모델 잔차 기반 발끝 등가 외력 추정입니다. `condim=6`의 접촉 모멘트를 3관절 관측으로 힘과 분리할 수 없으며, Momentum Observer는 미구현입니다.
+RFOB는 새 측정에서만 필터를 갱신합니다. 접촉 GT 힘·모멘트와 물체 좌표는 `simulation`에만 있으며 제어 입력으로 사용하지 않습니다. 현재 관측기는 모델 잔차 기반 발끝 등가 외력 추정입니다. 발끝의 `condim=6` 접촉 모멘트를 3관절 관측으로 힘과 분리할 수 없으며, Momentum Observer는 미구현입니다.
 
 CAN 모드에서는 새 CAN 피드백에서 속도를 차분하고 RFOB를 갱신합니다. 모델 정보는 별도 주기로 발행되므로 최신 엔코더보다 한 주기 늦을 수 있습니다. 물체 이동·접촉·해제 같은 시뮬레이션 이벤트는 SHM으로 직접 전달해도 되는 영역입니다. 수집 주기마다 `contact`·`contact_event_sequence`·`contact_event_time`을 갱신하며 CSV에도 기록합니다. 이 이벤트 때문에 모터 CAN 패킷을 추가하지 않습니다.
 
@@ -236,17 +172,16 @@ HAL은 기본 daemon의 필수 프로세스입니다. 통계 창의 `BUS LOAD es
 
 ## 검증과 유지 문서
 
-`main`에는 디렉터리 재구성·터미널 개선과 `logger_and_dashboard`의 텔레메트리·로깅 구현을 통합했습니다. 후속 작업은 `main`에서 분기한 `dynamic_control`에서 이어갑니다.
-
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-CTest에는 격리된 vcan의 코덱 시험과 실제 MuJoCo 가상 모터 폐루프 시험이 있습니다. 후자는 호밍·G/M·물체 접촉/해제·CAN 정지 중 우회 금지·Release를 검사합니다. 실제 AK10-9 하드웨어 검증은 아닙니다. 회귀 시험은 사용자 튜닝과 분리한 [고정 설정](tests/fixtures/control.yaml)을 사용합니다.
+CTest에는 격리된 vcan의 코덱 시험과 실제 MuJoCo 가상 모터 폐루프 시험이 있습니다. 후자는 호밍·G/M/T·물체 접촉/해제·CAN 정지 중 우회 금지·Release를 검사합니다. 실제 AK10-9 하드웨어 검증은 아닙니다. 회귀 시험은 사용자 튜닝과 분리한 [고정 설정](tests/fixtures/control.yaml)을 사용합니다.
 
-GUI 시험도 위 명령에 포함합니다. `simulator_gui`는 H/G/M 조작·목표 힘 변경·일시정지·Ctrl+드래그를, `can_gui`는 CAN 실행·실패·전체 종료·선택적 로거 창 재시작 경로를 묶어 검사합니다. `logging_core/service/daemon`은 MCAP 스키마·5초/2초 덤프·저장 장애·오프라인 분석·독립적 재시작을 검사합니다. `terminal_layout`과 `terminal_statistics`는 창 배치와 화면 복원·로그 보존을 검사합니다. 공통 [GUI 실행 환경](tests/run_gui_test.sh)과 [X11 도우미](tests/gui_test_utils.py)를 사용하며, Xvfb·D-Bus·xdotool·GNOME Terminal이 필요합니다. 시험은 별도 세션과 임시 디렉터리를 사용하며 프로젝트 문서에 스크린샷을 남기지 않습니다.
+GUI 시험도 위 명령에 포함합니다. `simulator_gui`는 H/G/M/T/B·1/2/3 조작·목표 힘 변경·일시정지·Ctrl+드래그를, `can_gui`는 CAN 실행·실패·전체 종료·선택적 로거 창 재시작 경로를 묶어 검사합니다. `logging_core/service/daemon`은 MCAP 스키마·5초/2초 덤프·저장 장애·오프라인 분석·독립적 재시작을 검사합니다. `terminal_layout`과 `terminal_statistics`는 창 배치와 화면 복원·로그 보존을 검사합니다. 공통 [GUI 실행 환경](tests/run_gui_test.sh)과 [X11 도우미](tests/gui_test_utils.py)를 사용하며, Xvfb·D-Bus·xdotool·GNOME Terminal이 필요합니다. 시험은 별도 세션과 임시 디렉터리를 사용하며 프로젝트 문서에 스크린샷을 남기지 않습니다.
 
 - [최근 작업과 다음 우선순위](WORK_NOTE.md)
+- [제어 모드·궤적·작업공간·가상 Iq 센서](docs/control.md)
 - [MCAP·Flight Recorder·CLI·분석과 검증 범위](docs/logging.md)
 - [CAN HAL 패킷·계측·영점 보정](docs/can_hal.md)
 - [코드 작성·포맷 규칙](docs/code_style.md)

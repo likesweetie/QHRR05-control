@@ -27,9 +27,15 @@ target_link_libraries(motor_can_protocol PUBLIC qhrr05_common)
 add_library(motion_controllers STATIC
     src/motion_controllers/homing_controller.cpp
     src/motion_controllers/gravity_compensation_controller.cpp
+    src/motion_controllers/tracking_controller.cpp
+    src/motion_controllers/tracking_ilc.cpp
+    src/motion_controllers/ball_following_controller.cpp
     src/motion_controllers/reaction_force_observer.cpp
     src/motion_controllers/magnetic_touch_controller.cpp)
 target_link_libraries(motion_controllers PUBLIC qhrr05_common yaml-cpp)
+target_include_directories(motion_controllers PUBLIC ${MUJOCO_DIR}/include)
+target_link_directories(motion_controllers PUBLIC ${MUJOCO_DIR}/lib)
+target_link_libraries(motion_controllers PUBLIC mujoco)
 
 add_library(control_core STATIC src/control/control.cpp)
 target_link_libraries(control_core PUBLIC motion_controllers pthread)
@@ -49,7 +55,7 @@ target_link_libraries(daemon_core PUBLIC qhrr05_common pthread)
 target_link_libraries(daemon_core PRIVATE PkgConfig::TERMINAL_X11)
 
 add_library(input_core STATIC src/input/joystick.cpp)
-target_link_libraries(input_core PUBLIC qhrr05_common pthread)
+target_link_libraries(input_core PUBLIC qhrr05_common pthread yaml-cpp)
 
 add_executable(daemon apps/daemon/main.cpp)
 target_link_libraries(daemon PRIVATE daemon_core yaml-cpp)
@@ -70,7 +76,7 @@ add_executable(simulation
     ${SIMULATE_COPY}/platform_ui_adapter.cc
     ${SIMULATE_COPY}/simulate.cc)
 target_include_directories(simulation PRIVATE ${GLFW_INCLUDE_DIRS} ${SIMULATE_COPY})
-target_link_libraries(simulation PRIVATE simulation_core ${GLFW_LIBRARIES} GL pthread dl m)
+target_link_libraries(simulation PRIVATE simulation_core motion_controllers ${GLFW_LIBRARIES} GL pthread dl m)
 set_target_properties(simulation PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
 
 add_executable(input apps/input/main.cpp)
@@ -155,14 +161,22 @@ if(BUILD_TESTING)
     add_executable(can_control_integration_test tests/can_control_integration_test.cpp)
     target_link_libraries(can_control_integration_test PRIVATE simulation_core)
     set_target_properties(can_control_integration_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
-    add_test(NAME can_control_integration COMMAND bash
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
-        $<TARGET_FILE:can_control_integration_test>
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/control.yaml
-        ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
-        ${CMAKE_CURRENT_SOURCE_DIR}/config/can_hal/can_hal.yaml
-        $<TARGET_FILE:can_hal> $<TARGET_FILE:control>
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation.yaml)
+    foreach(tracking_variant IN ITEMS inverse_dynamics ctc impedance)
+        set(tracking_test_args)
+        set(tracking_test_name can_control_integration)
+        if(NOT tracking_variant STREQUAL "inverse_dynamics")
+            set(tracking_test_name can_${tracking_variant}_integration)
+            list(APPEND tracking_test_args ${tracking_variant})
+        endif()
+        add_test(NAME ${tracking_test_name} COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+            $<TARGET_FILE:can_control_integration_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/control.yaml
+            ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
+            ${CMAKE_CURRENT_SOURCE_DIR}/config/can_hal/can_hal.yaml
+            $<TARGET_FILE:can_hal> $<TARGET_FILE:control>
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation.yaml ${tracking_test_args})
+    endforeach()
     add_executable(can_hal_test tests/can_hal_test.cpp)
     target_link_libraries(can_hal_test PRIVATE motor_can_protocol pthread)
     add_test(NAME can_hal_vcan COMMAND bash
@@ -188,6 +202,18 @@ if(BUILD_TESTING)
     add_executable(motion_controller_config_test tests/motion_controller_config_test.cpp)
     target_link_libraries(motion_controller_config_test PRIVATE motion_controllers)
     add_test(NAME motion_controller_config COMMAND motion_controller_config_test)
+    add_executable(ball_following_test tests/ball_following_test.cpp)
+    target_link_libraries(ball_following_test PRIVATE motion_controllers input_core)
+    add_test(NAME ball_following COMMAND ball_following_test
+        ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml
+        ${PROJECT_SOURCE_DIR}/models/qhrr-05/scene.xml
+        ${PROJECT_SOURCE_DIR}/config/input/input.yaml)
+    add_executable(tracking_controller_test tests/tracking_controller_test.cpp)
+    target_link_libraries(tracking_controller_test PRIVATE motion_controllers simulation_core)
+    set_target_properties(tracking_controller_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME tracking_controller COMMAND tracking_controller_test
+        ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml
+        ${PROJECT_SOURCE_DIR}/models/qhrr-05/scene.xml)
     add_executable(shm_buffers_test tests/shm_buffers_test.cpp)
     target_link_libraries(shm_buffers_test PRIVATE qhrr05_common pthread)
     add_test(NAME shm_buffers COMMAND shm_buffers_test)

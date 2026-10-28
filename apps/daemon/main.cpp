@@ -466,6 +466,21 @@ int main(int argc, char** argv) {
         while (!stop_requested && !completed) {
             for (const auto& name : daemon.Reap()) {
                 const auto info = daemon.Get(name).value();
+                if (name == "input") {
+                    // Process-exit cleanup also covers SIGKILL; no input-age watchdog.
+                    auto& shm = *shared_memory->get();
+                    shm_utils::Lock lock(shm);
+                    auto& input = shm_utils::Next(shm.control, shm.control_sequence);
+                    input.joystick_connected = false;
+                    input.joystick_axes.fill(0);
+                    input.joystick_buttons.fill(false);
+                    input.joystick_l2 = input.joystick_r2 = 0;
+                    ++input.joystick_sequence;
+                    input.joystick_published_ns = shm_utils::MonotonicNs();
+                    ++shm.control_sequence;
+                    shm_utils::Notify(shm);
+                }
+
                 const auto base = name.size() > 9 && name.substr(name.size() - 9) == ".terminal"
                                       ? name.substr(0, name.size() - 9)
                                       : name;

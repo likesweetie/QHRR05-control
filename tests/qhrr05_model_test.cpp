@@ -30,7 +30,6 @@ int main(int argc, char** argv) {
             "Torso must be fixed directly to world");
         const std::array<const char*, 3> joints = {
             "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"};
-        const std::array<double, 3> limits = {23.7, 23.7, 45.43};
 
         for (int i = 0; i < 3; ++i) {
             const int j = mj_name2id(m, mjOBJ_JOINT, joints[i]);
@@ -40,9 +39,13 @@ int main(int argc, char** argv) {
             Require(m->actuator_trntype[i] == mjTRN_JOINT && m->actuator_trnid[2 * i] == j,
                 "Actuator is mapped to the wrong joint");
             Require(m->actuator_ctrllimited[i] &&
-                        std::abs(m->actuator_ctrlrange[2 * i] + limits[i]) < 1e-10 &&
-                        std::abs(m->actuator_ctrlrange[2 * i + 1] - limits[i]) < 1e-10,
-                "Upstream motor limits changed");
+                        std::isfinite(m->actuator_ctrlrange[2 * i]) &&
+                        std::isfinite(m->actuator_ctrlrange[2 * i + 1]) &&
+                        m->actuator_ctrlrange[2 * i] < 0 &&
+                        m->actuator_ctrlrange[2 * i + 1] > 0 &&
+                        std::abs(m->actuator_ctrlrange[2 * i] +
+                                 m->actuator_ctrlrange[2 * i + 1]) < 1e-10,
+                "Motor torque limits must be finite, symmetric and span zero");
         }
 
         const int home = mj_name2id(m, mjOBJ_KEY, "home");

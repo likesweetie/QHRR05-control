@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 
 // Shared control values in physical units; packet encoding belongs to the HAL codec.
 struct MitCommand {
@@ -18,6 +19,72 @@ struct MotorFeedback {
     double current = 0;
     int temperature = 0;
 };
+
+enum class TrackingPlane : int { XY, XZ, YZ };
+
+enum class TrackingMethod : int { InverseDynamics, CTC, Impedance };
+
+enum class TrackingILCState : int { Off, Warmup, Collecting, Active, SkippedSaturation, SkippedSamples, IKHold };
+
+inline const char* TrackingILCStateName(TrackingILCState state) {
+    switch (state) {
+    case TrackingILCState::Off:
+        return "OFF";
+    case TrackingILCState::Warmup:
+        return "WARMUP";
+    case TrackingILCState::Collecting:
+        return "COLLECTING";
+    case TrackingILCState::Active:
+        return "ACTIVE";
+    case TrackingILCState::SkippedSaturation:
+        return "SKIPPED: TORQUE SATURATION";
+    case TrackingILCState::SkippedSamples:
+        return "SKIPPED: INCOMPLETE PHASE SAMPLES";
+    case TrackingILCState::IKHold:
+        return "IK HOLD";
+    }
+
+    throw std::invalid_argument("invalid tracking ILC state");
+}
+
+inline const char* TrackingMethodName(TrackingMethod method) {
+    switch (method) {
+    case TrackingMethod::InverseDynamics:
+        return "inverse_dynamics";
+    case TrackingMethod::CTC:
+        return "CTC";
+    case TrackingMethod::Impedance:
+        return "impedance";
+    }
+
+    throw std::invalid_argument("invalid tracking method");
+}
+
+inline const char* TrackingPlaneName(TrackingPlane plane) {
+    switch (plane) {
+    case TrackingPlane::XY:
+        return "XY";
+    case TrackingPlane::XZ:
+        return "XZ";
+    case TrackingPlane::YZ:
+        return "YZ";
+    }
+
+    throw std::invalid_argument("invalid tracking plane");
+}
+
+inline std::array<int, 2> TrackingPlaneAxes(TrackingPlane plane) {
+    switch (plane) {
+    case TrackingPlane::XY:
+        return {0, 1};
+    case TrackingPlane::XZ:
+        return {0, 2};
+    case TrackingPlane::YZ:
+        return {1, 2};
+    }
+
+    throw std::invalid_argument("invalid tracking plane");
+}
 
 enum class MagneticPhase : int { Free, Candidate, Following, Releasing };
 enum class MagneticReason : int {

@@ -45,6 +45,11 @@ int main(int argc, char** argv) {
 
         return 0;
     } catch (const std::exception& error) {
+        if (stopping) {
+            std::cout << "[control] initialization cancelled by shutdown: " << error.what() << '\n';
+            return 0;
+        }
+
         std::cerr << "[control] " << error.what() << '\n';
         return 1;
     }
