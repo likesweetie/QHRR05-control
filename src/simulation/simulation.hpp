@@ -22,6 +22,10 @@ public:
     void Update(const mjModel* model, mjData* data);
     MotorData ReadFeedback() const;
 
+    double torque_limit_nm() const {
+        return torque_max_;
+    }
+
 private:
     void Reply(int axis, const openrobot::Payload& bytes);
     int socket_ = -1;

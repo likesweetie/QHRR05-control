@@ -34,6 +34,13 @@ processes:
     working_directory: ../..
     args: [config/control/control.yaml, "{shm_name}"]
 
+  - name: input
+    exec_path: input
+    working_directory: ../..
+    critical: false  # 장치가 없으면 오류를 보고하고 GUI에 미연결 표시; 다른 모드는 계속 사용
+    restart_limit: 0
+    args: ["{shm_name}", config/input/input.yaml]
+
   - name: shm_logger
     exec_path: shm_logger
     working_directory: ../..
@@ -55,6 +62,13 @@ debug_processes:
     exec_path: control
     working_directory: ../..
     args: [config/control/control.yaml, "{shm_name}", --without-can]
+
+  - name: input
+    exec_path: input
+    working_directory: ../..
+    critical: false  # 장치가 없으면 오류를 보고하고 GUI에 미연결 표시; 다른 모드는 계속 사용
+    restart_limit: 0
+    args: ["{shm_name}", config/input/input.yaml]
 
   - name: shm_logger
     exec_path: shm_logger

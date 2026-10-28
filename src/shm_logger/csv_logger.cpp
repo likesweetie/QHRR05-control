@@ -251,7 +251,12 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
                 "%llu,%.12g,%s",
                 static_cast<unsigned long long>(sample.run_id),
                 sample.time,
-                command.mode == 0 ? "homing" : (command.mode == 1 ? "gravity" : "magnetic"));
+                command.mode == 0 ? "homing"
+                : command.mode == 1 ? "gravity"
+                : command.mode == 2 ? "magnetic"
+                : command.mode == 3 ? "tracking"
+                : command.mode == 4 ? "ball"
+                : command.mode == 5 ? "damping" : "invalid");
 
             std::array<double, 3> reference;
 

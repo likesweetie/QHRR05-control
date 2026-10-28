@@ -191,6 +191,8 @@ fs::path SessionStorage::Begin(const std::string& label,
             }
             if (process_name == "control" && !args.empty())
                 paths["control"] = cwd / args[0];
+            if (process_name == "input" && args.size() == 2)
+                paths["input"] = cwd / args[1];
             if (process_name == "can_hal" && !args.empty())
                 paths["can_hal"] = cwd / args[0];
         }

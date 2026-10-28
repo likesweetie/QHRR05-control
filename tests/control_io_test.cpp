@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
         temporary_directory = directory;
         const auto path = temporary_directory + "/control.yaml";
         auto config = YAML::LoadFile(argv[1]);
+        config["model_path"] = std::filesystem::absolute(argv[2]).string();
         config["control"]["frequency_hz"] = 100;
         config["homing"]["duration_sec"] = .12;
         const auto save = [&] {
@@ -116,6 +117,8 @@ int main(int argc, char** argv) {
             auto before = WaitCommand(shm, [](const ControlData&) {
                 return true;
             });
+            Require(before.mode == 5 && !before.holding && !before.damping_reference_valid,
+                "controller did not start in damping while awaiting its first model sample");
 
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
             auto after = Latest(shm);
@@ -141,6 +144,39 @@ int main(int argc, char** argv) {
             std::array<double, 3> reference;
             data->time = 1000;  // Producer clock is unrelated to controller time.
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
+            const auto damping = WaitCommand(shm, [](const ControlData& cmd) {
+                return cmd.mode == 5 && cmd.input_model_sequence == 1 && cmd.damping_reference_valid;
+            });
+            const auto initial_toe = damping.damping_toe_reference;
+            const auto damping_motors = Motors(shm);
+
+            for (int i = 0; i < 3; ++i) {
+                Require(std::abs(initial_toe[i] - data->site_xpos[3 * mj_name2id(model.get(), mjOBJ_SITE, "FL_foot") + i]) < 1e-12,
+                    "damping did not capture the initial toe position");
+                Require(damping_motors.debug_torque[i] == 0 && damping_motors.reference[i] == initial[i],
+                    "damping applied position/gravity torque at rest");
+                data->qpos[i] += .01;
+                data->qvel[i] = .2 * (i + 1);
+            }
+
+            mj_forward(model.get(), data.get());
+            qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
+            after = WaitCommand(shm, [](const ControlData& cmd) {
+                return cmd.input_model_sequence == 2;
+            });
+            Require(after.mode == 5 && after.damping_toe_reference == initial_toe,
+                "damping moved its captured toe reference");
+
+            for (int i = 0; i < 3; ++i)
+                Require(std::abs(Motors(shm).debug_torque[i] + data->qvel[i]) < 1e-12 &&
+                            Motors(shm).reference[i] == initial[i],
+                    "damping is not pure -1*dq or introduced position stiffness");
+
+            qhrr05::ResetSimulation(initial, model.get(), data.get());
+            data->time = 1000;
+            qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
+            const auto home_state_sequence = shm.model_sequence;
+            std::cout << "PASS: startup damping, initial toe capture, zero-rest torque, pure velocity damping\n";
             const auto request = Request(shm, 0);
             before = WaitCommand(shm, [&](const ControlData& cmd) {
                 return cmd.active_motion_sequence == request;
@@ -154,7 +190,7 @@ int main(int argc, char** argv) {
                 return cmd.active_motion_sequence == request && cmd.holding;
             });
 
-            Require(after.input_model_sequence == 1, "unchanged measurement was not reused");
+            Require(after.input_model_sequence == home_state_sequence, "unchanged measurement was not reused");
             Require(after.control_time - before.control_time >= .1,
                 "homing did not use controller elapsed time");
 
@@ -169,7 +205,7 @@ int main(int argc, char** argv) {
             const auto gravity_request = Request(shm, 1);
             after = WaitCommand(shm, [&](const ControlData& cmd) {
                 return cmd.active_motion_sequence == gravity_request &&
-                       cmd.input_model_sequence == 2;
+                       cmd.input_model_sequence == home_state_sequence + 1;
             });
 
             for (int i = 0; i < 3; ++i) {
@@ -186,8 +222,8 @@ int main(int argc, char** argv) {
 
             qhrr05::ResetSimulation(initial, model.get(), data.get());
             qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference);
-            after = WaitCommand(shm, [](const ControlData& cmd) {
-                return cmd.input_model_sequence == 3;
+            after = WaitCommand(shm, [&](const ControlData& cmd) {
+                return cmd.input_model_sequence == home_state_sequence + 2;
             });
 
             Require(after.holding, "simulation time rewind restarted the independent controller");

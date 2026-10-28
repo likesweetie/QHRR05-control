@@ -470,6 +470,12 @@ void LoggerService::CheckTriggers(const LogFrame& f) {
         if (!active_triggers_.count(trigger))
             Trigger(trigger);
     active_triggers_ = std::move(present);
+    if (f.control.mode == 3 && f.control.tracking_ik_failed &&
+        (!have_observed_ || last_observed_.control.mode != 3 ||
+            !last_observed_.control.tracking_ik_failed ||
+            f.control.active_motion_sequence != last_observed_.control.active_motion_sequence))
+        Event("TRACKING_IK_HOLD", "error_m=" + std::to_string(f.control.tracking_ik_error_m));
+
     if (have_observed_) {
         if (f.control.mode != last_observed_.control.mode)
             Event("MODE_CHANGED", std::to_string(f.control.mode));

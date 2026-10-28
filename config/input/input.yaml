@@ -1,0 +1,7 @@
+device: /dev/input/js0  # Linux joystick 장치; 없으면 명시적 오류, 다른 입력으로 대체하지 않음
+direction_axes: [1, 0, 4]  # 월드 X/Y/Z: 왼쪽 스틱 상하/좌우, 오른쪽 스틱 상하
+direction_invert: [true, true, true]  # 각 방향 반전; 장치의 축 방향에 맞춰 조정
+deadband: 0.08  # 스틱 중앙 무입력 범위(0..1)
+trigger_axes: [2, 5]  # L2/LT, R2/RT 축 번호; Linux Xbox 계열 기본 매핑
+trigger_rest: [-1.0, -1.0]  # 놓았을 때 원시 정규화 값; 장치에 따라 0일 수 있음
+trigger_pressed: [1.0, 1.0]  # 끝까지 눌렀을 때 원시 정규화 값

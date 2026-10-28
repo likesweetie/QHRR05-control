@@ -74,6 +74,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
 
         manifest = directory / f'{action}-processes.json'
         processes = yaml.safe_load((ROOT / 'config/daemon/daemon.yaml').read_text())
+        # GUI lifecycle tests never open a real host joystick. Input is tested with virtual events.
+        for key in ('processes', 'debug_processes'):
+            processes[key] = [p for p in processes[key] if p['name'] != 'input']
         processes['shm_name'] = name
         processes['log_directory'] = str(directory / 'logs')
         if action != 'logger-window-close':

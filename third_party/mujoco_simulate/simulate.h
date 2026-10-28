@@ -261,6 +261,7 @@ class Simulate {
   std::function<void()> user_reset_callback_;
   std::function<void()> user_step_callback_;
   std::function<void()> user_render_callback_;
+  std::function<void(mjvScene&)> user_scene_callback_;
   std::function<void(int)> user_controller_callback_;
   std::function<void(double)> user_force_callback_;
   mjtNum user_target_force_ = 3.0;
@@ -302,7 +303,7 @@ class Simulate {
 
 
   // simulation section of UI
-  mjuiDef def_simulation[19] = {
+  mjuiDef def_simulation[22] = {
     {mjITEM_SECTION,   "Simulation",    mjPRESERVE, nullptr,     "AS"},
     {mjITEM_RADIO,     "",              5, &this->run,           "Pause\nRun"},
     {mjITEM_BUTTON,    "Reset",         2, nullptr,              " #259"},
@@ -321,6 +322,9 @@ class Simulate {
     {mjITEM_BUTTON,    "Gravity [G]",   2},
     {mjITEM_BUTTON,    "Magnetic [M]",  2},
     {mjITEM_SLIDERNUM, "Target [N]",    2, &this->user_target_force_, "0 5"},
+    {mjITEM_BUTTON,    "Tracking [T]",  2},
+    {mjITEM_BUTTON,    "Ball follow [B]",2},
+    {mjITEM_BUTTON,    "Damping [D]",   2},
     {mjITEM_END}
   };
 

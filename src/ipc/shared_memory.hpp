@@ -9,7 +9,7 @@
 
 // Shared-memory protocol. Increment the ABI version when layout or field semantics change.
 inline constexpr std::uint64_t kShmMagic = 0x5148525253484D31ULL;  // QHRRSHM1
-inline constexpr std::uint32_t kShmAbiVersion = 1;
+inline constexpr std::uint32_t kShmAbiVersion = 11;
 inline constexpr std::size_t kShmBufferCount = 2;
 inline constexpr unsigned kShmPermissions = 0600;
 inline constexpr clockid_t kShmClock = CLOCK_MONOTONIC;
@@ -47,20 +47,51 @@ struct ModelData {
 };
 
 struct ControlData {
-    int requested_mode = 0;  // GUI owns requests. Slider edits preserve motion_sequence.
+    int requested_mode = 5;  // 0: homing, 1: gravity, 2: magnetic, 3: tracking, 4: ball, 5: damping.
+    // GUI owns requests. Slider edits preserve motion_sequence.
     double target_force = 3;
+    TrackingPlane requested_tracking_plane = TrackingPlane::XY;
     std::uint64_t motion_sequence = 0;
+    std::array<double, 3> requested_ball_position{};  // Optional explicit target jump.
+    std::uint64_t ball_target_sequence = 0;
 
-    int mode = 0;  // Controller owns status and observer output.
+    int mode = 5;  // Controller owns status and observer output. Startup is damping only.
     bool holding = false;
+    std::array<double, 3> damping_toe_reference{};  // Captured on damping entry, no position stiffness.
+    bool damping_reference_valid = false;  // False until the first model sample is available.
     double control_time = 0;
     std::uint64_t command_sequence = 0, published_ns = 0, active_motion_sequence = 0;
     std::uint64_t input_model_sequence = 0, input_model_published_ns = 0;  // Logger trace
     MagneticTelemetry magnetic{};
+    std::array<double, 3> tracking_position_reference{}, tracking_velocity_reference{};  // m, m/s
+    bool tracking_torque_saturated = false;
+    TrackingPlane tracking_plane = TrackingPlane::XY;
+    TrackingMethod tracking_method = TrackingMethod::InverseDynamics;
+    std::array<double, 3> tracking_acceleration_reference{};  // m/s^2
+    std::array<double, 3> tracking_joint_velocity_reference{};  // rad/s; q_d is motors.reference
+    std::array<double, 3> tracking_joint_acceleration_reference{};  // rad/s^2
+    std::array<double, 3> tracking_inverse_dynamics_torque{};  // Nm, before alpha blending/clipping
+    std::array<double, 3> tracking_ctc_torque{};  // Nm, full CTC output before clipping; zero outside CTC.
+    TrackingILCState tracking_ilc_state = TrackingILCState::Off;
+    std::array<double, 3> tracking_ilc_torque{};  // Nm, bounded learned correction added before final clipping.
+    std::uint64_t tracking_ilc_updates = 0, tracking_ilc_skipped_cycles = 0;
+    bool tracking_ilc_limited = false;  // Last accepted update reached an ILC step/torque limit.
+    double tracking_ilc_last_rmse_m = 0;  // Last fully sampled lap; NaN until available when enabled.
+    bool tracking_idff_enabled = false;
+    bool tracking_ik_failed = false;  // IK/condition rejection: latched hold until explicit restart.
+    bool tracking_checking = false;  // Entry pose is held until the full path is approved.
+    double tracking_check_progress = 0;  // Completed fraction of the sampled path, 0..1.
+    double tracking_ik_error_m = 0;
+    std::array<double, 3> ball_position{}, ball_toe_reference{}, ball_nearest_position{};
+    bool ball_workspace_limited = false, ball_entering_workspace = false;
+    bool ball_torque_saturated = false;
+    double ball_speed_m_s = 0;
 
     std::array<double, 3> joystick_axes{};  // Optional input owns these fields only.
     std::array<bool, 11> joystick_buttons{};
     std::uint64_t joystick_sequence = 0, joystick_published_ns = 0;
+    double joystick_l2 = 0, joystick_r2 = 0;  // Normalized trigger pressure, 0..1.
+    bool joystick_connected = false;
 };
 
 // Physical truth and object/contact events stay on the simulation SHM path.

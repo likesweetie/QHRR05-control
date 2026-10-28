@@ -25,7 +25,7 @@
 
 ID 1/2/3은 SID 0x141/0x142/0x143에 대응합니다. 아직 검증되지 않은 C4와 미확인 C1은 100 HAL 주기마다 재요청합니다. 이는 준비 확인용 반복이며 응답 지연 감시가 아닙니다. 모터 응답이 없어도 제어 루프는 설정 주기로 계속 동작합니다.
 
-[control_types.hpp](../src/ipc/control_types.hpp)의 `MitCommand`는 position·velocity·kp·kd·tau_ff를 가집니다. enable 요청은 `MotorData.command_enabled[i]`로 분리합니다. SHM과 TaskController는 OpenRobot 코덱을 참조하지 않고, 코덱이 이 공통 타입을 참조합니다. position은 출력축 상대 좌표 rad입니다. Homing은 보간 q/dq와 자체 PD 게인을 보내며, Gravity/Magnetic은 계산한 토크를 다음 위치 목표로 환산합니다.
+[control_types.hpp](../src/ipc/control_types.hpp)의 `MitCommand`는 position·velocity·kp·kd·tau_ff를 가집니다. enable 요청은 `MotorData.command_enabled[i]`로 분리합니다. SHM과 TaskController는 OpenRobot 코덱을 참조하지 않고, 코덱이 이 공통 타입을 참조합니다. position은 출력축 상대 좌표 rad입니다. Homing은 보간 q/dq와 자체 PD 게인을 보내며, Gravity/Magnetic/Tracking/Ball은 계산한 토크를 다음 위치 목표로 환산합니다.
 
 ```text
 q_motor_target = q_joint - position_offset + (tau + kd_motor * dq) / kp_motor
@@ -35,7 +35,7 @@ kd 항은 이미 토크 계산에 포함한 감쇠를 모터 PD에서 중복 적
 
 **tau_ff는 0만 허용하며 비영·비유한 입력은 명시적으로 거부합니다.** 송신 바이트는 논리적 0인 0x80으로 고정합니다. 가상 모터는 이 값만 허용하고 FF 없이 PD를 계산합니다. 실물 드라이버가 대칭 8-bit 필드를 수치로 복원하면 반 LSB 오차가 생길 수 있어 zero-code 해석은 실기 캡처로 확인해야 합니다.
 
-피드백은 v14 이후 signed 출력축 MIT 좌표로 해석합니다. 구형 입력축 표를 자동 감지하거나 대체하지 않습니다. 위치는 int16 × 12.56 / 32768 rad, 속도는 int16 deg/s를 rad/s로 변환하며, Iq는 int16 × 33 / 2048 A입니다. 가상 모터는 센서 OFF일 때 직전 물리 스텝의 실제 actuator torque / C4 Kt를 반환합니다. 센서 ON일 때는 실제 모터 Kt·감속비로 true Iq를 역산한 뒤 센서 오차를 적용해 반환합니다. CAN 패킷 형식은 그대로이며 토크 필드를 추가하지 않습니다. HAL은 실제 CAN Iq와 검증한 C4 Kt로 SHM의 측정 토크를 계산합니다. 조정 항목과 물리 시각 기반 샘플링은 [README](../README.md#가상-iq-센서)를 참고하십시오.
+피드백은 v14 이후 signed 출력축 MIT 좌표로 해석합니다. 구형 입력축 표를 자동 감지하거나 대체하지 않습니다. 위치는 int16 × 12.56 / 32768 rad, 속도는 int16 deg/s를 rad/s로 변환하며, Iq는 int16 × 33 / 2048 A입니다. 가상 모터는 센서 OFF일 때 직전 물리 스텝의 실제 actuator torque / C4 Kt를 반환합니다. 센서 ON일 때는 실제 모터 Kt·감속비로 true Iq를 역산한 뒤 센서 오차를 적용해 반환합니다. CAN 패킷 형식은 그대로이며 토크 필드를 추가하지 않습니다. HAL은 실제 CAN Iq와 검증한 C4 Kt로 SHM의 측정 토크를 계산합니다. 조정 항목과 물리 시각 기반 샘플링은 [제어·시뮬레이션 설정](control.md#가상-iq-센서)를 참고하십시오.
 
 수동 명령은 TaskController를 실행하지 않는 별도 디버깅 세션에서만 사용합니다. 기본 세션에서는 TaskController가 명령을 계속 발행합니다.
 
@@ -85,30 +85,14 @@ HAL은 확인한 C4 응답의 Kt를 프로세스 내부에 보관하고 `motor_t
 - 일반 CSV는 simulation/control/motors의 최신 완성본을 함께 읽습니다. `state_seq`는 소비한 모델 프레임 번호이고 `control_latency_us`는 모델 발행에서 명령 발행까지의 시간입니다.
 - `sim_contact_event_time`은 시뮬레이션 시간, RFOB `event_time`은 독립 제어 시간입니다.
 
-HAL이 소유한 SHM은 정상 종료 때 해제합니다. SIGKILL 뒤 남은 객체나 크기가 다른 객체는 자동 재사용·삭제하지 않고 충돌로 보고합니다. SHM 배치를 변경하면 모든 프로그램을 새 바이너리로 재시작합니다.
+daemon이 소유한 SHM은 모든 자식이 종료된 뒤 daemon이 해제합니다. SIGKILL 뒤 남은 객체나 크기가 다른 객체는 자동 재사용·삭제하지 않고 충돌로 보고합니다. SHM 배치를 변경하면 모든 프로그램을 새 바이너리로 재시작합니다.
 
 ## 스토퍼 영점 보정 — 미구현
 
-아래는 **미구현 설정안**입니다. 관절마다 한쪽 기준 스토퍼를 `lower` 또는 `upper`로 선택하고, 알려진 하드웨어 기준각을 설정합니다. 순서도 설정으로 변경합니다. 예시 각도는 현재 XML의 하한에서 가져온 **시뮬레이션 초기값**이며 실제 기구 측정값이 아닙니다.
+현재 호밍은 설정 자세로 이동하는 PD 제어입니다. 절대 엔코더 없이 스토퍼로 영점을 찾는 기능은 아직 구현하지 않았습니다. 후속 구현은 다음 결정을 따릅니다.
 
-```yaml
-homing:
-  calibration:
-    order: [KP, HP, HR]
-    joints:
-      HR: {stop_side: lower, stop_angle_rad: -1.0472}
-      HP: {stop_side: lower, stop_angle_rad: -1.5708}
-      KP: {stop_side: lower, stop_angle_rad: -2.7227}
-```
-
-TaskController가 런타임 보정값을 소유합니다. 방향 `s=±1`, 상대 엔코더값 `r`, 접촉 시 측정값 `r_stop`, 알려진 스토퍼 각도 `q_stop`에 대해 다음 관계를 사용합니다.
-
-```text
-offset   = q_stop - s * r_stop
-q_joint  = s * r + offset
-r_target = s * (q_target - offset)
-```
-
-낮은 kp/kd·제한된 위치 오차·느린 위치 목표로 접근하고, 새 피드백에서 정지를 확인한 뒤 후퇴/재접근 재현성을 검사합니다. 보정 후 스토퍼에서 물러나 일반 자세 호밍으로 이어갑니다. tau_ff로 누르거나 절대 엔코더·C3 원점 재설정에 의존하지 않습니다. 이전 세션 offset을 자동 재사용하지 않으며, 알려진 원점·세션 변경 시 재호밍합니다.
-
-오래된 피드백을 반복해서 읽은 것만으로 접촉을 확정하지 않습니다. 센서리스 정지는 장애물·마찰·중력 평형과 구별되지 않을 수 있으므로 실제 기준각과 비어 있는 탐색 경로가 필요합니다. 거리·시간 한계와 재현성 실패는 호밍 실패로 처리하며, CAN 응답 지연 감시를 추가하지 않습니다.
+- 관절마다 기준 스토퍼 한쪽(`lower`/`upper`)과 알려진 기준각, 접근 순서를 설정합니다.
+- 낮은 MIT kp/kd·작은 위치 오차·느린 목표 이동으로 접근하고 정지를 관측한 뒤 후퇴·재접근 재현성을 확인합니다. tau_ff와 C3 원점 재설정은 사용하지 않습니다.
+- TaskController가 런타임 offset을 소유합니다. `q_joint = s*r + offset`, `offset = q_stop - s*r_stop`, `r_target = s*(q_target - offset)`이며 `s`는 축 방향입니다.
+- 보정 후 스토퍼에서 물러나 자세 호밍으로 이어갑니다. 이전 세션 offset은 자동 재사용하지 않습니다.
+- 새 피드백 없이 정지를 확정하지 않으며 장애물·마찰·중력 평형의 오인식, 탐색 거리·시간·재현성 실패를 명시적으로 처리합니다. 응답 지연 감시 기능과는 별개입니다.

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <string>
 #include <pthread.h>
 
 #include <fcntl.h>
@@ -47,7 +48,7 @@ public:
     };
 
 public:
-    Joystick(const char* device_id, ShmData* shared_memory);
+    Joystick(const char* config_path, ShmData* shared_memory);
 
     ~Joystick() {
         stop();
@@ -71,13 +72,13 @@ private:
     void* loop();
 
     void processEvent_(const js_event& event);
-    void Publish();
+    void Publish(bool connected = true);
 
     static float mapAxisValue_(int16_t value);
     static float applyDeadband_(float value, float deadband);
 
 private:
-    const char* device_id_;
+    std::string device_id_;
     ShmData* shared_memory_;
 
     int js_ = -1;
@@ -89,6 +90,8 @@ private:
 
     std::array<float, kMaxAxes> axes_{};
     std::array<bool, kMaxButtons> buttons_{};
+    std::array<int, 2> trigger_axes_{};
+    std::array<double, 2> trigger_rest_{}, trigger_pressed_{};
 
     std::array<AxisMapping, 3> axis_mappings_{{
         {1, TargetType::LinVel, 0, 1.0f, true, 0.05f},

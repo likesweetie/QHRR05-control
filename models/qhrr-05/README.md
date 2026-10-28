@@ -12,8 +12,8 @@ Unitree Go2의 **몸통 + FL 다리만 남긴 고정 베이스 모델**입니다
 - `qpos`·`qvel` 주소는 모두 `0, 1, 2`입니다. 자유 베이스의 `+7/+6` 오프셋을 사용하면 안 됩니다.
 - 시간 간격은 1 ms, 몸통 원점 높이는 원본의 0.445 m를 사용합니다.
 - `home` keyframe: 관절각 `[0, 0.9, -1.8] rad`, **모터 토크 `[0, 0, 0]`**.
-- 모터는 토크 입력이며 위치 서보가 아닙니다. 제한은 원본의 hip/thigh `±23.7`, calf `±45.43`입니다.
-- 몸통 자세·관성 파라미터와 FL의 관성·축·관절 범위·마찰·충돌 형상은 원본 값을 유지합니다. 고정 몸통의 질량·관성은 제거한 부품에 맞춰 재추정하지 않았으므로, 추후 자유 베이스로 전환할 때 재검토해야 합니다.
+- 모터는 토크 입력이며 위치 서보가 아닙니다. 현재 XML의 출력 제한은 세 축 모두 `±53.7Nm`입니다. CAN 모드에서는 모터 프로파일 제한(현재 `±53Nm`)과의 교집합을 적용합니다.
+- 몸통 자세·관성과 FL의 관성·축·관절 범위·충돌 형상은 원본 기반입니다. 감쇠·마찰·armature·구동기 한계는 시연용 튜닝값입니다. 고정 몸통의 질량·관성은 제거한 부품에 맞춰 재추정하지 않았으므로, 추후 자유 베이스로 전환할 때 재검토해야 합니다.
 - IMU·머리·카메라·나머지 다리는 없습니다. `FL_foot` site는 발 충돌 구의 중심을 나타내는 기하학적 표시이며 추가 링크나 센서가 아닙니다.
 
 | 관절 | 축 | 범위 [rad] |
@@ -24,7 +24,7 @@ Unitree Go2의 **몸통 + FL 다리만 남긴 고정 베이스 모델**입니다
 
 ## 원본과 형상 변경
 
-원본은 [MuJoCo Menagerie / unitree_go2](https://github.com/google-deepmind/mujoco_menagerie/tree/6da8b971844845de6ab27315aacc3a3fea4ddb8e/unitree_go2)이며, 사용 커밋은 `6da8b971844845de6ab27315aacc3a3fea4ddb8e`입니다. 원본 [BSD-3-Clause 라이선스](LICENSE)를 보존했습니다. 파일별 원본·로컬 SHA-256과 수정 여부는 [provenance.json](provenance.json)에 기록했습니다.
+원본은 [MuJoCo Menagerie / unitree_go2](https://github.com/google-deepmind/mujoco_menagerie/tree/6da8b971844845de6ab27315aacc3a3fea4ddb8e/unitree_go2)이며, 사용 커밋은 `6da8b971844845de6ab27315aacc3a3fea4ddb8e`입니다. 원본 [BSD-3-Clause 라이선스](LICENSE)를 보존했습니다. 메시 자산별 원본·로컬 SHA-256과 수정 여부는 [provenance.json](provenance.json)에 기록했습니다.
 
 - FR/RL/RR 서브트리와 대응 모터·전용 메시를 제거했습니다.
 - 몸통의 `freejoint`, IMU site, 머리 전용 `base_0/1/2` 메시와 앞쪽 cylinder/sphere 충돌 형상을 제거했습니다.
@@ -35,4 +35,4 @@ Unitree Go2의 **몸통 + FL 다리만 남긴 고정 베이스 모델**입니다
 
 ## 실행 안내
 
-빌드·GUI 조작·제어 설정·SHM 구조는 [프로젝트 README](../../README.md)를 참고하십시오. 이 문서는 모델 구조와 출처만 관리합니다. 발끝 `condim=6`과 기존 Go2 토크 한계는 유지하며, CAN HAL의 AK10-9 프로파일과는 별도입니다.
+빌드·GUI 조작·제어 설정·SHM 구조는 [프로젝트 README](../../README.md)를 참고하십시오. 이 문서는 모델 구조와 출처만 관리합니다. 일반 로봇 충돌 형상은 `condim=1`, 발끝과 접촉 물체는 `condim=6`입니다. 현재 관절 물리 파라미터는 `damping=2.0`, `frictionloss=0.2`, `armature=0.01`이며 모든 모드에 적용됩니다. XML 한계와 CAN HAL의 AK10-9 프로파일은 별도로 관리합니다.

@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
 
     try {
         if (argc != 3)
-            throw std::runtime_error("usage: input SHM_NAME JOYSTICK_DEVICE");
+            throw std::runtime_error("usage: input SHM_NAME INPUT_CONFIG");
 
         shm_utils::Mapping mapping(argv[1]);
         auto& shm = *mapping.get();

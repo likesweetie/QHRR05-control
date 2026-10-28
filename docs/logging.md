@@ -1,6 +1,6 @@
 # 텔레메트리 기록과 분석
 
-`shm_logger`는 기본 daemon의 선택적 프로세스입니다. **500 Hz 상태·10 Hz 건전성·이벤트·세션 정보를 DataTamer 2.0.0 MCAP에 기록**하고, 기본 5초 이전/2초 이후 Flight Recorder를 함께 운영합니다. 제어기와 SHM ABI는 변경하지 않았습니다. `config/shm_logger/shm_logger.yaml`에서 켜기·끄기·주기·버퍼·저장 정책을 조정합니다.
+`shm_logger`는 기본 daemon의 선택적 프로세스입니다. **500 Hz 상태·10 Hz 건전성·이벤트·세션 정보를 DataTamer 2.0.0 MCAP에 기록**하고, 기본 5초 이전/2초 이후 Flight Recorder를 함께 운영합니다. 현재 런타임의 SHM ABI 11을 사용하며 기록을 위해 제어 루프에 계측을 추가하지 않습니다. `config/shm_logger/shm_logger.yaml`에서 켜기·끄기·주기·버퍼·저장 정책을 조정합니다.
 
 ## 빌드와 시작
 
@@ -17,7 +17,7 @@ cmake --build build --parallel 2
 ./scripts/run_daemon.sh
 ```
 
-현재 개발 환경처럼 `venv/ensurepip`가 없고 `uv`가 있으면 위 환경 생성·설치 두 줄을 명시적으로 다음 명령으로 대체합니다.
+`venv/ensurepip`가 없고 `uv`가 설치된 환경에서는 위 환경 생성·설치 두 줄을 명시적으로 다음 명령으로 대체합니다.
 
 ```bash
 uv venv --python /usr/bin/python3 build/analysis_env
