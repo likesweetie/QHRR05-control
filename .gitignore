@@ -1,5 +1,15 @@
 /build/
 /logs/
+# Generated runtime captures, including exports outside logs/.
+*.log
+*.mcap
+*.mcap.json
+*.csv
+# Keep pinned dependency fixtures; these are not project run recordings.
+!/third_party/**/*.log
+!/third_party/**/*.mcap
+!/third_party/**/*.mcap.json
+!/third_party/**/*.csv
 __pycache__/
 /.aws/
 /.codex/
