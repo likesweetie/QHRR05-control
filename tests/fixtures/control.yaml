@@ -24,6 +24,19 @@ gravity_compensation:
   # N*m/rad; desired pose is captured when entering gravity mode.
   # Zero stiffness allows manual motion; kd_motor still damps velocity.
   task_stiffness: [0.0, 0.0, 0.0]
+  damping_ratio: [1.0, 1.0, 1.0]  # Baseline regressions retain the original uncompensated plant drag.
+  friction_compensation:
+    coulomb_ratio: [0.0, 0.0, 0.0]
+    velocity_scale_rad_s: 0.03
+  torque_limit_nm: [53.7, 53.7, 53.7]
+  virtual_inertia:
+    enabled: false
+    scale: 0.5
+    observer_hz: 8.0
+    external_torque_deadband_nm: 0.15
+    ramp_sec: 0.3
+    assist_limit_nm: [3.0, 3.0, 3.0]
+    maximum_velocity_rad_s: 2.0
 
 magnetic_touch:
   gravity_only: true  # Physical friction/damping remain in either setting.

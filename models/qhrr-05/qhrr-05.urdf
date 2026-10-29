@@ -1,0 +1,161 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="qhrr-05">
+  <!--SI: kg, m, kg*m^2. Inertial tensors are about COM in link-aligned axes.-->
+  <mujoco>
+    <compiler meshdir="assets" strippath="true" discardvisual="false" fusestatic="false" inertiafromgeom="false" />
+  </mujoco>
+  <link name="base">
+    <inertial>
+      <origin xyz="0.0255657022298543 0.0135975879763332 -0.00420097113554719" rpy="0 0 0" />
+      <mass value="8.163921" />
+      <inertia ixx="0.048588" ixy="-0.013651" ixz="0.000304" iyy="0.124676" iyz="0.000232" izz="0.143891" />
+    </inertial>
+    <visual name="qhrr_base_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="assets/qhrr_base.obj" />
+      </geometry>
+      <material name="qhrr_base_metal">
+        <color rgba="0.65 0.68 0.72 1" />
+      </material>
+    </visual>
+    <collision name="torso_collision">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.3788 0.251 0.13" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="hip">
+    <inertial>
+      <origin xyz="0.0569605793736814 -0.00464593794605549 -2.79951436338299e-08" rpy="0 0 0" />
+      <mass value="1.06311951886917" />
+      <inertia ixx="0.0010806801895359" ixy="1.80329283900043e-05" ixz="0.000001" iyy="0.00150113063464163" iyz="5.29865593866141e-06" izz="0.00119024653554896" />
+    </inertial>
+    <visual name="qhrr_hip_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="assets/qhrr_hip.obj" />
+      </geometry>
+      <material name="qhrr_hip_metal">
+        <color rgba="0.65 0.68 0.72 1" />
+      </material>
+    </visual>
+    <collision name="hip_collision">
+      <origin xyz="0.0299999999999998 0.0131000000000002 0" rpy="0 1.57079632679489 0.411710774053702" />
+      <geometry>
+        <cylinder radius="0.028" length="0.0654709095705869" />
+      </geometry>
+    </collision>
+    <collision name="hip_collision_end_0">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.028" />
+      </geometry>
+    </collision>
+    <collision name="hip_collision_end_1">
+      <origin xyz="0.0599999999999996 0.0262000000000003 0" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.028" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="hip_roll" type="revolute">
+    <parent link="base" />
+    <child link="hip" />
+    <origin xyz="0.1912 0.0624999999999999 0" rpy="0 0 0" />
+    <axis xyz="1 0 0" />
+    <limit lower="-0.872665" upper="0.872665" effort="53.7" velocity="20" />
+    <dynamics damping="2" friction="0.2" />
+  </joint>
+  <link name="thigh">
+    <inertial>
+      <origin xyz="-0.00385988628636716 0.0573570359748067 -0.0264287380321596" rpy="0 0 0" />
+      <mass value="2.176288" />
+      <inertia ixx="0.011888" ixy="0.000292" ixz="0.000926" iyy="0.011512" iyz="-0.001934" izz="0.003266" />
+    </inertial>
+    <visual name="qhrr_thigh_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="assets/qhrr_thigh.obj" />
+      </geometry>
+      <material name="qhrr_thigh_metal">
+        <color rgba="0.65 0.68 0.72 1" />
+      </material>
+    </visual>
+    <collision name="thigh_collision">
+      <origin xyz="0 0.0902999999999997 -0.11" rpy="0 3.14159265358979 0" />
+      <geometry>
+        <cylinder radius="0.026" length="0.22" />
+      </geometry>
+    </collision>
+    <collision name="thigh_collision_end_0">
+      <origin xyz="0 0.0902999999999997 0" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.026" />
+      </geometry>
+    </collision>
+    <collision name="thigh_collision_end_1">
+      <origin xyz="0 0.0902999999999997 -0.22" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.026" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="hip_pitch" type="revolute">
+    <parent link="hip" />
+    <child link="thigh" />
+    <origin xyz="0.0599999999999996 0.0262000000000003 0" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-2.984513" upper="2.879793" effort="53.7" velocity="20" />
+    <dynamics damping="2" friction="0.2" />
+  </joint>
+  <link name="calf">
+    <inertial>
+      <origin xyz="0.00624789973136231 2.56601114564936e-06 -0.164638132808556" rpy="0 0 0" />
+      <mass value="0.316044433148062" />
+      <inertia ixx="0.00184658643459813" ixy="0.000000" ixz="0.000046" iyy="0.00190518975448778" iyz="0.000000" izz="9.85254384492916e-05" />
+    </inertial>
+    <visual name="qhrr_calf_visual">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="assets/qhrr_calf.obj" />
+      </geometry>
+      <material name="qhrr_calf_metal">
+        <color rgba="0.65 0.68 0.72 1" />
+      </material>
+    </visual>
+    <collision name="calf_collision">
+      <origin xyz="-0.00201536249529272 4.09223191444319e-09 -0.105939717195431" rpy="0 3.12257127538108 3.14159062307076" />
+      <geometry>
+        <cylinder radius="0.013" length="0.211917770518995" />
+      </geometry>
+    </collision>
+    <collision name="calf_collision_end_0">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.013" />
+      </geometry>
+    </collision>
+    <collision name="calf_collision_end_1">
+      <origin xyz="-0.00403072499058543 8.18446382888638e-09 -0.211879434390862" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.013" />
+      </geometry>
+    </collision>
+    <collision name="FL">
+      <origin xyz="-0.00403072499058543 8.18446382888638e-09 -0.233011802519609" rpy="0 0 0" />
+      <geometry>
+        <sphere radius="0.0211323681287468" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="knee_pitch" type="revolute">
+    <parent link="thigh" />
+    <child link="calf" />
+    <origin xyz="0 0.0902999999999997 -0.22" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-2.722714" upper="-0.575959" effort="53.7" velocity="20" />
+    <dynamics damping="2" friction="0.2" />
+  </joint>
+</robot>

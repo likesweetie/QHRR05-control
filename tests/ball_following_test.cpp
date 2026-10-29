@@ -1,5 +1,6 @@
+#include <mujoco/mujoco.h>
 #include "motion_controllers/ball_following_controller.hpp"
-#include "input/joystick.hpp"
+#include "interfaces/input/joystick.hpp"
 #include "ipc/shm_utils.hpp"
 #include <yaml-cpp/yaml.h>
 #include <algorithm>

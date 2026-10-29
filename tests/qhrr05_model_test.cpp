@@ -28,6 +28,21 @@ int main(int argc, char** argv) {
         const int base = mj_name2id(m, mjOBJ_BODY, "base");
         Require(base > 0 && m->body_parentid[base] == 0 && m->body_jntnum[base] == 0,
             "Torso must be fixed directly to world");
+        int parent = base;
+        for (const char* name : {"FL_hip", "FL_thigh", "FL_calf"}) {
+            const int body = mj_name2id(m, mjOBJ_BODY, name);
+            Require(body > 0 && m->body_parentid[body] == parent,
+                "Existing FL body names and parent chain must be preserved");
+            parent = body;
+        }
+        const int foot = mj_name2id(m, mjOBJ_GEOM, "FL");
+        const int toe = mj_name2id(m, mjOBJ_SITE, "FL_foot");
+        Require(foot >= 0 && toe >= 0 && m->geom_bodyid[foot] == parent &&
+                    m->site_bodyid[toe] == parent,
+            "Existing foot contact and site names must belong to FL_calf");
+        for (const char* material : {"metal", "black", "white", "gray"})
+            Require(mj_name2id(m, mjOBJ_MATERIAL, material) >= 0,
+                "Existing PBR material mapping names must be preserved");
         const std::array<const char*, 3> joints = {
             "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint"};
 
@@ -38,13 +53,11 @@ int main(int argc, char** argv) {
                 "Fixed-base joint addresses must start at zero");
             Require(m->actuator_trntype[i] == mjTRN_JOINT && m->actuator_trnid[2 * i] == j,
                 "Actuator is mapped to the wrong joint");
-            Require(m->actuator_ctrllimited[i] &&
-                        std::isfinite(m->actuator_ctrlrange[2 * i]) &&
+            Require(m->actuator_ctrllimited[i] && std::isfinite(m->actuator_ctrlrange[2 * i]) &&
                         std::isfinite(m->actuator_ctrlrange[2 * i + 1]) &&
-                        m->actuator_ctrlrange[2 * i] < 0 &&
-                        m->actuator_ctrlrange[2 * i + 1] > 0 &&
-                        std::abs(m->actuator_ctrlrange[2 * i] +
-                                 m->actuator_ctrlrange[2 * i + 1]) < 1e-10,
+                        m->actuator_ctrlrange[2 * i] < 0 && m->actuator_ctrlrange[2 * i + 1] > 0 &&
+                        std::abs(m->actuator_ctrlrange[2 * i] + m->actuator_ctrlrange[2 * i + 1]) <
+                            1e-10,
                 "Motor torque limits must be finite, symmetric and span zero");
         }
 

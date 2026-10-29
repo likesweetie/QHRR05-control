@@ -147,8 +147,7 @@ int main(int argc, char** argv) {
                                  measured.feedback[axis].current * 1.44) < 1e-12,
                     "HAL did not calculate torque from the actual returned CAN Iq");
                 const double servo =
-                    decoded_command.kp *
-                        (decoded_command.position - (data->qpos[axis] - origin[axis])) +
+                    decoded_command.kp * (decoded_command.position - data->qpos[axis]) +
                     decoded_command.kd * (decoded_command.velocity - data->qvel[axis]);
                 Require(std::abs(data->ctrl[axis] - std::clamp(servo,
                                                         model->actuator_ctrlrange[2 * axis],

@@ -27,6 +27,7 @@ processes:
     exec_path: simulation
     working_directory: ../..
     wait_ready: true
+    ready_timeout_ms: 20000  # Load the full-resolution CAD meshes before signaling readiness.
     args: [--model, models/qhrr-05/scene.xml, --control-config, config/control/control.yaml, --shm-name, "{shm_name}", --hal-config, config/can_hal/can_hal.yaml, --simulation-config, config/simulation/simulation.yaml]
 
   - name: control
@@ -56,6 +57,7 @@ debug_processes:
     exec_path: simulation
     working_directory: ../..
     wait_ready: true
+    ready_timeout_ms: 20000  # Load the full-resolution CAD meshes before signaling readiness.
     args: [--model, models/qhrr-05/scene.xml, --control-config, config/control/control.yaml, --shm-name, "{shm_name}", --without-can]
 
   - name: control

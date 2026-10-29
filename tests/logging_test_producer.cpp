@@ -1,4 +1,5 @@
 #include "ipc/shm_utils.hpp"
+#include "ipc/simulation/channel.hpp"
 #include <cmath>
 #include <csignal>
 #include <fstream>
@@ -24,6 +25,7 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, Stop);
         shm_utils::Mapping owner(argv[1], !attach);
         auto& shm = *owner.get();
+        qhrr05::simulation_ipc::Server simulation_ipc(argv[1]);
         if (!attach)
             shm.can_enabled = true;
         const auto start = shm_utils::MonotonicNs();
@@ -39,6 +41,8 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
+            simulation_ipc.Poll();
+            SimulationData simulation;
             {
                 shm_utils::Lock lock(shm);
                 if (command == "hold")
@@ -74,14 +78,13 @@ int main(int argc, char** argv) {
                 control.magnetic.observer_valid = command != "invalid";
                 control.magnetic.estimated_force = {0, 0, .9};
                 ++shm.control_sequence;
-                auto& simulation = shm_utils::Next(shm.simulation, shm.simulation_sequence);
                 simulation.published_ns = now;
                 simulation.time = control.control_time;
                 simulation.contact_force = {0, 0, 1};
                 simulation.contact = true;
-                ++shm.simulation_sequence;
                 shm_utils::Notify(shm);
             }
+            simulation_ipc.Publish(simulation);
             next += 2000000;
             const auto now = shm_utils::MonotonicNs();
             if (next <= now)
@@ -90,6 +93,7 @@ int main(int argc, char** argv) {
                 static_cast<time_t>(next / 1000000000), static_cast<long>(next % 1000000000)};
             ::clock_nanosleep(kShmClock, TIMER_ABSTIME, &wake, nullptr);
         }
+        simulation_ipc.Finish();
         shm_utils::Stop(shm);
         std::cout << "producer done\n";
         return 0;

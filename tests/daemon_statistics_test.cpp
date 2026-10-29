@@ -55,9 +55,9 @@ int main() {
         motors.feedback_published_ns = now - 40000000;
         motors.received_ns = {now - 10000000, now - 20000000, now - 30000000};
         motors.received_sequence.fill(1);
-        shm.model_sequence = shm.simulation_sequence = 1;
+        shm.model_sequence = shm.control_sequence = 1;
         shm.model[1].published_ns = now - 20000000;
-        shm.simulation[1].published_ns = now - 10000000;
+        shm.control[1].published_ns = now - 9000000;
         statistics.Sample(shm);
 
         motors.command_sequence = 6;
@@ -66,11 +66,11 @@ int main() {
         motors.feedback_published_ns += 8000000;
         shm.model_sequence = 2;
         shm.model[0].published_ns = now - 17000000;
-        shm.simulation_sequence = 3;
-        shm.simulation[1].published_ns += 4000000;
-        shm.control[0].command_sequence = 6;
-        shm.control[0].published_ns = now - 5000000;
-        shm.control[0].input_model_published_ns = now - 17000000;
+        shm.control_sequence = 3;
+        shm.control[1].published_ns += 4000000;
+        shm.control[1].command_sequence = 6;
+        shm.control[1].published_ns = now - 5000000;
+        shm.control[1].input_model_published_ns = now - 17000000;
         statistics.Sample(shm);
         statistics.Sample(shm);  // Unchanged publications must not create interval/gap samples.
         {
@@ -83,7 +83,7 @@ int main() {
         Require(Row(report, "Pub mean us / command").mean == 2000 &&
                     Row(report, "Pub mean us / feedback").mean == 4000 &&
                     Row(report, "Pub mean us / model").mean == 3000 &&
-                    Row(report, "Pub mean us / simulation").mean == 2000,
+                    Row(report, "Pub mean us / control").mean == 2000,
             "publication timestamps were paired with unrelated domain sequences");
         Require(Row(report, "Pub mean us / command").count == 1,
             "unchanged publication was counted twice");
@@ -100,7 +100,7 @@ int main() {
                     report.find("N/A: mutex wait/hold, IPC overhead") != std::string::npos,
             "unobservable metrics were presented as measured values");
         Require(
-            shm.motor_sequence == 0 && shm.control_sequence == 0 && !shm.stopping && !shm.failed,
+            shm.motor_sequence == 0 && shm.control_sequence == 3 && !shm.stopping && !shm.failed,
             "statistics changed the shared-memory publication state");
 
         shm.can_enabled = false;

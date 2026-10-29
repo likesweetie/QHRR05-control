@@ -1,5 +1,6 @@
-#include "input/joystick.hpp"
+#include "interfaces/input/joystick.hpp"
 #include "ipc/shm_utils.hpp"
+#include "interfaces/input/interface.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -100,23 +101,27 @@ Joystick::Joystick(const char* config_path, ShmData* shared_memory)
     const auto rest = config["trigger_rest"].as<std::vector<double>>();
     const auto pressed = config["trigger_pressed"].as<std::vector<double>>();
 
-    if (device_id_.empty() || indices.size() != 3 || invert.size() != 3 ||
-        triggers.size() != 2 || rest.size() != 2 || pressed.size() != 2 ||
-        !std::isfinite(deadband) || deadband < 0 || deadband >= 1)
+    if (device_id_.empty() || indices.size() != 3 || invert.size() != 3 || triggers.size() != 2 ||
+        rest.size() != 2 || pressed.size() != 2 || !std::isfinite(deadband) || deadband < 0 ||
+        deadband >= 1)
         throw std::runtime_error("invalid joystick mapping configuration");
 
     for (int i = 0; i < 3; ++i) {
         if (indices[i] < 0 || indices[i] >= int(kMaxAxes))
             throw std::runtime_error("joystick direction axis out of range");
 
-        axis_mappings_[i] = {static_cast<uint8_t>(indices[i]), TargetType::LinVel,
-            static_cast<uint8_t>(i), 1.f, invert[i], static_cast<float>(deadband)};
+        axis_mappings_[i] = {static_cast<uint8_t>(indices[i]),
+            TargetType::LinVel,
+            static_cast<uint8_t>(i),
+            1.f,
+            invert[i],
+            static_cast<float>(deadband)};
     }
 
     for (int i = 0; i < 2; ++i) {
         if (triggers[i] < 0 || triggers[i] >= int(kMaxAxes) || !std::isfinite(rest[i]) ||
-            !std::isfinite(pressed[i]) || rest[i] < -1 || rest[i] > 1 ||
-            pressed[i] < -1 || pressed[i] > 1 || pressed[i] == rest[i])
+            !std::isfinite(pressed[i]) || rest[i] < -1 || rest[i] > 1 || pressed[i] < -1 ||
+            pressed[i] > 1 || pressed[i] == rest[i])
             throw std::runtime_error("invalid joystick trigger mapping");
 
         trigger_axes_[i] = triggers[i];
@@ -304,31 +309,22 @@ void Joystick::Publish(bool connected) {
         input.joystick_buttons[index] = buttons_[mapping.button_number] != mapping.invert;
     }
 
-    shm_utils::Lock lock(*shared_memory_);
-
-    if (shared_memory_->stopping || shared_memory_->simulation_finished) {
-        running_ = false;
-        return;
-    }
-
-    auto& next = shm_utils::Next(shared_memory_->control, shared_memory_->control_sequence);
-    next.joystick_axes = input.joystick_axes;
-    next.joystick_buttons = input.joystick_buttons;
-    next.joystick_connected = connected;
-    next.joystick_l2 = connected ? std::clamp(
-        (axes_[trigger_axes_[0]] - trigger_rest_[0]) /
-            (trigger_pressed_[0] - trigger_rest_[0]), 0.0, 1.0) : 0;
-    next.joystick_r2 = connected ? std::clamp(
-        (axes_[trigger_axes_[1]] - trigger_rest_[1]) /
-            (trigger_pressed_[1] - trigger_rest_[1]), 0.0, 1.0) : 0;
+    input.joystick_connected = connected;
+    input.joystick_l2 = connected ? std::clamp((axes_[trigger_axes_[0]] - trigger_rest_[0]) /
+                                                   (trigger_pressed_[0] - trigger_rest_[0]),
+                                        0.0,
+                                        1.0)
+                                  : 0;
+    input.joystick_r2 = connected ? std::clamp((axes_[trigger_axes_[1]] - trigger_rest_[1]) /
+                                                   (trigger_pressed_[1] - trigger_rest_[1]),
+                                        0.0,
+                                        1.0)
+                                  : 0;
 
     if (!connected) {
-        next.joystick_axes.fill(0);
-        next.joystick_buttons.fill(false);
+        input.joystick_axes.fill(0);
+        input.joystick_buttons.fill(false);
     }
 
-    ++next.joystick_sequence;
-    next.joystick_published_ns = shm_utils::MonotonicNs();
-    ++shared_memory_->control_sequence;
-    shm_utils::Notify(*shared_memory_);
+    qhrr05::InputInterface::PublishJoystick(*shared_memory_, input);
 }

@@ -157,6 +157,9 @@ template <> struct DataTamer2::TypeDefinitionTrait<SimulationData> {
     template <typename Add> static std::string_view define(SimulationData& value, Add& add) {
         add("published_ns", &value.published_ns);
         add("run_id", &value.run_id);
+        add("sequence", &value.sequence);
+        add("transport_drops", &value.transport_drops);
+        add("finished", &value.finished);
         add("time", &value.time);
         add("position_gt", &value.position_gt);
         add("torque_gt", &value.torque_gt);
@@ -164,6 +167,15 @@ template <> struct DataTamer2::TypeDefinitionTrait<SimulationData> {
         add("contact_force", &value.contact_force);
         add("contact_torque", &value.contact_torque);
         add("object_position", &value.object_position);
+        add("object_quaternion", &value.object_quaternion);
+        add("velocity_gt", &value.velocity_gt);
+        add("paused", &value.paused);
+        add("applied_input_sequence", &value.applied_input_sequence);
+        add("applied_pause_sequence", &value.applied_pause_sequence);
+        add("applied_step_sequence", &value.applied_step_sequence);
+        add("perturb_owner", &value.perturb_owner);
+        add("perturb_active", &value.perturb_active);
+        add("perturb_wrench", &value.perturb_wrench);
         add("contact", &value.contact);
         add("contact_event_sequence", &value.contact_event_sequence);
         add("contact_event_time", &value.contact_event_time);

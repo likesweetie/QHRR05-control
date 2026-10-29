@@ -1,4 +1,14 @@
 file(MAKE_DIRECTORY "${TEST_DIR}")
+# These tests exercise input/startup failures, not high-resolution mesh loading.
+# Keep the current model's physical parameters and collision shapes exactly.
+execute_process(COMMAND python3 "${CMAKE_CURRENT_LIST_DIR}/prepare_startup_guard_model.py"
+    "${MODEL}" "${CONTROL_CONFIG}" "${TEST_DIR}/model"
+    RESULT_VARIABLE prepare_result)
+if(NOT prepare_result EQUAL 0)
+    message(FATAL_ERROR "Could not prepare current-model startup fixture")
+endif()
+set(MODEL "${TEST_DIR}/model/scene.xml")
+set(CONTROL_CONFIG "${TEST_DIR}/model/control.yaml")
 string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef shm_suffix)
 function(expect_result expected_code expected_message)
     execute_process(COMMAND ${ARGN}

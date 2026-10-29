@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>QHRR · 필수 상태 · 명령 운용 보드</title>
+<style>
+:root{--paper:#f6f5f4;--white:#fff;--navy:#0a1530;--ink:#20283a;--muted:#666b76;--line:#e3e1dd;--purple:#5645d4;--purple-soft:#f0edfc;--green:#17724f;--green-soft:#eaf5ef;--amber:#955500;--amber-soft:#fff4df;--red:#b82032;--red-soft:#fff0f1;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;--sans:"Notion Sans",-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans KR",Arial,sans-serif}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:140px}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased}button,select{font:inherit}button,a,select{-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:disabled{cursor:not-allowed}button:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--purple);outline-offset:4px}a{color:inherit;text-decoration:none}button{border:0}h1,h2,h3,p{margin:0}h2{font-size:16px;letter-spacing:-.25px}h3{font-size:15px}small{font-size:13px}.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}.muted{color:var(--muted)}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.skip-link{position:fixed;left:16px;top:-70px;z-index:1000;background:var(--navy);color:#fff;padding:12px 18px;border-radius:8px}.skip-link:focus{top:12px}.shell{max-width:1360px;margin:0 auto;padding:0 32px 32px}.topbar{height:80px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:15px;min-width:0}.brand-name{font-size:24px;font-weight:800;letter-spacing:-1px;color:var(--navy)}.brand-rule{height:22px;width:1px;background:#d7d5d0}.brand-section{font-size:13px;font-weight:650;letter-spacing:1.4px}.board-number{padding:3px 8px;background:#eae7f5;color:#4736b0;border-radius:4px;font:13px/1.5 var(--mono)}.other-board{display:flex;align-items:center;gap:10px;min-height:44px;font-size:13px;font-weight:600;border-radius:8px;padding:6px 10px}.other-board:hover{background:#eae7e2}.other-board span:first-child{font-family:var(--mono);color:var(--muted)}.page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin:30px 0 22px}.eyebrow{font:12px/1.4 var(--mono);letter-spacing:1.2px;color:var(--purple);margin-bottom:9px}h1{font-size:34px;line-height:1.25;letter-spacing:-1.2px;color:var(--navy);font-weight:720}.page-subtitle{color:var(--muted);margin-top:9px;font-size:14px}.demo-label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;color:#6a6047;font-size:13px;background:#f0ede3;border:1px solid #e5dfce;padding:9px 12px;border-radius:7px}.demo-label strong{font-family:var(--mono);font-weight:650}.demo-dot{width:6px;height:6px;border-radius:50%;background:#9c7824}.scenario-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}.scenario-label{font-size:13px;font-weight:650;color:#525969}.select{border:1px solid #cbc9c4;border-radius:8px;padding:9px 36px 9px 12px;background:#fff;min-height:44px;max-width:100%;color:var(--ink)}.button{min-height:44px;padding:9px 15px;border:1px solid #d4d1cb;border-radius:8px;background:#fff;font-size:13px;font-weight:600;color:var(--ink);transition:background .15s,border-color .15s}.button:hover{background:#edeae6;border-color:#bdb8ae}.toolbar-note{margin-left:auto;color:var(--muted);font-size:13px}.stop-rail{position:sticky;top:12px;z-index:30;display:grid;grid-template-columns:1fr minmax(340px,.85fr);align-items:center;gap:24px;background:#fff;border:1px solid #e9c6ca;border-left:4px solid var(--red);border-radius:12px;padding:14px 16px 14px 22px;margin-bottom:22px;box-shadow:0 4px 16px #19223408}.stop-title{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:700;color:var(--navy);margin-bottom:4px}.stop-caption{color:#70545b;font-size:13px;line-height:1.55}.estop{min-height:80px;width:100%;border-radius:8px;color:#fff;background:var(--red);display:flex;align-items:center;justify-content:center;gap:17px;box-shadow:inset 0 -3px 0 #8d1425;transition:background .15s}.estop:hover{background:#9c192a}.estop:active{background:#871222;transform:translateY(1px)}.estop:focus-visible{outline-color:var(--navy);outline-offset:4px}.stop-symbol{height:22px;width:22px;background:#fff;border-radius:3px;flex:0 0 auto}.estop-copy{text-align:left}.estop-copy strong{font:800 27px/1.15 var(--sans);letter-spacing:.5px;display:block}.estop-copy small{display:block;font-size:13px;margin-top:5px;color:#fff4f5}.badge{display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;padding:4px 8px;border-radius:5px;font-size:12px;font-weight:650;line-height:1.45;background:#f0efed;color:#646976}.badge.good{background:var(--green-soft);color:var(--green)}.badge.warn{background:var(--amber-soft);color:var(--amber)}.badge.bad{background:var(--red-soft);color:var(--red)}.badge.purple{background:var(--purple-soft);color:#4a38b8}.status-dot{height:6px;width:6px;border-radius:50%;background:currentColor;display:inline-block;flex:0 0 auto}.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}.summary-card{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 20px;min-height:155px}.summary-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:var(--muted)}.summary-value{font:650 32px/1.2 var(--mono);letter-spacing:-1px;margin-top:14px;color:var(--navy)}.summary-value .small-unit{font:500 18px/1 var(--sans);letter-spacing:0;margin-left:7px;color:var(--muted)}.summary-caption{font-size:13px;color:var(--muted);margin-top:9px;min-height:20px}.summary-value.is-estop{color:var(--red)}.summary-value.is-uncertain{color:var(--amber)}.workspace{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(330px,1fr);gap:20px;grid-template-areas:"health command";align-items:start}.command-column{grid-area:command}.health-column{grid-area:health;min-width:0}.card{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}.card-header{padding:19px 21px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid #efede9}.card-header p{font-size:13px;color:var(--muted);margin-top:4px}.section-kicker{font:12px/1.3 var(--mono);letter-spacing:1px;color:var(--muted);display:block;margin-bottom:5px}.health-banner{padding:15px 20px;display:flex;gap:11px;align-items:flex-start;border-bottom:1px solid #efede9;background:#fbfcfb}.health-banner .status-dot{margin-top:7px;background:var(--green)}.health-banner strong{font-size:14px;color:var(--green);display:block}.health-banner p{font-size:13px;color:var(--muted);margin-top:3px}.health-banner.warn{background:#fffbf4}.health-banner.warn strong{color:var(--amber)}.health-banner.warn .status-dot{background:var(--amber)}.bus-list{padding:0 20px}.bus-card{padding:20px 0;border-bottom:1px solid #ebe9e5}.bus-card:last-child{border-bottom:0}.bus-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.bus-identity{display:flex;gap:11px;align-items:center}.bus-icon{width:38px;height:38px;border-radius:8px;background:#f0eef8;color:#50408c;display:grid;place-items:center;font:600 13px var(--mono)}.bus-identity h3{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:15px}.bus-identity small{display:block;font-size:13px;color:var(--muted);margin-top:2px}.bus-meta{text-align:right;display:flex;flex-direction:column;gap:5px;align-items:flex-end}.bus-age{color:var(--muted);font-size:13px}.nodes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:13px}.node{background:#fafaf9;border:1px solid #eae8e3;border-radius:8px;padding:10px 11px;display:flex;align-items:center;gap:9px}.node-dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex:0 0 auto}.node strong{font:600 13px var(--mono);display:block}.node small{font:12px/1.4 var(--mono);color:var(--muted);display:block;margin-top:3px}.node.stale{background:#fff9ef;border-color:#ecdbbd}.node.stale .node-dot{background:#b97713}.node-status{font-size:12px;margin-left:auto;color:var(--green)}.node.stale .node-status{color:var(--amber)}.health-footer{padding:14px 20px;border-top:1px solid #efede9;color:var(--muted);font-size:13px;display:flex;flex-wrap:wrap;gap:7px;justify-content:space-between;background:#fcfbfa}.command-card{border-color:#d8d2ed}.command-card .card-header{background:#fdfcff}.command-body{padding:18px 20px}.tx-row{background:var(--paper);border:1px solid #e9e6e1;border-radius:9px;padding:13px;display:flex;align-items:center;justify-content:space-between;gap:15px}.tx-row.open{background:#f5f2ff;border-color:#e3dcfa}.tx-row strong{font-size:14px;display:block}.tx-row small{font-size:12px;color:var(--muted);display:block;margin-top:3px}.switch{padding:0;border:0;background:transparent;width:48px;min-width:48px;height:44px;border-radius:8px;position:relative}.switch:before{content:"";position:absolute;left:0;top:8px;width:48px;height:28px;border-radius:18px;background:#747983;transition:background .15s}.switch:after{content:"";position:absolute;left:4px;top:12px;width:20px;height:20px;background:#fff;border-radius:50%;box-shadow:0 1px 2px #0002;transition:transform .15s}.switch[aria-checked="true"]:before{background:var(--purple)}.switch[aria-checked="true"]:after{transform:translateX(20px)}.switch-hit{padding-left:8px;display:flex;align-items:center}.command-gate{font-size:13px;color:#6c647c;padding:13px 1px 3px;min-height:56px;line-height:1.6}.command-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.command-button{min-height:68px;border-radius:8px;border:1px solid #d9d4e8;background:#fff;text-align:left;padding:11px 14px;color:var(--navy);transition:background .15s,border-color .15s}.command-button strong{display:block;font-size:16px;font-weight:650;line-height:1.3}.command-button span{display:block;font-size:12px;color:var(--muted);margin-top:4px}.command-button:not(:disabled):hover{background:#f3f0fc;border-color:#a79be0}.command-button.primary:not(:disabled){background:var(--purple);border-color:var(--purple);color:#fff}.command-button.primary:not(:disabled) span{color:#f1eefe}.command-button.primary:not(:disabled):hover{background:#4534b3}.command-button:disabled{background:#f5f4f2;border-color:#e7e4de;color:#92919a}.command-button:disabled span{color:#85838b}.command-scope{font-size:12px;color:var(--muted);margin-top:13px;display:flex;align-items:center;gap:6px}.command-scope:before{content:"";display:block;width:5px;height:5px;border-radius:50%;background:var(--purple)}.latest-request{border-top:1px solid #e8e4f1;background:#fcfbff;padding:17px 20px 19px}.request-heading{display:flex;justify-content:space-between;gap:10px;align-items:center}.request-heading h3{font-size:13px;color:var(--muted);font-weight:500}.request-title{font-size:20px;letter-spacing:-.5px;font-weight:650;margin-top:9px;color:var(--navy)}.request-id{font:12px var(--mono);color:var(--muted);margin-top:5px}.stage-track{display:flex;align-items:center;gap:6px;margin-top:15px}.stage{padding:5px 8px;border-radius:5px;background:#eeecef;color:#77747d;font-size:12px;text-align:center;flex:1}.stage.active{background:var(--purple-soft);color:#4c3bbb}.stage.complete{background:var(--green-soft);color:var(--green)}.stage.uncertain{background:var(--amber-soft);color:var(--amber)}.stage-arrow{font-size:13px;color:#b9b4c0}.request-detail{font-size:13px;color:var(--muted);line-height:1.65;margin-top:11px;min-height:43px}.policy{margin-top:16px;border:1px solid var(--line);border-radius:10px;background:#eeece8;padding:0 17px}.policy summary{cursor:pointer;font-size:13px;font-weight:650;padding:13px 0;color:#555966}.policy ul{padding:0 0 15px 17px;margin:0;color:var(--muted);font-size:13px}.policy li+li{margin-top:7px}.policy strong{color:var(--ink)}.event-card{margin-top:20px}.event-list{max-height:340px;overflow:auto;overscroll-behavior:contain;padding:0 20px}.event-row{display:grid;grid-template-columns:74px minmax(0,1fr) 96px;gap:14px;padding:15px 0;align-items:start;border-bottom:1px solid #eeece8}.event-row:last-child{border-bottom:0}.event-time{font:12px/1.6 var(--mono);color:var(--muted);padding-top:2px}.event-title{font-size:13px;font-weight:600;color:var(--ink)}.event-detail{font-size:12px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}.event-row .badge{justify-self:end;margin-top:1px}.event-foot{border-top:1px solid #eeece8;padding:12px 20px;color:var(--muted);font-size:12px}.page-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:26px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.page-footer a{font-weight:600;color:var(--navy);padding:8px 0}.page-footer a:hover{text-decoration:underline}.toast{position:fixed;bottom:22px;left:50%;transform:translate(-50%,12px);max-width:calc(100% - 32px);width:max-content;padding:12px 18px;background:var(--navy);color:#fff;border-radius:9px;z-index:60;box-shadow:0 5px 20px #0002;font-size:13px;opacity:0;pointer-events:none;transition:opacity .15s,transform .15s}.toast.visible{opacity:1;transform:translate(-50%,0)}
+@media(min-width:1280px){.shell{padding-left:38px;padding-right:38px}.summary-card{padding:20px 23px}.summary-value{font-size:36px}}
+@media(max-width:1100px){.summary-grid{gap:10px}.summary-card{padding:17px 16px}.summary-top{display:block}.summary-top .badge{margin-top:7px}.summary-value{font-size:30px;margin-top:10px}.workspace{grid-template-columns:minmax(0,1.3fr) minmax(310px,1fr)}.node{padding:10px 8px;gap:6px}.node-status{display:none}.page-heading{align-items:flex-start}.demo-label{max-width:265px;line-height:1.8}.bus-list{padding:0 16px}.card-header{padding-left:17px;padding-right:17px}.event-row{gap:9px;grid-template-columns:65px minmax(0,1fr) 90px}}
+@media(max-width:900px){.shell{padding:0 24px 24px}.topbar{height:72px}.page-heading{margin-top:26px}.page-subtitle{max-width:380px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.summary-top{display:flex}.summary-top .badge{margin-top:0}.summary-card{min-height:144px;padding:17px 20px}.summary-value{font-size:32px}.workspace{grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"command command" "health health"}.command-column{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:16px;align-items:start}.policy{margin-top:0}.stop-rail{grid-template-columns:1fr 1fr;gap:16px;padding-left:18px}.stop-title{display:block}.stop-title .badge{margin-left:0;margin-top:6px}.stop-caption{max-width:300px}.estop-copy strong{font-size:26px}.node-status{display:inline}.bus-list{padding:0 21px}.event-row{grid-template-columns:80px minmax(0,1fr) 100px}.toolbar-note{width:100%;margin-left:0;font-size:12px}.page-heading{gap:16px}.demo-label{font-size:12px;max-width:245px}}
+@media(max-width:600px){.shell{padding:0 16px 20px}.topbar{height:64px;gap:8px}.brand{gap:9px}.brand-name{font-size:22px}.brand-section{font-size:11px;letter-spacing:.6px}.board-number{font-size:11px;padding:2px 5px}.other-board{font-size:12px;padding:5px 0;gap:6px}.other-board .link-word{display:none}.page-heading{display:block;margin:24px 0 18px}h1{font-size:29px;letter-spacing:-1px}.eyebrow{font-size:11px}.page-subtitle{font-size:13px}.demo-label{justify-content:flex-start;max-width:none;width:fit-content;font-size:12px;margin-top:15px;padding:7px 10px;gap:6px}.scenario-toolbar{gap:9px;align-items:stretch;margin-bottom:14px}.scenario-label{width:100%;font-size:12px}.select{flex:1;min-width:0;font-size:13px}.scenario-toolbar .button{padding:9px 11px}.toolbar-note{font-size:12px}.stop-rail{top:8px;grid-template-columns:1fr;gap:10px;padding:12px;border-left-width:3px;margin-bottom:16px;box-shadow:0 3px 14px #19223410}.stop-title{display:flex;font-size:14px;justify-content:space-between;margin-bottom:0}.stop-title .badge{margin-top:0;margin-left:8px;font-size:11px}.stop-caption{font-size:12px;max-width:none;margin-top:5px}.estop{min-height:76px;gap:15px}.estop-copy strong{font-size:27px}.estop-copy small{font-size:12px}.summary-grid{gap:10px;margin-bottom:16px}.summary-card{padding:14px 14px;min-height:146px}.summary-top{display:block;font-size:12px}.summary-top .badge{margin-top:6px;font-size:11px}.summary-value{font-size:28px;letter-spacing:-1.2px;margin-top:10px}.summary-caption{font-size:12px;line-height:1.55;margin-top:7px}.summary-value .small-unit{font-size:15px;margin-left:5px}.workspace{gap:16px}.command-column{display:block}.policy{margin-top:12px}.command-body{padding:16px 17px}.latest-request{padding:16px 17px}.card-header{padding:17px}.card-header p{font-size:12px}.card-header .badge{font-size:11px}.command-gate{min-height:0;padding-top:11px}.command-grid{margin-top:13px}.command-button{min-height:66px}.bus-list{padding:0 16px}.bus-card{padding:18px 0}.bus-identity{gap:9px}.bus-icon{width:34px;height:34px;font-size:12px}.bus-identity h3{font-size:14px}.bus-identity small{font-size:12px}.bus-age{font-size:12px}.bus-meta .badge{font-size:11px}.nodes{gap:6px}.node{padding:10px 8px;gap:6px;min-width:0}.node strong{font-size:12px}.node small{font-size:11px}.node-status{display:none}.node-dot{width:6px;height:6px}.health-banner{padding:14px 16px}.health-banner p{font-size:12px}.health-footer{padding:12px 16px;font-size:12px}.event-card{margin-top:16px}.event-list{padding:0 16px;max-height:360px}.event-row{grid-template-columns:1fr auto;gap:4px 10px;padding:13px 0}.event-time{grid-column:1;grid-row:1}.event-row .badge{grid-column:2;grid-row:1;font-size:11px}.event-content{grid-column:1/-1;grid-row:2}.event-title{font-size:13px}.event-detail{font-size:12px}.event-foot{padding:11px 16px;line-height:1.6}.page-footer{font-size:12px;margin-top:20px}.toast{bottom:14px;text-align:center;font-size:12px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{transition:none!important}}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#command-panel">명령 패널로 이동</a>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand" aria-label="QHRR Operations, 보드 1"><span class="brand-name">QHRR</span><span class="brand-rule" aria-hidden="true"></span><span class="brand-section">OPERATIONS</span><span class="board-number">01</span></div>
+    <a class="other-board" href="QHRR_telemetry_demo.html" target="_blank" rel="noopener" aria-label="02 텔레메트리 보드를 새 창에서 열기"><span>02</span><span>텔레메트리<span class="link-word"> 보드</span></span><span aria-hidden="true">↗</span></a>
+  </header>
+  <main>
+    <div class="page-heading">
+      <div><p class="eyebrow">ESSENTIAL STATUS &amp; COMMANDS</p><h1>필수 상태 · 명령</h1><p class="page-subtitle">상태를 확인하고, 제어기 전체에 명령을 요청합니다.</p></div>
+      <div class="demo-label"><span class="demo-dot" aria-hidden="true"></span><strong>DEMO</strong><span>· 합성 데이터 · 실제 장치 연결 없음</span></div>
+    </div>
+    <section class="scenario-toolbar" aria-label="데모 시나리오 설정">
+      <label class="scenario-label" for="scenario-select">데모 시나리오</label>
+      <select class="select" id="scenario-select"><option value="normal">정상 · 모든 필수 응답 수신</option><option value="bus-delay">필수 버스 지연 · vcan1</option><option value="controller-timeout">제어기 응답 없음</option><option value="telemetry-off">텔레메트리 OFF</option></select>
+      <button class="button" id="reset-demo" type="button">샘플 초기화</button>
+      <p class="toolbar-note">독립 시뮬레이션 · 다른 보드와 상태 공유 없음</p>
+    </section>
+    <section class="stop-rail" aria-labelledby="stop-heading">
+      <div><div class="stop-title" id="stop-heading">전체 비상정지 <span class="badge bad" id="stop-latch">항상 요청 가능</span></div><p class="stop-caption" id="stop-status">일반 TX 잠금·응답 지연과 무관하게 최우선으로 요청합니다.</p></div>
+      <button class="estop" id="estop" type="button" aria-label="전체 제어기 비상정지 ESTOP 요청"><span class="stop-symbol" aria-hidden="true"></span><span class="estop-copy"><strong>ESTOP</strong><small>전체 제어기 · 모든 CAN 버스</small></span></button>
+    </section>
+    <section class="summary-grid" aria-label="필수 운용 상태">
+      <article class="summary-card"><div class="summary-top"><span>제어기 운용 모드</span><span class="badge good" id="mode-freshness">확인됨</span></div><div class="summary-value" id="controller-mode">DISABLED</div><p class="summary-caption" id="mode-caption">구동 비활성 · Arm 대기</p></article>
+      <article class="summary-card"><div class="summary-top"><span>제어기 프로세스</span><span class="badge good"><span class="status-dot" aria-hidden="true"></span>생존 확인</span></div><div class="summary-value" id="controller-process">RUNNING</div><p class="summary-caption">프로세스 실행과 운용 모드는 별도</p></article>
+      <article class="summary-card"><div class="summary-top"><span>필수 노드 피드백</span><span class="badge good" id="feedback-status">FRESH</span></div><div class="summary-value"><span id="feedback-count">9 / 9</span><span class="small-unit">노드</span></div><p class="summary-caption" id="feedback-caption">3개 버스의 모든 필수 응답 수신</p></article>
+      <article class="summary-card"><div class="summary-top"><span>선택 텔레메트리</span><span class="badge purple">독립 모듈</span></div><div class="summary-value" id="telemetry-state">ON</div><p class="summary-caption" id="telemetry-caption">OFF여도 필수 상태·명령은 계속</p></article>
+    </section>
+    <div class="workspace">
+      <aside class="command-column" aria-label="제어기 명령">
+        <section class="card command-card" id="command-panel" aria-labelledby="command-heading">
+          <div class="card-header"><div><span class="section-kicker">COMMAND</span><h2 id="command-heading">전체 제어기 명령</h2></div><span class="badge purple">ALL 3 BUSES</span></div>
+          <div class="command-body">
+            <div class="tx-row" id="tx-row"><div><strong id="tx-label">일반 TX 잠금</strong><small>ESTOP은 이 잠금의 영향을 받지 않습니다.</small></div><div class="switch-hit"><button id="tx-toggle" class="switch" type="button" role="switch" aria-checked="false" aria-label="일반 TX 허용"></button></div></div>
+            <p class="command-gate" id="command-gate" role="status">일반 TX를 허용하면 Arm을 요청할 수 있습니다.</p>
+            <div class="command-grid">
+              <button class="command-button primary" id="command-arm" type="button" data-action="ARM" disabled><strong>Arm</strong><span>활성 준비</span></button>
+              <button class="command-button primary" id="command-run" type="button" data-action="RUN" disabled><strong>Run</strong><span>일반 제어 시작</span></button>
+              <button class="command-button" id="command-damping" type="button" data-action="DAMPING" disabled><strong>Damping</strong><span>댐핑 모드 전환</span></button>
+              <button class="command-button" id="command-reset" type="button" data-action="RESET" disabled><strong>Reset</strong><span>ESTOP 해제 · 비활성</span></button>
+            </div>
+            <p class="command-scope">명령 범위는 항상 전체 제어기입니다.</p>
+          </div>
+          <div class="latest-request" id="latest-request" aria-label="마지막 명령 요청">
+            <div class="request-heading"><h3>마지막 요청</h3><span class="badge" id="command-status">대기</span></div>
+            <div class="request-title" id="request-title">아직 요청이 없습니다</div><div class="request-id" id="request-id">COMMAND ID · —</div>
+            <div class="stage-track" aria-label="요청 처리 단계"><span class="stage" id="stage-requested">요청</span><span class="stage-arrow" aria-hidden="true">→</span><span class="stage" id="stage-accepted">접수</span><span class="stage-arrow" aria-hidden="true">→</span><span class="stage" id="stage-applied">적용</span></div>
+            <p class="request-detail" id="request-detail">접수와 적용을 구분합니다. 응답을 확인할 수 없으면 UNKNOWN으로 남깁니다.</p>
+          </div>
+        </section>
+        <details class="policy" open><summary>이 데모의 명령 정책</summary><ul><li><strong>Arm</strong>: DISABLED → ENABLING → DAMPING.<br><strong>Run</strong>: DAMPING → NORMAL.</li><li><strong>Damping</strong>: NORMAL → DAMPING.<br><strong>Reset</strong>: ESTOP → DISABLED.</li><li>일반 명령은 적용 직전에 TX 허용, 응답, <strong>모든 필수 피드백</strong>을 다시 확인합니다. 활성 준비 중 조건을 잃으면 합성 모델은 DISABLED로 복귀합니다.</li><li>ESTOP은 진행 중인 일반 요청보다 우선합니다. 응답 복구만으로 정지 요청 래치를 해제하지 않습니다.</li><li><strong>적용</strong>은 합성 제어기 전이 확인입니다. 실제 모터의 물리적 정지 완료를 뜻하지 않습니다.</li></ul></details>
+      </aside>
+      <div class="health-column">
+        <section class="card" aria-labelledby="health-heading">
+          <div class="card-header"><div><span class="section-kicker">ESSENTIAL HEALTH</span><h2 id="health-heading">필수 응답 상태</h2><p>3개 CAN 버스 · 9개 노드 · 모든 버스가 제어 조건에 포함됩니다.</p></div><span class="badge" id="bus-summary">3 / 3 정상</span></div>
+          <div class="health-banner" id="health-banner"><span class="status-dot" aria-hidden="true"></span><div><strong id="health-title">필수 피드백이 모두 신선합니다</strong><p id="health-detail">선택 텔레메트리의 표시 상태와 무관하게 계속 확인합니다.</p></div></div>
+          <div class="bus-list" id="bus-cards"></div>
+          <div class="health-footer"><span>신선도 기준 <strong class="mono">500 ms</strong> · 데모 설정</span><span>Health <strong class="mono" id="health-sequence">000001</strong></span></div>
+        </section>
+        <section class="card event-card" aria-labelledby="event-heading"><div class="card-header"><div><h2 id="event-heading">요청 · 결과 이력</h2><p>최신 기록부터 표시합니다. 접수만으로 적용을 확정하지 않습니다.</p></div><span class="badge" id="event-count">1 / 40</span></div><div class="event-list" id="event-list" role="list" aria-label="최대 40개의 운용 이벤트"></div><div class="event-foot">UNKNOWN: 결과 확인 불가 · 자동 재시도 없음 · 실제 장치 ACK 없음</div></section>
+      </div>
+    </div>
+    <footer class="page-footer"><span>QHRR · 01 OPERATIONS · 오프라인 GUI 데모</span><a href="QHRR_telemetry_demo.html" target="_blank" rel="noopener">02 텔레메트리 보드 열기 ↗</a><span>두 데모의 샘플 상태는 서로 공유하지 않습니다.</span></footer>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="sr-only" id="announcement" role="status" aria-live="polite" aria-atomic="true"></div>
+<script>
+(() => {
+  'use strict';
+  // Self-contained synthetic model. No network, device I/O, external libraries,
+  // telemetry subscription, or shared state with the other HTML demo.
+  const $ = id => document.getElementById(id);
+  const STALE_MS = 500;
+  const SOURCE_PERIOD_MS = 200;
+  const SCOPE = '전체 제어기 · 모든 CAN 버스';
+  const BUS_CONFIG = [
+    { id: 'vcan0', group: 'RL', label: '후좌측' },
+    { id: 'vcan1', group: 'FL', label: '전좌측' },
+    { id: 'vcan2', group: 'RR', label: '후우측' }
+  ];
+  const NODES = [{ name: 'HR', canId: '0x141' }, { name: 'HP', canId: '0x142' }, { name: 'KP', canId: '0x143' }];
+  const LABELS = { ARM: 'Arm', RUN: 'Run', DAMPING: 'Damping', RESET: 'Reset', ESTOP: 'ESTOP' };
+  const SCENARIOS = { normal: '정상 수신', 'bus-delay': '필수 버스 지연 · vcan1', 'controller-timeout': '제어기 응답 없음', 'telemetry-off': '텔레메트리 OFF' };
+  const MODE_DESCRIPTIONS = { DISABLED: '구동 비활성 · Arm 대기', ENABLING: '활성 준비 중 · Damping 전환 대기', DAMPING: '댐핑 제어 · Run 요청 가능', NORMAL: '일반 제어 모드', ESTOP: '비상정지 모드 · 명시적 Reset 필요' };
+  const state = {
+    scenario: 'normal', txUnlocked: false, modelMode: 'DISABLED', confirmedMode: 'DISABLED',
+    processLifecycle: 'RUNNING', stopRequested: false, pending: null, latest: null,
+    requestSequence: 0, healthSequence: 1, generation: 0, events: [],
+    controllerAt: performance.now(), buses: [], toastTimer: null
+  };
+  const busDOM = new Map();
+  function put(id, value) { const node = $(id); const text = String(value); if (node.textContent !== text) node.textContent = text; }
+  function node(tag, className, text) { const item = document.createElement(tag); if (className) item.className = className; if (text !== undefined) item.textContent = text; return item; }
+  function badge(id, text, tone) { put(id, text); $(id).className = 'badge' + (tone ? ' ' + tone : ''); }
+  function nowLabel() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
+  function age(at, now = performance.now()) { return Math.max(0, now - at) + 14; }
+  function ageLabel(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : Math.round(ms) + ' ms'; }
+  function controllerFresh(now = performance.now()) { return state.scenario !== 'controller-timeout' && age(state.controllerAt, now) <= STALE_MS; }
+  function busFresh(bus, now = performance.now()) { return state.scenario !== 'controller-timeout' && !(state.scenario === 'bus-delay' && bus.id === 'vcan1') && age(bus.lastAt, now) <= STALE_MS; }
+  function allFresh(now = performance.now()) { return controllerFresh(now) && state.buses.every(bus => busFresh(bus, now)); }
+  function announce(text) { put('announcement', text); }
+  function toast(text) { put('toast', text); $('toast').classList.add('visible'); clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => $('toast').classList.remove('visible'), 3000); }
+  function resultTone(status) { return status === 'APPLIED' ? 'good' : status === 'UNKNOWN' ? 'warn' : status === 'REJECTED' ? 'bad' : status === 'REQUESTED' || status === 'ACCEPTED' ? 'purple' : ''; }
+  function log(title, detail, status = 'INFO', commandId = '') {
+    state.events.unshift({ time: nowLabel(), title, detail, status, commandId });
+    if (state.events.length > 40) state.events.length = 40;
+    renderEvents();
+  }
+  function createBuses() {
+    const now = performance.now();
+    state.buses = BUS_CONFIG.map(config => ({ ...config, lastAt: now, sequence: 1 }));
+    busDOM.clear();
+    $('bus-cards').replaceChildren();
+    state.buses.forEach(bus => {
+      const card = node('article', 'bus-card'); card.dataset.bus = bus.id;
+      const heading = node('div', 'bus-heading');
+      const identity = node('div', 'bus-identity'); identity.append(node('div', 'bus-icon', bus.group));
+      const title = node('div'); title.append(node('h3', '', bus.id), node('small', '', bus.label + ' · 필수 노드 3개')); identity.append(title);
+      const meta = node('div', 'bus-meta'); const status = node('span', 'badge good', 'FRESH · 3 / 3'); status.dataset.busStatus = bus.id;
+      const sourceAge = node('span', 'bus-age mono', '14 ms'); sourceAge.dataset.busAge = bus.id; meta.append(status, sourceAge); heading.append(identity, meta);
+      const nodes = node('div', 'nodes'); const nodeItems = [];
+      NODES.forEach(config => {
+        const item = node('div', 'node'); item.dataset.nodeKey = bus.id + ':' + config.canId;
+        const dot = node('span', 'node-dot'); dot.setAttribute('aria-hidden', 'true');
+        const label = node('div'); label.append(node('strong', '', bus.group + '_' + config.name), node('small', '', config.canId));
+        const message = node('span', 'node-status', '응답'); item.append(dot, label, message); nodes.append(item); nodeItems.push({ item, message });
+      });
+      card.append(heading, nodes); $('bus-cards').append(card); busDOM.set(bus.id, { card, status, sourceAge, nodes: nodeItems });
+    });
+  }
+  function blockedReason(action) {
+    if (action === 'ESTOP') return '';
+    if (state.pending) return '진행 중인 요청의 결과를 기다리고 있습니다. ESTOP은 즉시 요청할 수 있습니다.';
+    if (!controllerFresh()) return '제어기 응답을 확인할 수 없어 일반 명령을 차단했습니다.';
+    const missing = state.buses.filter(bus => !busFresh(bus));
+    if (missing.length) return missing.map(bus => bus.id).join(', ') + ' 필수 피드백 지연으로 일반 명령을 차단했습니다.';
+    if (!state.txUnlocked) return '일반 TX가 잠겨 있습니다. 일반 TX를 먼저 허용하세요.';
+    if (state.stopRequested && action !== 'RESET') return '정지 요청 래치가 유지됩니다. 확인된 ESTOP 상태에서 Reset이 필요합니다.';
+    const allowed = { ARM: ['DISABLED'], RUN: ['DAMPING'], DAMPING: ['NORMAL'], RESET: ['ESTOP'] };
+    if (!allowed[action].includes(state.confirmedMode)) return LABELS[action] + '은 ' + allowed[action].join(', ') + ' 모드에서 요청할 수 있습니다.';
+    return '';
+  }
+  function commonGateText() {
+    if (state.pending) return state.pending.action === 'ESTOP' ? 'ESTOP을 우선 처리하고 있습니다. 응답을 확인할 때까지 결과를 확정하지 않습니다.' : '요청을 처리하고 있습니다. ESTOP은 대기하지 않고 우선 요청할 수 있습니다.';
+    if (!controllerFresh()) return '제어기 응답 없음 · 일반 명령 차단. ESTOP 요청은 계속 가능합니다.';
+    const missing = state.buses.filter(bus => !busFresh(bus));
+    if (missing.length) return missing.map(bus => bus.id).join(', ') + ' 피드백 지연 · 모든 일반 명령을 차단했습니다.';
+    if (state.stopRequested && state.confirmedMode !== 'ESTOP') return '정지 요청 결과가 미확인입니다. 응답 복구 후 ESTOP을 다시 요청해 확인하세요.';
+    if (!state.txUnlocked) return '일반 TX를 허용하면 현재 모드에서 가능한 명령이 활성화됩니다.';
+    if (state.confirmedMode === 'ESTOP') return '응답이 모두 확인되었습니다. Reset으로 DISABLED에 복귀할 수 있습니다.';
+    if (state.confirmedMode === 'DISABLED') return '필수 상태 확인 완료 · Arm으로 활성 준비를 시작할 수 있습니다.';
+    if (state.confirmedMode === 'DAMPING') return '댐핑 모드입니다. Run으로 일반 제어를 시작할 수 있습니다.';
+    if (state.confirmedMode === 'NORMAL') return '일반 제어 중입니다. Damping 또는 ESTOP을 요청할 수 있습니다.';
+    return '제어기 상태 전이를 확인하고 있습니다.';
+  }
+  function renderHealth() {
+    const now = performance.now(); const freshController = controllerFresh(now);
+    const freshBuses = state.buses.filter(bus => busFresh(bus, now)).length;
+    put('controller-mode', state.confirmedMode);
+    $('controller-mode').className = 'summary-value' + (!freshController ? ' is-uncertain' : state.confirmedMode === 'ESTOP' ? ' is-estop' : '');
+    badge('mode-freshness', freshController ? '확인됨' : '마지막 확인', freshController ? 'good' : 'warn');
+    put('mode-caption', freshController ? MODE_DESCRIPTIONS[state.confirmedMode] : '응답 없음 · 현재 모드 확정 불가');
+    put('controller-process', state.processLifecycle);
+    put('feedback-count', freshBuses * 3 + ' / 9');
+    badge('feedback-status', freshBuses === 3 && freshController ? 'FRESH' : 'STALE', freshBuses === 3 && freshController ? 'good' : 'warn');
+    put('feedback-caption', freshBuses === 3 ? '3개 버스의 모든 필수 응답 수신' : (9 - freshBuses * 3) + '개 노드의 최신 응답 미확인');
+    put('telemetry-state', state.scenario === 'telemetry-off' ? 'OFF' : 'ON');
+    put('telemetry-caption', state.scenario === 'telemetry-off' ? '필수 상태·명령은 계속 동작 중' : 'OFF여도 필수 상태·명령은 계속');
+    badge('bus-summary', freshBuses + ' / 3 정상', freshBuses === 3 ? 'good' : 'warn');
+    const fresh = allFresh(now);
+    $('health-banner').className = 'health-banner' + (fresh ? '' : ' warn');
+    put('health-title', fresh ? '필수 피드백이 모두 신선합니다' : !freshController ? '제어기 상태를 새로 확인할 수 없습니다' : '필수 버스의 피드백이 지연되고 있습니다');
+    put('health-detail', fresh ? state.scenario === 'telemetry-off' ? '텔레메트리가 OFF여도 필수 상태 확인과 명령 처리는 계속됩니다.' : '선택 텔레메트리의 표시 상태와 무관하게 계속 확인합니다.' : !freshController ? '프로세스는 실행 중이어도 응답은 없을 수 있습니다. 마지막 확인값을 보관합니다.' : 'vcan1의 필수 노드 3개가 STALE입니다. 다른 두 버스의 상태 확인은 계속됩니다.');
+    state.buses.forEach(bus => {
+      const dom = busDOM.get(bus.id); const isFresh = busFresh(bus, now);
+      dom.status.textContent = isFresh ? 'FRESH · 3 / 3' : 'STALE · 0 / 3'; dom.status.className = 'badge ' + (isFresh ? 'good' : 'warn');
+      dom.sourceAge.textContent = ageLabel(age(bus.lastAt, now));
+      dom.nodes.forEach(item => { item.item.className = 'node' + (isFresh ? '' : ' stale'); item.message.textContent = isFresh ? '응답' : '지연'; item.item.setAttribute('aria-label', item.item.dataset.nodeKey + ' ' + (isFresh ? '필수 피드백 정상' : '필수 피드백 지연')); });
+    });
+    put('health-sequence', String(state.healthSequence).padStart(6, '0'));
+  }
+  function renderControls() {
+    $('tx-toggle').setAttribute('aria-checked', String(state.txUnlocked));
+    $('tx-row').className = 'tx-row' + (state.txUnlocked ? ' open' : '');
+    put('tx-label', state.txUnlocked ? '일반 TX 허용' : '일반 TX 잠금');
+    put('command-gate', commonGateText());
+    ['ARM', 'RUN', 'DAMPING', 'RESET'].forEach(action => { const button = $('command-' + action.toLowerCase()); const reason = blockedReason(action); button.disabled = !!reason; button.title = reason || LABELS[action] + ' · ' + SCOPE; });
+    badge('stop-latch', state.stopRequested ? '정지 요청 래치' : '항상 요청 가능', 'bad');
+    let text = '일반 TX 잠금·응답 지연과 무관하게 최우선으로 요청합니다.';
+    if (state.stopRequested) {
+      if (state.pending && state.pending.action === 'ESTOP') text = '정지 요청 중 · 제어기 응답과 필수 피드백을 확인하고 있습니다.';
+      else if (!allFresh() || state.confirmedMode !== 'ESTOP') text = '정지 결과 미확인 · UNKNOWN. 물리적 정지 완료를 확인한 상태가 아닙니다.';
+      else text = 'ESTOP 모드 확인 · 자동 해제 없음. 물리적 정지 완료를 뜻하지 않습니다.';
+    }
+    put('stop-status', text);
+  }
+  function renderRequest() {
+    const request = state.latest;
+    const phaseNames = ['REQUESTED', 'ACCEPTED', 'APPLIED'];
+    if (!request) {
+      badge('command-status', '대기', ''); put('request-title', '아직 요청이 없습니다'); put('request-id', 'COMMAND ID · —');
+      put('request-detail', '접수와 적용을 구분합니다. 응답을 확인할 수 없으면 UNKNOWN으로 남깁니다.');
+      ['stage-requested', 'stage-accepted', 'stage-applied'].forEach((id, index) => { $(id).className = 'stage'; put(id, ['요청', '접수', '적용'][index]); });
+      return;
+    }
+    const labels = { REQUESTED: '요청됨', ACCEPTED: '접수됨', APPLIED: '적용 확인', UNKNOWN: 'UNKNOWN', CANCELLED: 'CANCELLED', REJECTED: '거절됨' };
+    badge('command-status', labels[request.status], resultTone(request.status));
+    put('request-title', LABELS[request.action] + ' · 전체 제어기'); put('request-id', 'COMMAND ID · ' + request.id); put('request-detail', request.detail);
+    ['stage-requested', 'stage-accepted', 'stage-applied'].forEach((id, index) => {
+      const seen = request.phases.includes(phaseNames[index]); $(id).className = 'stage' + (seen ? request.status === 'APPLIED' ? ' complete' : ' active' : '');
+      put(id, ['요청', '접수', '적용'][index]);
+    });
+    if (request.status === 'UNKNOWN') { $('stage-applied').className = 'stage uncertain'; put('stage-applied', '미확인'); }
+  }
+  function renderEvents() {
+    const fragment = document.createDocumentFragment();
+    state.events.forEach(event => {
+      const row = node('div', 'event-row'); row.setAttribute('role', 'listitem');
+      const time = node('time', 'event-time', event.time);
+      const content = node('div', 'event-content'); content.append(node('div', 'event-title', event.title), node('div', 'event-detail', (event.commandId ? event.commandId + ' · ' : '') + event.detail));
+      row.append(time, content, node('span', 'badge ' + resultTone(event.status), event.status)); fragment.append(row);
+    });
+    $('event-list').replaceChildren(fragment); put('event-count', state.events.length + ' / 40');
+  }
+  function render() { renderHealth(); renderControls(); renderRequest(); }
+  function isCurrent(request) { return state.pending === request && request.generation === state.generation; }
+  function setRequestStatus(request, status, detail) {
+    request.status = status; request.detail = detail;
+    if (!request.phases.includes(status)) request.phases.push(status);
+    log(LABELS[request.action] + ' · ' + ({ REQUESTED: '요청', ACCEPTED: '접수', APPLIED: '적용 확인', UNKNOWN: '결과 미확인', CANCELLED: '취소', REJECTED: '거절' }[status] || status), detail, status, request.id);
+    announce(LABELS[request.action] + ' ' + status + '. ' + detail);
+  }
+  function finish(request, status, detail) {
+    if (!isCurrent(request)) return;
+    setRequestStatus(request, status, detail); state.pending = null; render();
+  }
+  function requestCommand(action) {
+    if (action === 'ESTOP' && state.pending && state.pending.action === 'ESTOP') { toast('ESTOP을 우선 처리 중입니다. 현재 요청의 결과를 확인하고 있습니다.'); return; }
+    const reason = blockedReason(action); if (reason) { toast(reason); return; }
+    if (action === 'ESTOP') {
+      state.stopRequested = true;
+      if (state.pending) { const previous = state.pending; setRequestStatus(previous, 'CANCELLED', 'ESTOP 우선 요청으로 대기 중인 일반 명령을 취소했습니다.'); state.pending = null; }
+    }
+    const request = { id: 'DEMO-' + String(++state.requestSequence).padStart(4, '0'), action, status: 'REQUESTED', detail: '', phases: [], generation: state.generation, accepted: false };
+    state.pending = request; state.latest = request;
+    setRequestStatus(request, 'REQUESTED', action === 'ESTOP' ? '전체 제어기 비상정지 요청. 응답 확인 전에는 정지 완료로 표시하지 않습니다.' : SCOPE + '에 명령을 요청했습니다.'); render();
+    setTimeout(() => {
+      if (!isCurrent(request)) return;
+      if (!controllerFresh()) return;
+      if (action !== 'ESTOP' && (!allFresh() || !state.txUnlocked || state.stopRequested && action !== 'RESET')) { finish(request, 'REJECTED', '접수 전 필수 조건이 바뀌어 요청을 거절했습니다.'); return; }
+      request.accepted = true;
+      if (action === 'ARM') state.modelMode = 'ENABLING';
+      if (action === 'ESTOP') state.modelMode = 'ESTOP';
+      state.confirmedMode = state.modelMode;
+      setRequestStatus(request, 'ACCEPTED', action === 'ARM' ? '합성 제어기가 접수했습니다. ENABLING 전이를 확인하고 있습니다.' : '합성 제어기가 접수했습니다. 접수는 적용 확인과 구분됩니다.'); render();
+    }, 220);
+    setTimeout(() => {
+      if (!isCurrent(request)) return;
+      if (!request.accepted) { finish(request, 'UNKNOWN', '제어기 응답이 없어 접수·적용 여부를 확인할 수 없습니다. 자동 재시도하지 않습니다.'); return; }
+      // Queue acceptance is not permission to apply later without revalidation.
+      // ESTOP bypasses every ordinary-command gate. Ordinary mode transitions
+      // require fresh feedback, TX permission, and their expected source mode.
+      if (action !== 'ESTOP') {
+        const expectedMode = { ARM: 'ENABLING', RUN: 'DAMPING', DAMPING: 'NORMAL', RESET: 'ESTOP' }[action];
+        const responseFresh = controllerFresh();
+        const modeAllowed = state.modelMode === expectedMode;
+        const ready = allFresh() && state.txUnlocked && modeAllowed;
+        if (!ready) {
+          const abortingArm = action === 'ARM' && state.modelMode === 'ENABLING';
+          if (abortingArm) {
+            // Explicit demo policy: abort activation preparation; never resume it
+            // automatically when the observation channel or required bus recovers.
+            state.modelMode = 'DISABLED';
+            if (responseFresh) state.confirmedMode = 'DISABLED';
+          }
+          if (!responseFresh) {
+            finish(request, 'UNKNOWN', '접수 후 제어기 응답이 끊겨 적용 결과를 확인할 수 없습니다. 자동 재시도하지 않습니다.');
+          } else {
+            const reason = !allFresh() ? '필수 피드백 지연' : !state.txUnlocked ? '일반 TX 잠금' : '허용 모드 변경';
+            finish(request, 'REJECTED', '적용 직전 ' + reason + '으로 전이를 거절했습니다.' + (abortingArm ? ' 활성 준비를 중단하고 합성 제어기는 DISABLED로 복귀했습니다.' : ' 기존 제어 모드를 유지합니다.'));
+          }
+          return;
+        }
+      }
+      const destinations = { ARM: 'DAMPING', RUN: 'NORMAL', DAMPING: 'DAMPING', RESET: 'DISABLED', ESTOP: 'ESTOP' };
+      state.modelMode = destinations[action];
+      if (controllerFresh()) state.confirmedMode = state.modelMode;
+      if (!allFresh()) { finish(request, 'UNKNOWN', '요청은 접수됐지만 필수 응답이 부족해 전체 적용 결과를 확정할 수 없습니다. 정지 완료를 뜻하지 않습니다.'); return; }
+      if (action === 'RESET') state.stopRequested = false;
+      finish(request, 'APPLIED', '합성 제어기의 ' + state.confirmedMode + ' 모드 전이를 확인했습니다. 실제 장치 ACK가 아닙니다.');
+    }, action === 'ARM' ? 1200 : 820);
+  }
+  function sampleSource() {
+    const now = performance.now();
+    if (state.scenario !== 'controller-timeout') {
+      state.controllerAt = now; state.confirmedMode = state.modelMode; state.healthSequence++;
+      state.buses.forEach(bus => { if (!(state.scenario === 'bus-delay' && bus.id === 'vcan1')) { bus.lastAt = now; bus.sequence++; } });
+    }
+    renderHealth(); renderControls();
+  }
+  function setScenario(value) {
+    if (!Object.hasOwn(SCENARIOS, value)) return;
+    const now = performance.now(); state.scenario = value;
+    if (value === 'controller-timeout') { state.controllerAt = now - 900; state.buses.forEach(bus => { bus.lastAt = now - 900; }); }
+    else {
+      state.controllerAt = now; state.confirmedMode = state.modelMode;
+      state.buses.forEach(bus => { bus.lastAt = value === 'bus-delay' && bus.id === 'vcan1' ? now - 700 : now; });
+    }
+    log('시나리오 변경 · ' + SCENARIOS[value], value === 'telemetry-off' ? '선택 텔레메트리만 OFF. 필수 상태와 명령 경로는 계속 동작합니다.' : value === 'normal' ? '필수 응답 복구. 기존 ESTOP 또는 정지 요청 래치는 자동 해제하지 않습니다.' : value === 'bus-delay' ? 'vcan1 피드백 지연. 모든 일반 명령을 차단하고 ESTOP 요청을 허용합니다.' : '프로세스 RUNNING과 별개로 제어기 응답이 중단됩니다.');
+    render(); announce(SCENARIOS[value] + ' 시나리오를 적용했습니다.');
+  }
+  function resetDemo() {
+    state.generation++; state.scenario = 'normal'; state.txUnlocked = false; state.modelMode = 'DISABLED'; state.confirmedMode = 'DISABLED';
+    state.stopRequested = false; state.pending = null; state.latest = null; state.requestSequence = 0; state.healthSequence = 1; state.events = [];
+    state.controllerAt = performance.now(); $('scenario-select').value = 'normal'; createBuses();
+    log('샘플 세션 시작', 'DISABLED · 일반 TX 잠금 · 3개 버스의 필수 응답 정상.'); render();
+    announce('샘플을 초기화했습니다. 실제 제어기 Reset 명령과는 별개입니다.');
+  }
+  $('tx-toggle').addEventListener('click', () => {
+    state.txUnlocked = !state.txUnlocked;
+    log(state.txUnlocked ? '일반 TX 허용' : '일반 TX 잠금', state.txUnlocked ? '모드와 필수 상태 조건을 만족하는 일반 명령만 허용합니다.' : '새 일반 요청을 차단하고, 적용 전 요청도 TX 조건을 다시 확인합니다. 이미 적용된 제어를 정지하는 명령은 아닙니다.');
+    renderControls(); announce(state.txUnlocked ? '일반 TX를 허용했습니다.' : '일반 TX를 잠갔습니다. ESTOP은 계속 요청할 수 있습니다.');
+  });
+  $('scenario-select').addEventListener('change', event => setScenario(event.target.value));
+  $('reset-demo').addEventListener('click', () => { resetDemo(); toast('샘플 초기화 완료 · DISABLED / 일반 TX 잠금'); });
+  document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => requestCommand(button.dataset.action)));
+  $('estop').addEventListener('click', () => requestCommand('ESTOP'));
+  function deepFreeze(value) { if (value && typeof value === 'object') { Object.values(value).forEach(deepFreeze); Object.freeze(value); } return value; }
+  function publicRequest(request) { return request ? { id: request.id, action: request.action, status: request.status, accepted: request.accepted, phases: request.phases.slice(), detail: request.detail } : null; }
+  Object.defineProperty(window, '__operationsDiagnostics', { configurable: false, enumerable: false, get() {
+    const now = performance.now();
+    return deepFreeze({ version: '1.0', offline: true, scope: SCOPE, scenario: state.scenario, mode: state.confirmedMode, simulatedMode: state.modelMode,
+      modeFresh: controllerFresh(now), controllerAgeMs: age(state.controllerAt, now), processLifecycle: state.processLifecycle,
+      txUnlocked: state.txUnlocked, stopRequested: state.stopRequested, telemetryEnabled: state.scenario !== 'telemetry-off',
+      healthSequence: String(state.healthSequence), allRequiredFresh: allFresh(now),
+      buses: state.buses.map(bus => ({ id: bus.id, group: bus.group, required: true, fresh: busFresh(bus, now), ageMs: age(bus.lastAt, now), sequence: String(bus.sequence), nodes: NODES.map(item => ({ key: bus.id + ':' + item.canId, canId: item.canId, name: bus.group + '_' + item.name })) })),
+      pending: publicRequest(state.pending), latestRequest: publicRequest(state.latest), eventCount: state.events.length, events: state.events.map(event => ({ ...event })) });
+  } });
+  resetDemo(); setInterval(sampleSource, SOURCE_PERIOD_MS);
+})();
+</script>
+</body>
+</html>

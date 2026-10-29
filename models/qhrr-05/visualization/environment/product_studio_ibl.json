@@ -1,0 +1,11 @@
+{
+  "generator": "tools/prepare_product_studio_ibl.py",
+  "source": "three feathered rectangular softboxes with negative fill; generated locally",
+  "source_sha256": "04db5b9730b2412afabb0a890d912f5016bfbc309e65484bda0fe2d59b277458",
+  "ibl_sha256": "af0881144a59769b47c4793797b66ce9e93accd6bbf516eb1c3e1f27a7c90320",
+  "cube_size": 512,
+  "source_size": [
+    1024,
+    512
+  ]
+}

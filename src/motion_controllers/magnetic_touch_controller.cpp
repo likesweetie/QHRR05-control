@@ -6,20 +6,8 @@
 #include <yaml-cpp/yaml.h>
 
 namespace qhrr05 {
-namespace {
-double Dot(const std::array<double, 3>& a, const std::array<double, 3>& b) {
-    double value = 0;
-
-    for (int i = 0; i < 3; ++i)
-        value += a[i] * b[i];
-
-    return value;
-}
-
-double Norm(const std::array<double, 3>& v) {
-    return std::sqrt(Dot(v, v));
-}
-}
+using numeric::Dot;
+using numeric::Norm;
 
 MagneticTouchController::MagneticTouchController(const std::string& path) : observer_(path) {
     const auto config = YAML::LoadFile(path);

@@ -9,6 +9,9 @@
 #include <memory>
 #include <string>
 #include "ipc/shm_utils.hpp"
+#include "interfaces/input/interface.hpp"
+#include "ipc/simulation/channel.hpp"
+#include "safety/safety_layer.hpp"
 
 namespace qhrr05 {
 class TaskController {
@@ -25,19 +28,26 @@ public:
 
 private:
     shm_utils::Mapping shm_;
+    InputInterface input_;
+    SafetyLayer safety_;
+    simulation_ipc::Client simulation_channel_;
+    SimulationApproval simulation_approval_{};
+    std::string last_simulation_error_;
+    std::string last_input_rejection_;
     bool without_can_ = false;
 
     // Current joint inputs, copied once from the locked motor domain.
     std::array<double, 3> joint_position_{}, joint_velocity_{}, joint_acceleration_{};
     std::array<double, 3> motor_torque_{}, encoder_origin_{};
 
-    // Current model inputs. These are the arrays passed to the controllers.
+    // Current backend outputs, evaluated from the measured encoder state outside SHM locks.
     std::array<double, 3> gravity_torque_{}, bias_torque_{}, passive_torque_{}, friction_limit_{};
     std::array<double, 9> mass_matrix_{}, jacobian_{};
     std::array<double, 3> toe_position_{}, joint_min_{}, joint_max_{};
     std::uint64_t model_sequence_ = 0, model_published_ns_ = 0;
     std::uint64_t measurement_sequence_ = 0, measurement_ns_ = 0;
     double measurement_dt_ = .001;
+    double gravity_measurement_dt_ = .001;  // Actual elapsed time between fresh gravity samples.
 
     // Previous samples are retained only for acceleration and fresh-sample tracking.
     std::array<std::uint64_t, 3> previous_received_sequence_{}, previous_received_ns_{};
@@ -57,6 +67,7 @@ private:
     bool joystick_connected_ = false;
     std::uint64_t ball_target_sequence_ = 0, active_ball_target_sequence_ = 0;
 
+    std::unique_ptr<ModelBackend> model_backend_;
     std::unique_ptr<HomingController> homing_;
     std::unique_ptr<GravityCompensationController> gravity_;
     std::unique_ptr<MagneticTouchController> magnetic_;

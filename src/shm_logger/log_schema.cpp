@@ -10,11 +10,13 @@ std::optional<DataTamer2::RegistrationID> RegisterState(
     c.registerValue("shm/motor_sequence", &f.motor_sequence);
     c.registerValue("shm/model_sequence", &f.model_sequence);
     c.registerValue("shm/control_sequence", &f.control_sequence);
-    c.registerValue("shm/simulation_sequence", &f.simulation_sequence);
+    if (simulation)
+        c.registerValue("simulation/ipc_sequence", &f.simulation_sequence);
     c.registerValue("shm/stopping", &f.stopping);
     c.registerValue("shm/failed", &f.failed);
     c.registerValue("shm/can_enabled", &f.can_enabled);
-    c.registerValue("shm/simulation_finished", &f.simulation_finished);
+    if (simulation)
+        c.registerValue("simulation/finished", &f.simulation_finished);
     c.registerValue("simulation/valid", &f.simulation_valid);
     c.registerValue("motor", &f.motor);
     c.registerValue("model", &f.model);

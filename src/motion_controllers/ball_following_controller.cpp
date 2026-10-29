@@ -10,79 +10,29 @@
 
 namespace qhrr05 {
 namespace {
-using Vec = std::array<double, 3>;
-Vec Sub(const Vec& a, const Vec& b) {
-    return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+using Vec = numeric::Vec3;
+using numeric::Distance;
+using numeric::Dot;
+using numeric::Lerp;
+using numeric::TriangleDistanceSquared;
+const auto Sub = numeric::Subtract;
 }
 
-double Dot(const Vec& a, const Vec& b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+BallFollowingController::BallFollowingController(
+    const std::string& config_path, const std::atomic<bool>* cancellation)
+    : BallFollowingController(config_path, nullptr, cancellation, 0) {
 }
 
-double Distance(const Vec& a, const Vec& b) {
-    return std::sqrt(Dot(Sub(a, b), Sub(a, b)));
-}
-
-Vec Lerp(const Vec& a, const Vec& b, double t) {
-    return {a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])};
-}
-
-double TriangleDistanceSquared(const Vec& p, const std::array<double, 9>& triangle) {
-    const Vec a{triangle[0], triangle[1], triangle[2]};
-    const Vec b{triangle[3], triangle[4], triangle[5]};
-    const Vec c{triangle[6], triangle[7], triangle[8]};
-    const auto u = Sub(b, a), v = Sub(c, a), w = Sub(p, a);
-    const double uu = Dot(u, u), uv = Dot(u, v), vv = Dot(v, v);
-    const double denominator = uu * vv - uv * uv;
-
-    if (denominator > 1e-24) {
-        const double s = (vv * Dot(w, u) - uv * Dot(w, v)) / denominator;
-        const double t = (uu * Dot(w, v) - uv * Dot(w, u)) / denominator;
-
-        if (s >= 0 && t >= 0 && s + t <= 1) {
-            const Vec residual{w[0] - s * u[0] - t * v[0], w[1] - s * u[1] - t * v[1],
-                w[2] - s * u[2] - t * v[2]};
-            return Dot(residual, residual);
-        }
-    }
-
-    double result = std::numeric_limits<double>::infinity();
-
-    for (const auto& edge : {std::array<Vec, 2>{a, b}, std::array<Vec, 2>{b, c},
-             std::array<Vec, 2>{c, a}}) {
-        const auto direction = Sub(edge[1], edge[0]);
-        const double t = std::clamp(Dot(Sub(p, edge[0]), direction) /
-                                       std::max(Dot(direction, direction), 1e-24), 0.0, 1.0);
-        const auto delta = Sub(p, Lerp(edge[0], edge[1], t));
-        result = std::min(result, Dot(delta, delta));
-    }
-
-    return result;
-}
-
-// Translational Jacobian condition number: dimensionless IK sensitivity.
-double JacobianConditionNumber(const double j[9]) {
-    double jjt[9]{};
-
-    for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column)
-            for (int joint = 0; joint < 3; ++joint)
-                jjt[3 * row + column] += j[3 * row + joint] * j[3 * column + joint];
-
-    double eigenvalues[3], eigenvectors[9], quaternion[4];
-    mju_eig3(eigenvalues, eigenvectors, quaternion, jjt);
-    const double smallest = *std::min_element(eigenvalues, eigenvalues + 3);
-    const double largest = *std::max_element(eigenvalues, eigenvalues + 3);
-
-    if (!std::isfinite(smallest) || !std::isfinite(largest) || smallest <= 1e-24)
-        return std::numeric_limits<double>::infinity();
-
-    return std::sqrt(largest / smallest);
-}
+BallFollowingController::BallFollowingController(
+    const std::string& config_path, ModelBackend& backend, const std::atomic<bool>* cancellation)
+    : BallFollowingController(config_path, &backend, cancellation, 0) {
 }
 
 BallFollowingController::BallFollowingController(const std::string& config_path,
-    const std::atomic<bool>* cancellation) : cancellation_(cancellation) {
+    ModelBackend* backend,
+    const std::atomic<bool>* cancellation,
+    int)
+    : backend_(backend), cancellation_(cancellation) {
     const auto config = YAML::LoadFile(config_path);
     const auto s = config["ball_following"];
     enabled_ = s["enabled"].as<bool>();
@@ -112,15 +62,18 @@ BallFollowingController::BallFollowingController(const std::string& config_path,
     margin_ = scalar("workspace_margin_m");
     padding_ = scalar("workspace_sampling_padding_m");
     if (s["minimum_singular_value_m"].IsDefined())
-        throw std::runtime_error("ball_following.minimum_singular_value_m was replaced by maximum_condition_number");
+        throw std::runtime_error(
+            "ball_following.minimum_singular_value_m was replaced by maximum_condition_number");
 
     if (s["maximum_condition_number"].IsDefined())
-        throw std::runtime_error("maximum_condition_number belongs under workspace, not ball_following");
+        throw std::runtime_error(
+            "maximum_condition_number belongs under workspace, not ball_following");
 
     condition_limit_ = config["workspace"]["maximum_condition_number"].as<double>();
 
     if (!std::isfinite(condition_limit_) || condition_limit_ < 1)
-        throw std::runtime_error("workspace.maximum_condition_number must be finite and at least 1");
+        throw std::runtime_error(
+            "workspace.maximum_condition_number must be finite and at least 1");
     foot_speed_ = scalar("foot_speed_m_s");
     slow_speed_ = scalar("ball_slow_speed_m_s");
     normal_speed_ = scalar("ball_normal_speed_m_s");
@@ -131,8 +84,8 @@ BallFollowingController::BallFollowingController(const std::string& config_path,
     kd_ = values("kd_motor");
     torque_limit_ = values("torque_limit_nm");
 
-    if (grid_ < 9 || grid_ > 65 || trigger_threshold_ > 1 ||
-        slow_speed_ >= normal_speed_ || normal_speed_ >= fast_speed_)
+    if (grid_ < 9 || grid_ > 65 || trigger_threshold_ > 1 || slow_speed_ >= normal_speed_ ||
+        normal_speed_ >= fast_speed_)
         throw std::runtime_error("invalid ball following grid, trigger or speed order");
 
     for (int i = 0; i < 3; ++i)
@@ -142,19 +95,10 @@ BallFollowingController::BallFollowingController(const std::string& config_path,
     if (!enabled_)
         return;  // Explicitly unavailable mode, never an automatic control fallback.
 
-    const auto path = std::filesystem::path(config_path).parent_path() /
-                      config["model_path"].as<std::string>();
-    char error[1024]{};
-    model_.reset(mj_loadXML(path.c_str(), nullptr, error, sizeof(error)));
-
-    if (!model_)
-        throw std::runtime_error("ball FK model load failed: " + std::string(error));
-
-    data_.reset(mj_makeData(model_.get()));
-    site_ = mj_name2id(model_.get(), mjOBJ_SITE, "FL_foot");
-
-    if (model_->nq != 3 || model_->nv != 3 || !data_ || site_ < 0)
-        throw std::runtime_error("ball FK model must have three joints and FL_foot");
+    if (!backend_) {
+        owned_backend_ = MakeMujocoBackend(config_path);
+        backend_ = owned_backend_.get();
+    }
 
     const auto home = config["homing"]["position_rad"].as<std::vector<double>>();
 
@@ -168,20 +112,12 @@ std::array<double, 3> BallFollowingController::Forward(const Vec& q, bool* regul
     if (cancellation_ && cancellation_->load(std::memory_order_relaxed))
         throw std::runtime_error("workspace generation cancelled");
 
-    std::copy(q.begin(), q.end(), data_->qpos);
-    mj_kinematics(model_.get(), data_.get());
-    mj_comPos(model_.get(), data_.get());
-
+    const auto kinematics = backend_->Evaluate(q, regular != nullptr);
     if (regular) {
-        double j[9];
-        mj_jacSite(model_.get(), data_.get(), j, nullptr, site_);
-        const double determinant = j[0] * (j[4] * j[8] - j[5] * j[7]) -
-                                   j[1] * (j[3] * j[8] - j[5] * j[6]) +
-                                   j[2] * (j[3] * j[7] - j[4] * j[6]);
-        *regular = determinant * branch_sign_ > 0 && JacobianConditionNumber(j) <= condition_limit_;
+        *regular = numeric::Determinant(kinematics.jacobian) * branch_sign_ > 0 &&
+                   numeric::SingularValues(kinematics.jacobian).condition <= condition_limit_;
     }
-
-    return {data_->site_xpos[3 * site_], data_->site_xpos[3 * site_ + 1], data_->site_xpos[3 * site_ + 2]};
+    return kinematics.position;
 }
 
 int BallFollowingController::Neighbor(int node, int axis, int sign) const {
@@ -195,7 +131,8 @@ int BallFollowingController::Neighbor(int node, int axis, int sign) const {
 }
 
 bool BallFollowingController::ClearOfBoundary(const Vec& p) const {
-    const std::array<int, 3> bin{int(std::floor(p[0] / margin_)), int(std::floor(p[1] / margin_)),
+    const std::array<int, 3> bin{int(std::floor(p[0] / margin_)),
+        int(std::floor(p[1] / margin_)),
         int(std::floor(p[2] / margin_))};
     const auto found = boundary_bins_.find(bin);
 
@@ -228,32 +165,37 @@ bool BallFollowingController::SafeEdge(int from, int to) {
 
 void BallFollowingController::BuildWorkspace(const Vec& home) {
     // Select the same nonsingular kinematic branch as the configured homing pose.
-    Forward(home);
-    double j[9];
-    mj_jacSite(model_.get(), data_.get(), j, nullptr, site_);
-    branch_sign_ = j[0] * (j[4] * j[8] - j[5] * j[7]) -
-                   j[1] * (j[3] * j[8] - j[5] * j[6]) +
-                   j[2] * (j[3] * j[7] - j[4] * j[6]);
+    branch_sign_ = numeric::Determinant(backend_->Evaluate(home).jacobian);
     const int count = grid_ * grid_ * grid_, cells = grid_ - 1;
     joints_.resize(count);
     positions_.resize(count);
     valid_.resize(count);
     edges_.resize(count);
+    plan_distance_.resize(count);
+    plan_parent_.resize(count);
+    plan_open_.reserve(6 * count);
+    path_.reserve(count);
 
     for (int node = 0; node < count; ++node) {
         const int coordinate[] = {node / (grid_ * grid_), node / grid_ % grid_, node % grid_};
 
         for (int axis = 0; axis < 3; ++axis)
-            joints_[node][axis] = model_->jnt_range[2 * axis] + double(coordinate[axis]) / cells *
-                (model_->jnt_range[2 * axis + 1] - model_->jnt_range[2 * axis]);
+            joints_[node][axis] =
+                backend_->state().joint_min[axis] +
+                double(coordinate[axis]) / cells *
+                    (backend_->state().joint_max[axis] - backend_->state().joint_min[axis]);
 
         bool regular;
         positions_[node] = Forward(joints_[node], &regular);
         valid_[node] = regular;
     }
 
-    const auto vertex = [&](int x, int y, int z) { return x * grid_ * grid_ + y * grid_ + z; };
-    const auto cell = [&](int x, int y, int z) { return x * cells * cells + y * cells + z; };
+    const auto vertex = [&](int x, int y, int z) {
+        return x * grid_ * grid_ + y * grid_ + z;
+    };
+    const auto cell = [&](int x, int y, int z) {
+        return x * cells * cells + y * cells + z;
+    };
     std::vector<unsigned char> volume(cells * cells * cells), incident(count);
 
     for (int x = 0; x < cells; ++x)
@@ -299,14 +241,16 @@ void BallFollowingController::BuildWorkspace(const Vec& home) {
                             coordinate[axis] += side;
                             coordinate[u] += offsets[k][0];
                             coordinate[v] += offsets[k][1];
-                            corners[k] = positions_[vertex(coordinate[0], coordinate[1], coordinate[2])];
+                            corners[k] =
+                                positions_[vertex(coordinate[0], coordinate[1], coordinate[2])];
                         }
 
                         for (int k : {1, 2}) {
                             std::array<double, 9> triangle;
                             std::copy(corners[0].begin(), corners[0].end(), triangle.begin());
                             std::copy(corners[k].begin(), corners[k].end(), triangle.begin() + 3);
-                            std::copy(corners[k + 1].begin(), corners[k + 1].end(), triangle.begin() + 6);
+                            std::copy(
+                                corners[k + 1].begin(), corners[k + 1].end(), triangle.begin() + 6);
                             boundary_.push_back(triangle);
                         }
                     }
@@ -319,8 +263,10 @@ void BallFollowingController::BuildWorkspace(const Vec& home) {
         int lo[3], hi[3];
 
         for (int axis = 0; axis < 3; ++axis) {
-            lo[axis] = int(std::floor((std::min({t[axis], t[3 + axis], t[6 + axis]}) - clearance) / margin_));
-            hi[axis] = int(std::floor((std::max({t[axis], t[3 + axis], t[6 + axis]}) + clearance) / margin_));
+            lo[axis] = int(
+                std::floor((std::min({t[axis], t[3 + axis], t[6 + axis]}) - clearance) / margin_));
+            hi[axis] = int(
+                std::floor((std::max({t[axis], t[3 + axis], t[6 + axis]}) + clearance) / margin_));
         }
 
         for (int x = lo[0]; x <= hi[0]; ++x)
@@ -342,7 +288,8 @@ void BallFollowingController::BuildWorkspace(const Vec& home) {
     }
 
     if (seed < 0)
-        throw std::runtime_error("ball FK workspace is empty after condition-number filtering and clearance erosion");
+        throw std::runtime_error(
+            "ball FK workspace is empty after condition-number filtering and clearance erosion");
 
     // Build only the connected safe component. Every interpolated edge is checked in FK.
     std::queue<int> pending;
@@ -383,11 +330,16 @@ void BallFollowingController::BuildWorkspace(const Vec& home) {
 
 std::vector<std::array<double, 9>> BallFollowingController::WorkspaceSurface() const {
     if (!enabled_ || valid_indices_.empty())
-        throw std::runtime_error("workspace overlay requires enabled ball_following with a valid FK workspace");
+        throw std::runtime_error(
+            "workspace overlay requires enabled ball_following with a valid FK workspace");
 
     const int cells = grid_ - 1;
-    const auto vertex = [&](int x, int y, int z) { return x * grid_ * grid_ + y * grid_ + z; };
-    const auto cell = [&](int x, int y, int z) { return x * cells * cells + y * cells + z; };
+    const auto vertex = [&](int x, int y, int z) {
+        return x * grid_ * grid_ + y * grid_ + z;
+    };
+    const auto cell = [&](int x, int y, int z) {
+        return x * cells * cells + y * cells + z;
+    };
     std::vector<unsigned char> volume(cells * cells * cells);
 
     // Show only complete cells of the eroded, connected FK workspace. A convex
@@ -438,7 +390,8 @@ std::vector<std::array<double, 9>> BallFollowingController::WorkspaceSurface() c
                             coordinate[axis] += side;
                             coordinate[u] += offsets[k][0];
                             coordinate[v] += offsets[k][1];
-                            corners[k] = positions_[vertex(coordinate[0], coordinate[1], coordinate[2])];
+                            corners[k] =
+                                positions_[vertex(coordinate[0], coordinate[1], coordinate[2])];
                         }
 
                         for (int k : {1, 2}) {
@@ -446,13 +399,15 @@ std::vector<std::array<double, 9>> BallFollowingController::WorkspaceSurface() c
                             const auto& a = corners[0];
                             const auto& b = corners[reverse ? k + 1 : k];
                             const auto& c = corners[reverse ? k : k + 1];
-                            surface.push_back({a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]});
+                            surface.push_back(
+                                {a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]});
                         }
                     }
             }
 
     if (surface.empty())
-        throw std::runtime_error("FK workspace has no complete volume cells to display; increase workspace_grid_points");
+        throw std::runtime_error(
+            "FK workspace has no complete volume cells to display; increase workspace_grid_points");
 
     return surface;
 }
@@ -478,16 +433,23 @@ void BallFollowingController::Plan(int from, int to) {
     path_.clear();
     path_next_ = 0;
     planned_goal_ = to;
-    std::vector<double> distance(joints_.size(), std::numeric_limits<double>::infinity());
-    std::vector<int> parent(joints_.size(), -1);
-    std::priority_queue<std::pair<double, int>, std::vector<std::pair<double, int>>,
-        std::greater<std::pair<double, int>>> open;
+    auto& distance = plan_distance_;
+    auto& parent = plan_parent_;
+    auto& open = plan_open_;
+    std::fill(distance.begin(), distance.end(), std::numeric_limits<double>::infinity());
+    std::fill(parent.begin(), parent.end(), -1);
+    open.clear();
+    const auto push = [&](std::pair<double, int> entry) {
+        open.push_back(entry);
+        std::push_heap(open.begin(), open.end(), std::greater<std::pair<double, int>>{});
+    };
     distance[from] = 0;
-    open.push({Distance(positions_[from], positions_[to]), from});
+    push({Distance(positions_[from], positions_[to]), from});
 
     while (!open.empty()) {
-        const auto [cost, node] = open.top();
-        open.pop();
+        std::pop_heap(open.begin(), open.end(), std::greater<std::pair<double, int>>{});
+        const auto [cost, node] = open.back();
+        open.pop_back();
 
         if (node == to)
             break;
@@ -501,12 +463,13 @@ void BallFollowingController::Plan(int from, int to) {
                     continue;
 
                 const int next = Neighbor(node, axis, sign);
-                const double next_cost = distance[node] + Distance(positions_[node], positions_[next]);
+                const double next_cost =
+                    distance[node] + Distance(positions_[node], positions_[next]);
 
                 if (next_cost < distance[next]) {
                     distance[next] = next_cost;
                     parent[next] = node;
-                    open.push({next_cost + Distance(positions_[next], positions_[to]), next});
+                    push({next_cost + Distance(positions_[next], positions_[to]), next});
                 }
             }
     }
@@ -543,7 +506,8 @@ void BallFollowingController::Start(const Vec& joint_position) {
     ball_ = toe_reference_ = Forward(joint_position, &regular);
 
     if (!regular)
-        throw std::runtime_error("ball following requires the nonsingular homing branch; select H first");
+        throw std::runtime_error(
+            "ball following requires the nonsingular homing branch; select H first");
 
     reference_ = joint_position;
     reference_velocity_.fill(0);
@@ -563,7 +527,8 @@ void BallFollowingController::Start(const Vec& joint_position) {
         Forward(Lerp(reference_, joints_[seed], double(i) / 64), &regular);
 
         if (!regular)
-            throw std::runtime_error("ball following entry crosses a singular branch; select H first");
+            throw std::runtime_error(
+                "ball following entry crosses a singular branch; select H first");
     }
 
     current_node_ = -1;
@@ -582,9 +547,15 @@ void BallFollowingController::SetBallPosition(const Vec& position) {
     ball_ = position;
 }
 
-void BallFollowingController::Compute(double dt, const Vec& direction, double l2, double r2,
-    bool connected, const Vec& joint_position, const Vec& joint_velocity,
-    const Vec& gravity, Vec& torque) {
+void BallFollowingController::Compute(double dt,
+    const Vec& direction,
+    double l2,
+    double r2,
+    bool connected,
+    const Vec& joint_position,
+    const Vec& joint_velocity,
+    const Vec& gravity,
+    Vec& torque) {
     if (!std::isfinite(dt) || dt <= 0 || !std::isfinite(l2) || !std::isfinite(r2))
         throw std::runtime_error("invalid ball following dt or triggers");
 
@@ -595,8 +566,9 @@ void BallFollowingController::Compute(double dt, const Vec& direction, double l2
             throw std::runtime_error("invalid ball joystick direction");
 
     const double magnitude = std::sqrt(Dot(input, input));
-    ball_speed_ = l2 > trigger_threshold_ ? slow_speed_
-                  : r2 > trigger_threshold_ ? fast_speed_ : normal_speed_;
+    ball_speed_ = l2 > trigger_threshold_   ? slow_speed_
+                  : r2 > trigger_threshold_ ? fast_speed_
+                                            : normal_speed_;
 
     if (connected)
         for (int axis = 0; axis < 3; ++axis)
@@ -627,7 +599,8 @@ void BallFollowingController::Compute(double dt, const Vec& direction, double l2
         const double advance = std::min(travel, remaining);
         segment_progress_ += advance;
         travel -= advance;
-        const auto upper = std::upper_bound(segment_arc_.begin(), segment_arc_.end(), segment_progress_);
+        const auto upper =
+            std::upper_bound(segment_arc_.begin(), segment_arc_.end(), segment_progress_);
         const int i = std::clamp(int(upper - segment_arc_.begin()), 1, 32);
         const double fraction = (segment_progress_ - segment_arc_[i - 1]) /
                                 std::max(segment_arc_[i] - segment_arc_[i - 1], 1e-12);
@@ -647,7 +620,8 @@ void BallFollowingController::Compute(double dt, const Vec& direction, double l2
 
     for (int joint = 0; joint < 3; ++joint) {
         reference_velocity_[joint] = (reference_[joint] - old_reference[joint]) / dt;
-        const double effort = gravity[joint] + kp_[joint] * (reference_[joint] - joint_position[joint]) +
+        const double effort = gravity[joint] +
+                              kp_[joint] * (reference_[joint] - joint_position[joint]) +
                               kd_[joint] * (reference_velocity_[joint] - joint_velocity[joint]);
 
         if (!std::isfinite(effort))

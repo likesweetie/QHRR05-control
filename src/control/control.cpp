@@ -8,12 +8,13 @@
 namespace qhrr05 {
 TaskController::TaskController(
     const std::string& config_path, const std::string& shm_name, bool without_can)
-    : shm_(shm_name), without_can_(without_can),
+    : shm_(shm_name), input_(shm_name), safety_(config_path), simulation_channel_(shm_name, true),
+      without_can_(without_can), model_backend_(MakeMujocoBackend(config_path)),
       homing_(std::make_unique<HomingController>(config_path)),
       gravity_(std::make_unique<GravityCompensationController>(config_path)),
       magnetic_(std::make_unique<MagneticTouchController>(config_path)),
-      tracking_(std::make_unique<TrackingController>(config_path)),
-      ball_(std::make_unique<BallFollowingController>(config_path)) {
+      tracking_(std::make_unique<TrackingController>(config_path, *model_backend_)),
+      ball_(std::make_unique<BallFollowingController>(config_path, *model_backend_)) {
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
@@ -39,7 +40,21 @@ TaskController::TaskController(
 }
 
 bool TaskController::ReadInput() {
+    try {
+        simulation_channel_.Poll();
+        last_simulation_error_.clear();
+    } catch (const std::exception& error) {
+        if (last_simulation_error_ != error.what())
+            std::cerr << "[simulation-ipc] ERROR: " << error.what()
+                      << "; simulation commands unavailable; hardware control remains active\n";
+        last_simulation_error_ = error.what();
+    }
+    const auto command = input_.Receive();
+    std::string rejection;
+    std::uint64_t approved_sequence = 0;
+    std::optional<SimulationCommand> simulation_pending;
     std::array<std::uint64_t, 3> received_sequence, received_ns;
+    bool measured = false;
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
@@ -50,20 +65,13 @@ bool TaskController::ReadInput() {
         if (shm.stopping)
             return false;
 
-        const auto& model = shm.model[shm.model_sequence % kShmBufferCount];
-        gravity_torque_ = model.gravity_torque;
-        bias_torque_ = model.bias_torque;
-        passive_torque_ = model.passive_torque;
-        friction_limit_ = model.friction_limit;
-        mass_matrix_ = model.mass;
-        jacobian_ = model.jacobian;
-        toe_position_ = model.toe_position;
-        joint_min_ = model.joint_min;
-        joint_max_ = model.joint_max;
-        model_sequence_ = shm.model_sequence;
-        model_published_ns_ = model.published_ns;
-
         const auto& motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+        measured = without_can_ ? motors.feedback_sequence != 0
+                                : std::all_of(motors.received_sequence.begin(),
+                                      motors.received_sequence.end(),
+                                      [](auto sequence) {
+                                          return sequence != 0;
+                                      });
         motor_commands_enabled_ = !without_can_;
 
         for (int i = 0; i < 3; ++i) {
@@ -78,18 +86,95 @@ bool TaskController::ReadInput() {
         received_ns = motors.received_ns;
         measurement_dt_ = motors.sample_dt;
 
-        const auto& control = shm.control[shm.control_sequence % kShmBufferCount];
-        requested_mode_ = control.requested_mode;
-        requested_tracking_plane_ = control.requested_tracking_plane;
-        request_sequence_ = control.motion_sequence;
-        target_force_ = control.target_force;
-        joystick_direction_ = control.joystick_axes;
-        joystick_l2_ = control.joystick_l2;
-        joystick_r2_ = control.joystick_r2;
-        joystick_connected_ = control.joystick_connected;
-        requested_ball_position_ = control.requested_ball_position;
-        ball_target_sequence_ = control.ball_target_sequence;
+        auto candidate = shm.control[shm.control_sequence % kShmBufferCount];
+
+        if (command) {
+            if (command->set_mode) {
+                candidate.requested_mode = command->mode;
+                candidate.requested_tracking_plane = command->plane;
+                ++candidate.motion_sequence;
+            } else if (command->simulation.action == SimulationAction::None)
+                candidate.target_force = command->force;
+        }
+
+        try {
+            safety_.Validate(candidate, shm.stopping, shm.failed);
+
+            if (command && !model_published_ns_)
+                throw std::runtime_error("safety rejected request: model is not ready");
+            if (command && command->simulation.action != SimulationAction::None)
+                safety_.ValidateSimulation(command->simulation,
+                    simulation_channel_.Latest(),
+                    simulation_approval_,
+                    shm_utils::MonotonicNs());
+        } catch (const std::runtime_error& error) {
+            rejection = error.what();
+        }
+
+        if (rejection.empty()) {
+            if (command && command->simulation.action != SimulationAction::None) {
+                auto request = command->simulation;
+                const auto& state = simulation_channel_.Latest();
+                if (request.action == SimulationAction::Pause) {
+                    const bool paused =
+                        simulation_approval_.pause_sequence > state.applied_pause_sequence
+                            ? simulation_approval_.paused
+                            : state.paused;
+                    request.pause = request.pause == 2 ? !paused : request.pause;
+                }
+                simulation_pending = request;
+            } else if (command) {
+                auto& approved = shm_utils::Next(shm.control, shm.control_sequence);
+                approved.requested_mode = candidate.requested_mode;
+                approved.requested_tracking_plane = candidate.requested_tracking_plane;
+                approved.motion_sequence = candidate.motion_sequence;
+                approved.target_force = candidate.target_force;
+                ++shm.control_sequence;
+                shm_utils::Notify(shm);
+            }
+
+            requested_mode_ = candidate.requested_mode;
+            requested_tracking_plane_ = candidate.requested_tracking_plane;
+            request_sequence_ = candidate.motion_sequence;
+            target_force_ = candidate.target_force;
+            joystick_direction_ = candidate.joystick_axes;
+            joystick_l2_ = candidate.joystick_l2;
+            joystick_r2_ = candidate.joystick_r2;
+            joystick_connected_ = candidate.joystick_connected;
+            requested_ball_position_ = candidate.requested_ball_position;
+            ball_target_sequence_ = candidate.ball_target_sequence;
+            if (!command || command->simulation.action == SimulationAction::None)
+                approved_sequence = request_sequence_;
+        }
     }
+
+    if (simulation_pending) {
+        const auto& request = *simulation_pending;
+        try {
+            approved_sequence = simulation_channel_.SendApproved(request);
+            if (request.action == SimulationAction::Pause) {
+                simulation_approval_.paused = request.pause;
+                simulation_approval_.pause_sequence = approved_sequence;
+                simulation_approval_.perturb.active = 0;
+            } else if (request.action == SimulationAction::Reset) {
+                simulation_approval_.perturb.active = 0;
+            } else if (request.action == SimulationAction::Perturb) {
+                simulation_approval_.perturb = request.perturb;
+                simulation_approval_.perturb_expires_ns =
+                    request.perturb.active ? shm_utils::MonotonicNs() + kPerturbLeaseNs : 0;
+            }
+        } catch (const std::runtime_error& error) {
+            rejection = error.what();
+        }
+    }
+
+    if (command)
+        input_.Reply(*command, rejection, approved_sequence);
+
+    if (!rejection.empty() && rejection != last_input_rejection_)
+        std::cerr << "[safety] " << rejection << "; retaining last approved input\n";
+
+    last_input_rejection_ = rejection;
 
     if (requested_mode_ < 0 || requested_mode_ > 5)
         throw std::runtime_error("invalid controller mode");
@@ -126,13 +211,49 @@ bool TaskController::ReadInput() {
 
         measurement_ns_ = newest_ns;
 
-        if (without_can_)
-            measurement_sequence_ = *std::max_element(
+        if (without_can_) {
+            const auto next_measurement = *std::max_element(
                 previous_received_sequence_.begin(), previous_received_sequence_.end());
-        else
+            gravity_measurement_dt_ =
+                measurement_dt_ *
+                (measurement_sequence_ ? next_measurement - measurement_sequence_ : 1);
+            measurement_sequence_ = next_measurement;
+        } else {
+            gravity_measurement_dt_ = measurement_dt_;
             ++measurement_sequence_;
+        }
     }
 
+    if (measured && (fresh || !model_published_ns_)) {
+        const auto& state = model_backend_->Update(joint_position_, joint_velocity_);
+        gravity_torque_ = state.gravity;
+        bias_torque_ = state.bias;
+        passive_torque_ = state.passive;
+        friction_limit_ = state.friction;
+        mass_matrix_ = state.mass;
+        jacobian_ = state.jacobian;
+        toe_position_ = state.toe_position;
+        joint_min_ = state.joint_min;
+        joint_max_ = state.joint_max;
+        // Publish the same measured-state model for hardware and simulation observers.
+        // No solver, model update or allocation occurs while holding this mutex.
+        auto& shm = *shm_.get();
+        shm_utils::Lock lock(shm);
+        auto& model = shm_utils::Next(shm.model, shm.model_sequence);
+        model.published_ns = shm_utils::MonotonicNs();
+        model.gravity_torque = gravity_torque_;
+        model.bias_torque = bias_torque_;
+        model.passive_torque = passive_torque_;
+        model.friction_limit = friction_limit_;
+        model.mass = mass_matrix_;
+        model.jacobian = jacobian_;
+        model.toe_position = toe_position_;
+        model.joint_min = joint_min_;
+        model.joint_max = joint_max_;
+        model_published_ns_ = model.published_ns;
+        model_sequence_ = ++shm.model_sequence;
+        shm_utils::Notify(shm);
+    }
     return true;
 }
 
@@ -148,7 +269,8 @@ void TaskController::Control() {
         else if (requested_mode_ == 2)
             magnetic_->Start(control_time_, toe_position_);
         else if (requested_mode_ == 3)
-            tracking_->Start(control_time_, toe_position_, joint_position_, requested_tracking_plane_);
+            tracking_->Start(
+                control_time_, toe_position_, joint_position_, requested_tracking_plane_);
         else if (requested_mode_ == 4) {
             ball_->Start(joint_position_);
             active_ball_target_sequence_ = ball_target_sequence_;
@@ -173,10 +295,8 @@ void TaskController::Control() {
             position_reference_.data());
         holding_ = homing_->Reference(control_time_).holding;
     } else if (mode_ == 1) {
-        gravity_->Compute(joint_position_.data(),
-            joint_velocity_.data(),
-            gravity_torque_.data(),
-            bias_torque_.data(),
+        gravity_->Compute(model_backend_->state(),
+            {joint_acceleration_, motor_torque_, measurement_sequence_, gravity_measurement_dt_},
             torque_command_.data(),
             position_reference_.data());
     } else if (mode_ == 2) {
@@ -215,8 +335,15 @@ void TaskController::Control() {
             active_ball_target_sequence_ = ball_target_sequence_;
         }
 
-        ball_->Compute(period_ns_ / 1e9, joystick_direction_, joystick_l2_, joystick_r2_,
-            joystick_connected_, joint_position_, joint_velocity_, gravity_torque_, torque_command_);
+        ball_->Compute(period_ns_ / 1e9,
+            joystick_direction_,
+            joystick_l2_,
+            joystick_r2_,
+            joystick_connected_,
+            joint_position_,
+            joint_velocity_,
+            gravity_torque_,
+            torque_command_);
         position_reference_ = ball_->joint_reference();
     } else {
         if (!damping_reference_valid_ && model_sequence_) {
@@ -241,14 +368,16 @@ void TaskController::Control() {
         for (int i = 0; i < 3; ++i)
             motor_targets_[i] = {position_reference_[i] - encoder_origin_[i], 0, 0, 1, 0};
     } else if (!without_can_) {
-        const auto& kp = mode_ == 0 ? homing_->kp()
-                        : mode_ == 1 ? gravity_->kp_motor()
-                        : mode_ == 2 ? magnetic_->kp_motor()
-                        : mode_ == 3 ? tracking_->kp_motor() : ball_->kp_motor();
-        const auto& kd = mode_ == 0 ? homing_->kd()
-                        : mode_ == 1 ? gravity_->kd_motor()
-                        : mode_ == 2 ? magnetic_->kd_motor()
-                        : mode_ == 3 ? tracking_->kd_motor() : ball_->kd_motor();
+        const auto& kp = mode_ == 0   ? homing_->kp()
+                         : mode_ == 1 ? gravity_->kp_motor()
+                         : mode_ == 2 ? magnetic_->kp_motor()
+                         : mode_ == 3 ? tracking_->kp_motor()
+                                      : ball_->kp_motor();
+        const auto& kd = mode_ == 0   ? homing_->kd()
+                         : mode_ == 1 ? gravity_->kd_motor()
+                         : mode_ == 2 ? magnetic_->kd_motor()
+                         : mode_ == 3 ? tracking_->kd_motor()
+                                      : ball_->kd_motor();
         const auto home = homing_->Reference(control_time_);
 
         for (int i = 0; i < 3; ++i) {
@@ -297,21 +426,21 @@ void TaskController::WriteOutput() {
     control.damping_toe_reference = mode_ == 5 ? damping_toe_reference_ : std::array<double, 3>{};
     control.damping_reference_valid = mode_ == 5 && damping_reference_valid_;
     control.magnetic = mode_ == 2 ? magnetic_->telemetry() : MagneticTelemetry{};
-    control.tracking_position_reference = mode_ == 3 ? tracking_->toe_reference()
-                                                    : std::array<double, 3>{};
-    control.tracking_velocity_reference = mode_ == 3 ? tracking_->toe_velocity_reference()
-                                                    : std::array<double, 3>{};
+    control.tracking_position_reference =
+        mode_ == 3 ? tracking_->toe_reference() : std::array<double, 3>{};
+    control.tracking_velocity_reference =
+        mode_ == 3 ? tracking_->toe_velocity_reference() : std::array<double, 3>{};
     control.tracking_torque_saturated = mode_ == 3 && tracking_->torque_saturated();
     control.tracking_plane = tracking_->plane();
     control.tracking_method = tracking_->method();
-    control.tracking_acceleration_reference = mode_ == 3 ? tracking_->toe_acceleration_reference()
-                                                        : std::array<double, 3>{};
-    control.tracking_joint_velocity_reference = mode_ == 3 ? tracking_->joint_velocity_reference()
-                                                          : std::array<double, 3>{};
+    control.tracking_acceleration_reference =
+        mode_ == 3 ? tracking_->toe_acceleration_reference() : std::array<double, 3>{};
+    control.tracking_joint_velocity_reference =
+        mode_ == 3 ? tracking_->joint_velocity_reference() : std::array<double, 3>{};
     control.tracking_joint_acceleration_reference =
         mode_ == 3 ? tracking_->joint_acceleration_reference() : std::array<double, 3>{};
-    control.tracking_inverse_dynamics_torque = mode_ == 3 ? tracking_->inverse_dynamics_torque()
-                                                         : std::array<double, 3>{};
+    control.tracking_inverse_dynamics_torque =
+        mode_ == 3 ? tracking_->inverse_dynamics_torque() : std::array<double, 3>{};
     control.tracking_ctc_torque = mode_ == 3 ? tracking_->ctc_torque() : std::array<double, 3>{};
     control.tracking_ilc_state = mode_ == 3 ? tracking_->ilc().state() : TrackingILCState::Off;
     control.tracking_ilc_torque = mode_ == 3 ? tracking_->ilc().torque() : std::array<double, 3>{};
@@ -320,14 +449,15 @@ void TaskController::WriteOutput() {
     control.tracking_ilc_limited = mode_ == 3 && tracking_->ilc().limited();
     control.tracking_ilc_last_rmse_m = mode_ == 3 ? tracking_->ilc().last_rmse_m() : 0;
     control.tracking_idff_enabled = mode_ == 3 && tracking_->inverse_dynamics_enabled() &&
-        !tracking_->ik_failed() && !tracking_->checking();
+                                    !tracking_->ik_failed() && !tracking_->checking();
     control.tracking_ik_failed = mode_ == 3 && tracking_->ik_failed();
     control.tracking_checking = mode_ == 3 && tracking_->checking();
     control.tracking_check_progress = mode_ == 3 ? tracking_->check_progress() : 0;
     control.tracking_ik_error_m = mode_ == 3 ? tracking_->ik_error() : 0;
     control.ball_position = mode_ == 4 ? ball_->ball_position() : std::array<double, 3>{};
     control.ball_toe_reference = mode_ == 4 ? ball_->toe_reference() : std::array<double, 3>{};
-    control.ball_nearest_position = mode_ == 4 ? ball_->nearest_position() : std::array<double, 3>{};
+    control.ball_nearest_position =
+        mode_ == 4 ? ball_->nearest_position() : std::array<double, 3>{};
     control.ball_workspace_limited = mode_ == 4 && ball_->workspace_limited();
     control.ball_entering_workspace = mode_ == 4 && ball_->entering_workspace();
     control.ball_torque_saturated = mode_ == 4 && ball_->torque_saturated();

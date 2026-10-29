@@ -1,0 +1,130 @@
+# Visualization session: original physics/control executables, headless physics, separate GPU process.
+# The development daemon.yaml and run_daemon.sh are unchanged.
+shm_name: /qhrr05
+terminal_exec: /usr/bin/gnome-terminal.real
+log_directory: ../../logs
+terminal_layout:
+  monitor: auto
+  columns: 3  # Six process terminals + daemon: three rows on the 1440p log monitor.
+  gap_px: 12
+  margin_px: 12
+  zoom: 0.85
+  include_daemon: true
+monitoring:
+  display_interval_sec: 2.0
+  window_sec: 10.0
+  sample_hz: 100.0
+processes:
+- name: can_hal
+  exec_path: can_hal
+  working_directory: ../..
+  wait_ready: true
+  terminal_title: QHRR05-CAN-HAL
+  args:
+  - config/can_hal/can_hal.yaml
+  - '{shm_name}'
+- name: simulation
+  exec_path: simulation
+  working_directory: ../..
+  wait_ready: true
+  ready_timeout_ms: 20000  # Allow loading the full-resolution CAD meshes.
+  args:
+  - --model
+  - models/qhrr-05/scene.xml
+  - --control-config
+  - config/control/control.yaml
+  - --shm-name
+  - '{shm_name}'
+  - --hal-config
+  - config/can_hal/can_hal.yaml
+  - --simulation-config
+  - config/simulation/simulation.yaml
+  - --headless
+- name: control
+  exec_path: control
+  working_directory: ../..
+  args:
+  - config/control/control.yaml
+  - '{shm_name}'
+- name: input
+  exec_path: input
+  working_directory: ../..
+  critical: false
+  restart_limit: 0
+  args:
+  - '{shm_name}'
+  - config/input/input.yaml
+- name: shm_logger
+  exec_path: shm_logger
+  working_directory: ../..
+  wait_ready: true
+  critical: false
+  restart_limit: 3
+  restart_delay_ms: 1000
+  args:
+  - --config
+  - config/shm_logger/shm_logger.yaml
+  - --shm-name
+  - '{shm_name}'
+  - --daemon-config
+  - '{daemon_config}'
+- name: visualization
+  exec_path: ../scripts/visualization_process.sh
+  working_directory: ../..
+  critical: true
+  restart_limit: 0
+  args:
+  - --shm-name
+  - '{shm_name}'
+debug_processes:
+- name: simulation
+  exec_path: simulation
+  working_directory: ../..
+  wait_ready: true
+  ready_timeout_ms: 20000  # Allow loading the full-resolution CAD meshes.
+  args:
+  - --model
+  - models/qhrr-05/scene.xml
+  - --control-config
+  - config/control/control.yaml
+  - --shm-name
+  - '{shm_name}'
+  - --without-can
+  - --headless
+- name: control
+  exec_path: control
+  working_directory: ../..
+  args:
+  - config/control/control.yaml
+  - '{shm_name}'
+  - --without-can
+- name: input
+  exec_path: input
+  working_directory: ../..
+  critical: false
+  restart_limit: 0
+  args:
+  - '{shm_name}'
+  - config/input/input.yaml
+- name: shm_logger
+  exec_path: shm_logger
+  working_directory: ../..
+  wait_ready: true
+  critical: false
+  restart_limit: 3
+  restart_delay_ms: 1000
+  args:
+  - --config
+  - config/shm_logger/shm_logger.yaml
+  - --shm-name
+  - '{shm_name}'
+  - --daemon-config
+  - '{daemon_config}'
+- name: visualization
+  exec_path: ../scripts/visualization_process.sh
+  working_directory: ../..
+  critical: true
+  restart_limit: 0
+  args:
+  - --shm-name
+  - '{shm_name}'

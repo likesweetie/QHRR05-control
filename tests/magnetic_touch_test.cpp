@@ -385,7 +385,8 @@ int main(int argc, char** argv) {
             else if (time >= 2.8)
                 center = toe_x + .09;
             data->mocap_pos[3 * mocap] = center;
-            qhrr05::UpdateControlIO(shm, model.get(), data.get(), gravity.get(), reference, step);
+            qhrr05::UpdateControlIO(
+                shm, model.get(), data.get(), gravity.get(), reference, step, nullptr, true);
             const auto model_state = shm.model[shm.model_sequence % kShmBufferCount];
             const auto motors = shm.motors[shm.motor_sequence % kShmBufferCount];
             std::array<double, 3> physical_position, physical_velocity;

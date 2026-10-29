@@ -1,0 +1,600 @@
+{
+  "source": "D:\\quadruped_robot\\quadruped_3D\\QHRR_ver.1\\body\\body_asm.SLDASM",
+  "source_sha256": "4b872adcf4dba5ca9dd339a76ad7e16121a2329120f87c36871e976677c6ad4c",
+  "source_has_unsaved_changes": true,
+  "source_hash_note": "File hashes identify on-disk CAD; extracted properties reflect the live SolidWorks session, including unsaved changes. No CAD files were saved by this workflow.",
+  "cad_evidence_file": "cad_source_properties.json",
+  "solidworks_version": "34.1.1",
+  "configuration": "기본",
+  "units": {
+    "mass": "kg",
+    "length": "m",
+    "inertia": "kg*m^2"
+  },
+  "inertia_convention": "negative_product; COM tensor in link-aligned axes",
+  "axis_convention": "minus_x_minus_y_z",
+  "basis_columns_in_cad": [
+    [
+      -1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      -1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "knee_origin": "distal_calf_bearing",
+  "frame_evidence": {
+    "base": "Nominal torso center in CAD: (0, 0, 0.065); actual COM is a separate offset.",
+    "hip": "SPG_QDD-4 carrier output-end circular edges share center (-0.1912, -0.0625, 0.065), radii 0.0095/0.0145 m.",
+    "thigh": "Same QDD carrier output origin transformed by SPG_QDD-7 Transform2.",
+    "calf": "Calf bearing circles share x=-0.2512, z=-0.155; center plane y=-0.179 lies midway between y=-0.183 and -0.175 bores (radius 0.0095 m).",
+    "transmission": "User confirmed distal Calf pivot, not proximal QDD-9 output, as knee_pitch; QDD-9 mass remains in thigh. Transmission modeled as an ideal joint torque."
+  },
+  "base_world_position_m": [
+    0,
+    0,
+    0.55
+  ],
+  "home_qpos_rad": [
+    0.0,
+    0.9,
+    -1.8
+  ],
+  "joint_ranges_rad": [
+    [
+      -0.872665,
+      0.872665
+    ],
+    [
+      -2.984513,
+      2.879793
+    ],
+    [
+      -2.722714,
+      -0.575959
+    ]
+  ],
+  "links": {
+    "base": {
+      "mass_kg": 8.163921,
+      "com_m": [
+        0.0255657022298543,
+        0.0135975879763332,
+        -0.00420097113554719
+      ],
+      "tensor_kg_m2": [
+        [
+          0.048588,
+          -0.013651,
+          0.000304
+        ],
+        [
+          -0.013651,
+          0.124676,
+          0.000232
+        ],
+        [
+          0.000304,
+          0.000232,
+          0.143891
+        ]
+      ],
+      "principal_inertia_kg_m2": [
+        0.046211819449306135,
+        0.1270491534925096,
+        0.14389402705818433
+      ],
+      "cad_origin_m": [
+        0.0,
+        0.0,
+        0.065
+      ],
+      "parent_offset_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "components": [
+        "Hip_roll_stopper-1",
+        "SPG_QDD-4",
+        "battery_up_cover-1",
+        "body_1-1",
+        "body_1-2",
+        "body_2-1",
+        "body_2-2",
+        "chassis-1",
+        "motor_carbon_cover-1",
+        "motor_carbon_cover-2",
+        "motor_carbon_cover_2-1",
+        "motor_carbon_cover_2-2",
+        "motor_part_1-1",
+        "motor_part_1-2",
+        "motor_part_2-1",
+        "motor_part_2-2",
+        "partision-1",
+        "partision_2-1",
+        "wall_1-1",
+        "wall_1_2-1",
+        "wall_2-1",
+        "wall_3-1",
+        "wall_4-1",
+        "wall_4-2"
+      ],
+      "meshes": [
+        {
+          "file": "assets/qhrr_base.obj",
+          "sha256": "f3e4bda9070ff70337435970a45b84c96ac7018f8d9346c0d85ac42415bb0e7d",
+          "triangles": 429186,
+          "vertices": 213183,
+          "discarded_degenerate_triangles": 0,
+          "bounds_m": [
+            [
+              -0.1890000000000001,
+              -0.1254991590976717,
+              -0.06500000000000006
+            ],
+            [
+              0.1959999997764826,
+              0.12549915909767148,
+              0.06499999761581426
+            ]
+          ]
+        }
+      ],
+      "inertial_source": "user-finalized qhrr-05.urdf"
+    },
+    "hip": {
+      "mass_kg": 1.06311951886917,
+      "com_m": [
+        0.0569605793736814,
+        -0.00464593794605549,
+        -2.79951436338299e-08
+      ],
+      "tensor_kg_m2": [
+        [
+          0.0010806801895359,
+          1.80329283900043e-05,
+          1e-06
+        ],
+        [
+          1.80329283900043e-05,
+          0.00150113063464163,
+          5.29865593866141e-06
+        ],
+        [
+          1e-06,
+          5.29865593866141e-06,
+          0.00119024653554896
+        ]
+      ],
+      "principal_inertia_kg_m2": [
+        0.0010799027721580228,
+        0.0011901605929054797,
+        0.0015019939946629873
+      ],
+      "cad_origin_m": [
+        -0.19119999999999998,
+        -0.062499999999999944,
+        0.06499999999999995
+      ],
+      "parent_offset_m": [
+        0.19119999999999998,
+        0.062499999999999944,
+        -5.551115123125783e-17
+      ],
+      "components": [
+        "SPG_QDD-7",
+        "hip_ptich_stopper-1",
+        "hip_thigh_jig_수정본-5"
+      ],
+      "joint_axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "joint_frame": "hip_roll",
+      "meshes": [
+        {
+          "file": "assets/qhrr_hip.obj",
+          "sha256": "3b9158cfac733fdf96e463f0424333c3d5720d9f3992b22ab70c2c2d988939ea",
+          "triangles": 290296,
+          "vertices": 144357,
+          "discarded_degenerate_triangles": 0,
+          "bounds_m": [
+            [
+              -3.885780586188048e-16,
+              -0.038500000000000686,
+              -0.052489701658487015
+            ],
+            [
+              0.11249999701976737,
+              0.02620000000000032,
+              0.052489701658487625
+            ]
+          ]
+        }
+      ],
+      "inertial_source": "user-finalized qhrr-05.urdf"
+    },
+    "thigh": {
+      "mass_kg": 2.176288,
+      "com_m": [
+        -0.00385988628636716,
+        0.0573570359748067,
+        -0.0264287380321596
+      ],
+      "tensor_kg_m2": [
+        [
+          0.011888,
+          0.000292,
+          0.000926
+        ],
+        [
+          0.000292,
+          0.011512,
+          -0.001934
+        ],
+        [
+          0.000926,
+          -0.001934,
+          0.003266
+        ]
+      ],
+      "principal_inertia_kg_m2": [
+        0.0027327193885923555,
+        0.011880268056048872,
+        0.01205301255535877
+      ],
+      "cad_origin_m": [
+        -0.2511999999999996,
+        -0.08870000000000026,
+        0.06500000000000025
+      ],
+      "parent_offset_m": [
+        0.05999999999999961,
+        0.02620000000000032,
+        3.0531133177191805e-16
+      ],
+      "components": [
+        "SPG_QDD-9",
+        "hip_calf_jig_R-4",
+        "Thigh_mot_L-1",
+        "Thigh_cover_L-1",
+        "Thigh_Cap-1"
+      ],
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_frame": "hip_pitch",
+      "meshes": [
+        {
+          "file": "assets/qhrr_thigh.obj",
+          "sha256": "3cac5e0bc65eff7555f26635988dec62c5995b8d35b856a381b6a737fcf80da6",
+          "triangles": 312376,
+          "vertices": 155238,
+          "discarded_degenerate_triangles": 0,
+          "bounds_m": [
+            [
+              -0.05000000074505767,
+              -0.003999999669194468,
+              -0.23499983549118045
+            ],
+            [
+              0.049989353865385444,
+              0.10730000021606757,
+              0.04999733716249462
+            ]
+          ]
+        }
+      ],
+      "inertial_source": "user-finalized qhrr-05.urdf"
+    },
+    "calf": {
+      "mass_kg": 0.316044433148062,
+      "com_m": [
+        0.00624789973136231,
+        2.56601114564936e-06,
+        -0.164638132808556
+      ],
+      "tensor_kg_m2": [
+        [
+          0.00184658643459813,
+          0.0,
+          4.6e-05
+        ],
+        [
+          0.0,
+          0.00190518975448778,
+          0.0
+        ],
+        [
+          4.6e-05,
+          0.0,
+          9.85254384492916e-05
+        ]
+      ],
+      "principal_inertia_kg_m2": [
+        9.731579144110726e-05,
+        0.0018477960816063144,
+        0.0019051897544877803
+      ],
+      "cad_origin_m": [
+        -0.2512,
+        -0.179,
+        -0.155
+      ],
+      "parent_offset_m": [
+        3.885780586188048e-16,
+        0.09029999999999973,
+        -0.22000000000000025
+      ],
+      "components": [
+        "Calf-2",
+        "h-3",
+        "foot_cover_1-1",
+        "foot_cover_2-1"
+      ],
+      "joint_axis": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "joint_frame": "knee_pitch",
+      "meshes": [
+        {
+          "file": "assets/qhrr_calf.obj",
+          "sha256": "cc563e036954976b361c2c166b7e9d69b75b0357a9a2c84ac281b3cfa86b7d16",
+          "triangles": 48154,
+          "vertices": 24214,
+          "discarded_degenerate_triangles": 0,
+          "bounds_m": [
+            [
+              -0.03414417088916863,
+              -0.021132359944282947,
+              -0.2541441706483559
+            ],
+            [
+              0.03866642713546753,
+              0.021132376313210577,
+              0.03091258555650736
+            ]
+          ]
+        }
+      ],
+      "inertial_source": "user-finalized qhrr-05.urdf"
+    }
+  },
+  "collisions": {
+    "base": [
+      {
+        "name": "torso_collision",
+        "type": "box",
+        "pos": [
+          0,
+          0,
+          0
+        ],
+        "halfsize": [
+          0.1894,
+          0.1255,
+          0.065
+        ]
+      }
+    ],
+    "hip": [
+      {
+        "name": "hip_collision",
+        "type": "capsule",
+        "start": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "end": [
+          0.05999999999999961,
+          0.02620000000000032,
+          3.0531133177191805e-16
+        ],
+        "radius": 0.028
+      }
+    ],
+    "thigh": [
+      {
+        "name": "thigh_collision",
+        "type": "capsule",
+        "start": [
+          3.885780586188048e-16,
+          0.09029999999999973,
+          -2.498001805406602e-16
+        ],
+        "end": [
+          3.885780586188048e-16,
+          0.09029999999999973,
+          -0.22000000000000025
+        ],
+        "radius": 0.026
+      }
+    ],
+    "calf": [
+      {
+        "name": "calf_collision",
+        "type": "capsule",
+        "start": [
+          0,
+          0,
+          0
+        ],
+        "end": [
+          -0.0040307249905854325,
+          8.184463828886379e-09,
+          -0.21187943439086238
+        ],
+        "radius": 0.013
+      },
+      {
+        "name": "FL",
+        "type": "sphere",
+        "pos": [
+          -0.0040307249905854325,
+          8.184463828886379e-09,
+          -0.23301180251960915
+        ],
+        "radius": 0.021132368128746762
+      }
+    ]
+  },
+  "foot_site_in_calf_m": [
+    -0.0040307249905854325,
+    8.184463828886379e-09,
+    -0.23301180251960915
+  ],
+  "collision_note": "Provisional contact primitives; never used to calculate inertia.",
+  "mesh_note": "One indexed OBJ visual per link from displayed CAD bodies; hidden construction solids excluded, no mesh simplification.",
+  "physical_body_policy": "User-finalized URDF inertials supersede CAD-calculated link mass properties.",
+  "physical_visible_body_components": [
+    "Thigh_cover_L-1",
+    "Thigh_mot_L-1",
+    "motor_part_2-1",
+    "motor_part_2-2"
+  ],
+  "urdf_note": "URDF velocity limit 20 rad/s is provisional. MJCF armature 0.01 is simulator tuning, not a measured rotor inertia.",
+  "excluded_fixtures": [
+    "Stand-1",
+    "STAND_body-1",
+    "STAND_body-2",
+    "STAND_body-3",
+    "STAND_body-4"
+  ],
+  "suppressed": [
+    "SPG_QDD-3",
+    "SPG_QDD-6",
+    "hip_thigh_jig_수정본-3",
+    "SPG_QDD-2",
+    "hip_calf_jig_L-2",
+    "Thigh_mot_R-2",
+    "Thigh_mot_R-1",
+    "SPG_QDD-8",
+    "Thigh_cover_R-1",
+    "Calf-1",
+    "hip_calf_jig_R-2",
+    "Thigh_cover_R-2",
+    "SPG_QDD-10",
+    "h-1",
+    "hip_thigh_jig_수정본-4",
+    "SPG_QDD-12",
+    "SPG_QDD-1",
+    "Calf-3",
+    "hip_calf_jig_L-1",
+    "h-4",
+    "SPG_QDD-11",
+    "h-2",
+    "hip_calf_jig_R-1",
+    "SPG_QDD-5",
+    "Calf-4",
+    "hip_thigh_jig_수정본-1",
+    "Thigh_mot_L-2",
+    "Thigh_cover_L-2"
+  ],
+  "qdd_document_properties": {
+    "mass_kg": 0.93,
+    "com_m": [
+      -0.0325,
+      0.0,
+      0.0
+    ],
+    "raw_L_kg_m2": [
+      [
+        0.0011264020554642292,
+        2.1786443056872633e-06,
+        5.277877303233924e-06
+      ],
+      [
+        2.1786443056872633e-06,
+        0.0008964685974928929,
+        7.118417983712484e-07
+      ],
+      [
+        5.277877303233924e-06,
+        7.118417983712484e-07,
+        0.000922660152447647
+      ]
+    ],
+    "raw_origin_kg_m2": [
+      [
+        0.0011264020554642292,
+        2.1786443056872633e-06,
+        5.277877303233924e-06
+      ],
+      [
+        2.1786443056872633e-06,
+        0.001878781097492893,
+        7.118417983712484e-07
+      ],
+      [
+        5.277877303233924e-06,
+        7.118417983712484e-07,
+        0.0019049726524476471
+      ]
+    ],
+    "tensor_kg_m2": [
+      [
+        0.0011264020554642292,
+        2.1786443056872633e-06,
+        5.277877303233924e-06
+      ],
+      [
+        2.1786443056872633e-06,
+        0.0008964685974928929,
+        7.118417983712484e-07
+      ],
+      [
+        5.277877303233924e-06,
+        7.118417983712484e-07,
+        0.000922660152447647
+      ]
+    ],
+    "raw_convention": "negative_product",
+    "parallel_axis_error": 0.0,
+    "override": {
+      "mass": true,
+      "center_of_mass": true,
+      "inertia": false,
+      "mass_value_kg": 0.93,
+      "center_value_and_frame": [
+        [
+          -0.0325,
+          0.0,
+          0.0
+        ],
+        "어셈블리 좌표계(기본값)"
+      ]
+    }
+  },
+  "input_hashes": {
+    "raw_mass_properties.json": "2c53c76ea57f73b93e660afdfdfb357f1304a73acb98bc8264c0af904b5bfc36",
+    "assembly_meshes.npz": "110ce19b069d564e311e2b6a19fb5646bd0460fae67d701a586a0f658db20b63"
+  },
+  "output_hashes": {
+    "qhrr-05.xml": "49a1e0a8c8f024b3b5dd34b699e51c04a52af53af7770f1a66ecbbae57190791",
+    "qhrr-05.urdf": "8e8918d4f8cb0cf1a76018fbb86521643921ffb3b0fd81342ce7e6252dbef67a",
+    "cad_source_properties.json": "2c53c76ea57f73b93e660afdfdfb357f1304a73acb98bc8264c0af904b5bfc36"
+  },
+  "total_mass_kg": 11.719372952017231,
+  "dynamics_source": {
+    "file": "qhrr-05.urdf",
+    "sha256": "8e8918d4f8cb0cf1a76018fbb86521643921ffb3b0fd81342ce7e6252dbef67a",
+    "description": "User-finalized inertials and joint limits; copied without changing cross-term signs."
+  },
+  "cad_evidence_role": "Historical CAD extraction and visual/body-selection provenance; current link inertials come from the user-finalized URDF.",
+  "cad_physical_body_policy": "Only the four verified mirror parts exclude hidden construction solids. Other component mass properties include hidden bodies and preserve overrides."
+}

@@ -1,6 +1,6 @@
 # qhrr-05 제어 검증
 
-고정 베이스 3자유도 다리(HR / HP / KP)의 호밍·중력보상·Magnetic Touch·작업공간 Tracking·조이스틱 공 추종을 검증하는 C++ 프로그램입니다. 모델은 Go2 몸통과 FL 다리만 사용합니다.
+고정 베이스 3자유도 다리(HR / HP / KP)의 호밍·중력보상·Magnetic Touch·작업공간 Tracking·조이스틱 공 추종을 검증하는 C++ 프로그램입니다. 모델은 제공된 SolidWorks CAD 기반 QHRR-05 몸통과 FL 다리를 사용합니다.
 
 기본 제어 경로는 **TaskController → SHM → CAN HAL → vcan → MuJoCo 가상 모터**입니다. 모터는 수신한 MIT 위치·속도 목표와 kp/kd로 내부 PD를 계산합니다. 관절 위치·속도·Iq는 CAN 응답으로 돌아오며 제어기는 이를 사용합니다. tau_ff는 사용하지 않습니다. 기존 SHM 토크 구동은 `--without-can` 디버깅 모드에만 남겼습니다.
 
@@ -56,6 +56,28 @@ daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·
 
 Ctrl+오른쪽 드래그로 선택한 다리에 외력을 주거나 주황색 물체를 이동합니다. **상태 머신·IDFF/CTC/ILC·가속도 프로파일·검사 기준·조이스틱·Iq 센서**는 [제어 모드와 시뮬레이션](docs/control.md)에서 관리합니다.
 
+React/WebSocket 기반 [웹 제어 패널](docs/web_gui.md)도 사용할 수 있습니다. 웹·MuJoCo GUI·조이스틱 입력은 Input 인터페이스와 기본 안전 검사를 거쳐 TaskController에 전달합니다. daemon이 실행 중일 때 `./scripts/run_web_gui.sh`로 로컬 패널을 엽니다. 최초 준비는 `./scripts/run_web_gui.sh --setup`을 사용하며 실행·검증 상세는 링크 문서를 따릅니다.
+
+데몬 런처는 필요한 실행 파일이 없으면 `build/`를 구성하고 자동 빌드한 뒤 시작합니다. 데몬뿐 아니라 simulation/control/CAN HAL/input/logger 누락도 검사합니다. `QHRR_BUILD_JOBS=4`로 병렬 빌드 수를 지정할 수 있습니다. 빌드 실패 시 실행을 중단하며 다른 모드로 전환하지 않습니다.
+
+## Filament PBR 시각화
+
+기존 개발용 실행은 위와 같습니다. 별도 [시각화 실행 안내](docs/visualization.md)의 런처는 기존 물리·제어 실행 파일과 독립적인 Vulkan 렌더러를 실행합니다. 물리는 기존 MuJoCo 3.3.2를 사용하고, 시각화 전용 MuJoCo는 3.16.0으로 고정합니다.
+
+```bash
+./scripts/build_visualization.sh          # 필요하면 별도로 미리 빌드할 수 있습니다.
+./scripts/run_visualization.sh            # 새 CAN/물리/제어/시각화 세션
+./scripts/run_web_gui.sh                  # 별도 터미널: Input/안전레이어를 거치는 제어 패널
+```
+
+비주얼라이저 실행 파일이나 셰이더가 없으면 런처가 고정된 의존성을 준비하고 자동 빌드합니다. `build-filament/` 전체를 지운 경우 첫 실행에는 다운로드와 수 분의 빌드가 필요합니다. 동시에 실행한 런처는 빌드 잠금을 기다립니다. 웹 런처에는 이 C++ 자동 빌드를 추가하지 않았습니다.
+
+새 창에서 모드별 그래프·작업 단축키·Ctrl 드래그 외란·물체 조작·발끝 잔상·작업공간을 제공합니다. 명령은 Input → 안전레이어 → TaskController를 거치며, SHM에 직접 쓰지 않습니다. **SHM ABI 13 변경 후에는 모든 실행 파일을 재빌드하고 세션을 다시 시작해야 합니다.**
+
+Filament의 기본 시각화는 4K 브러시드 금속 맵·이방성 반사·소프트박스 IBL·밝은 스튜디오 조명과 **8x MSAA + 고정 1.333333배 내부 해상도**를 사용합니다. 1920×1080의 3D 영역은 내부에서 약2560×1440으로 그립니다. `--msaa 4 --render-scale 1`로 비용을 줄이거나 `--render-scale 2`로 4K 내부 렌더링을 선택할 수 있습니다. 스크린샷에도 같은 품질 설정이 적용됩니다. 물리 모델과 제어 설정은 유지합니다.
+
+실행 중인 세션에 창을 붙일 때는 `./scripts/run_visualization.sh --attach`를 사용합니다. `--preview`는 물리 계산 없는 정적 모델 미리보기입니다. `--backend classic`으로 독립 뷰어의 기존 `mjr` OpenGL 구현을 선택할 수 있습니다. Filament는 RTX 5090 Vulkan 장치를 확인하며, 초기화 실패를 다른 GPU·소프트웨어·Classic으로 대체하지 않습니다.
+
 ## 설정과 코드 위치
 
 | 파일·디렉터리 | 역할 |
@@ -68,13 +90,16 @@ Ctrl+오른쪽 드래그로 선택한 다리에 외력을 주거나 주황색 �
 | [ak10_9_v3.yaml](config/motor/ak10_9_v3.yaml) | 모터 MIT 규약: V_MAX·T_MAX·Kt·감속비·Kd scale |
 | [shm_logger.yaml](config/shm_logger/shm_logger.yaml) | 500 Hz MCAP·Flight Recorder·저장 한계·건전성·세션 설정 |
 | [apps/](apps/) | daemon·TaskController·CAN HAL·MuJoCo·로거·입력 프로그램의 실행 진입점 |
-| [src/ipc/](src/ipc/) | SHM 전체 배치·메모리 매핑/동기화·공유 값 타입 |
+| [src/ipc/](src/ipc/) | SHM 배치·동기화·공유 타입과 simulation IPC |
 | [src/control/](src/control/) | `TaskController`의 제어기 핸들 소유, 입력 → 제어 → 출력 → 주기 대기 |
 | [src/motion_controllers/](src/motion_controllers/) | 호밍·중력보상·Magnetic·Tracking/ILC·공 추종·외력 관측기 |
-| [src/simulation/](src/simulation/) | 물리·모델 IO·가상 Iq 센서·그래프 |
+| [src/motion_controllers/numerics/](src/motion_controllers/numerics/) | 모션 컨트롤러 전용 행렬·역행렬·DLS·수치 함수 |
+| [src/robot_model/](src/robot_model/) | 측정 상태 기반 MuJoCo 기구학·동역학 백엔드 |
+| [src/simulation/](src/simulation/) | 물리·가상 모터 IO·가상 Iq 센서·그래프 |
 | [src/motor_can_protocol/](src/motor_can_protocol/) | OpenRobot MIT 코덱 |
 | [src/daemon/](src/daemon/) | 기존 `Daemon` 프로세스 관리·터미널 릴레이·SHM 통계 |
-| [src/input/](src/input/) | 조이스틱 입력 |
+| [src/interfaces/](src/interfaces/) | Input 명령·조이스틱·웹 상태 브리지 |
+| [apps/interfaces/](apps/interfaces/) | 입력 실행 진입점·웹 서버와 React 프런트엔드 |
 | [src/shm_logger/](src/shm_logger/) | SHM 복사·명시적 스키마·MCAP/RAM 이력·세션/저장 정책·관리 소켓 |
 | [third_party/mujoco_simulate/](third_party/mujoco_simulate/) | 프로젝트에서 사용하는 MuJoCo GUI 복사본·출처·해시 |
 | [tests/](tests/) | 기능·CAN·SHM·프로세스·GUI 회귀 시험 |
@@ -119,7 +144,7 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 | 표시 | 계산 및 해석 |
 | --- | --- |
-| `Age us / command, feedback, model, simulation` | daemon 관측 시각 − 각 발행 시각. feedback은 HAL 발행 Age이며 실제 모터 수신 Age와 구분합니다. CAN 없는 모드에서는 시뮬레이터가 직접 발행한 피드백입니다. |
+| `Age us / command, feedback, model, control` | daemon 관측 시각 − 각 발행 시각. feedback은 HAL 발행 Age이며 실제 모터 수신 Age와 구분합니다. CAN 없는 모드에서는 시뮬레이터가 직접 발행한 피드백입니다. |
 | `RX worst age us` | 세 모터 `received_ns` 중 가장 오래된 수신 시각의 Age. 세 축 모두 수신 이력이 있어야 표시합니다. |
 | `Obs skips #` | 이전 daemon 관측 이후 증가한 시퀀스 − 1. **관측기가 못 본 발행 수**이며 소비자 손실·CAN 패킷 유실이 아닙니다. |
 | `Cmd unconsumed distance #` | 최신 `command_sequence` − HAL의 `consumed_command_sequence`. 최신값 방식의 시퀀스 거리이며 큐 깊이가 아닙니다. CAN 없는 모드에서는 `N/A`입니다. |
@@ -143,14 +168,13 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 공유 영역은 기본 **`/qhrr05` 하나**이며 이름은 daemon 설정의 `shm_name`으로 지정합니다. CAN 사용 여부와 관계없이 daemon이 자식 실행 전에 생성·초기화하고, 모든 자식을 종료한 뒤 해제합니다. HAL·시뮬레이터·제어기·로거는 연결만 하며, 영역이 없으면 명시적으로 실패합니다. 기존 객체는 재사용·삭제하지 않습니다. daemon이 SIGKILL되면 정리할 수 없으므로 남은 객체는 다음 실행에서 충돌로 보고합니다.
 
-[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`SimulationData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **11**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
+[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **13**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
 
 | 영역 | 데이터와 작성자 |
 | --- | --- |
 | `motors` | `MotorData`: 제어기는 command·command_enabled·reference·debug_torque 배열, HAL은 feedback·motor_torque(Nm)·축별 CAN 상태 배열 갱신 |
-| `model` | 시뮬레이터가 M/h/J·중력·마찰·발끝 모델 계산값 발행 |
-| `control` | GUI의 모드·목표 힘, 제어기의 상태·RFOB 결과, 선택적 조이스틱 입력 |
-| `simulation` | 시뮬레이터가 실제 위치·토크·물체·접촉 GT와 접촉/해제 이벤트 발행 |
+| `model` | 제어기가 수신한 엔코더 상태로 MuJoCo 백엔드를 갱신해 M/h/J·중력·마찰·발끝 계산값 발행 |
+| `control` | Input·안전레이어를 거친 모드·목표 힘, 제어기의 상태·RFOB 결과, 선택적 조이스틱 입력 |
 
 같은 영역의 작성자는 **mutex 안에서 최신 슬롯을 반대 슬롯으로 복사하고 자기 필드만 갱신한 뒤 발행**합니다. 명령·피드백 sequence와 시각은 별도입니다. robust mutex 소유자 사망은 명시적 오류입니다. 계산·렌더링·파일 쓰기는 잠금 밖에서 수행합니다.
 
@@ -158,9 +182,11 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 제어 주파수는 `control.frequency_hz`로 설정합니다. 제어기는 monotonic 시간으로 동작하며 새 측정이나 물리 run/pause를 기다리지 않고 최신 입력을 사용합니다. 물리 간격은 모델의 `timestep`, 그래프·계측 주기는 `plots.sample_hz`의 시뮬레이션 시간 기준입니다. 물리 일시정지 중에도 제어 시간은 진행합니다. 제어 경로는 응답 지연·관측 누락으로 동작을 바꾸지 않습니다. CSV 평가는 **shm_logger**, 읽기 전용 실시간 SHM 관측은 daemon이 담당합니다. 더블버퍼는 모든 중간 프레임의 기록을 보장하지 않습니다.
 
-RFOB는 새 측정에서만 필터를 갱신합니다. 접촉 GT 힘·모멘트와 물체 좌표는 `simulation`에만 있으며 제어 입력으로 사용하지 않습니다. 현재 관측기는 모델 잔차 기반 발끝 등가 외력 추정입니다. 발끝의 `condim=6` 접촉 모멘트를 3관절 관측으로 힘과 분리할 수 없으며, Momentum Observer는 미구현입니다.
+시뮬레이션 전용 교환은 모두 [simulation IPC](src/ipc/simulation/channel.hpp)의 버전형 Unix `SOCK_SEQPACKET` 경로(`/tmp/qhrr05-simulation-<uid>/<세션>.sock`)를 사용합니다. 실제 위치·속도·토크, 접촉 이벤트·합력, 물체 위치·회전, pause·finished 상태와 승인된 시뮬레이션 조작은 SHM에 넣지 않습니다. 뷰어·로거·웹 브리지가 IPC 상태와 하드웨어 SHM을 로컬에서 조합하며, 느린 구독자는 물리를 막지 않고 누락 수를 확인할 수 있습니다. 자세한 구조는 [시각화 안내](docs/visualization.md)를 참고하십시오.
 
-CAN 모드에서는 새 CAN 피드백에서 속도를 차분하고 RFOB를 갱신합니다. 모델 정보는 별도 주기로 발행되므로 최신 엔코더보다 한 주기 늦을 수 있습니다. 물체 이동·접촉·해제 같은 시뮬레이션 이벤트는 SHM으로 직접 전달해도 되는 영역입니다. 수집 주기마다 `contact`·`contact_event_sequence`·`contact_event_time`을 갱신하며 CSV에도 기록합니다. 이 이벤트 때문에 모터 CAN 패킷을 추가하지 않습니다.
+RFOB는 새 측정에서만 필터를 갱신합니다. 접촉 GT 힘·모멘트와 물체 좌표는 simulation IPC에만 있으며 제어 입력으로 사용하지 않습니다. 현재 관측기는 모델 잔차 기반 발끝 등가 외력 추정입니다. 발끝의 `condim=6` 접촉 모멘트를 3관절 관측으로 힘과 분리할 수 없으며, Momentum Observer는 미구현입니다.
+
+CAN 모드에서는 새 CAN 피드백에서 속도를 차분하고 RFOB를 갱신합니다. 제어기는 읽은 엔코더 상태로 같은 제어 주기 안에서 모델을 갱신합니다. 시뮬레이터가 없어도 이 경로로 계산하며, 외부 `ModelData`는 제어 입력으로 읽지 않습니다. 물체 이동·접촉·해제 같은 시뮬레이션 이벤트는 통일된 simulation IPC로 전달합니다. 수집 주기마다 `contact`·`contact_event_sequence`·`contact_event_time`을 갱신하며 CSV에도 기록합니다. 이 이벤트 때문에 모터 CAN 패킷을 추가하지 않습니다.
 
 ## CAN HAL
 
