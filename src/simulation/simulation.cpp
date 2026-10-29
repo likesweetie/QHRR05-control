@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <filesystem>
+#include <random>
 #include <linux/can.h>
 #include <linux/can/raw.h>
 #include <net/if.h>
@@ -18,9 +19,9 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
     const std::string& simulation_config_path,
     const std::array<double, 3>& encoder_origin,
     ShmData& shared)
-    : mit_origin_(encoder_origin), iq_sensors_{VirtualIqSensor(simulation_config_path, 0),
-                                       VirtualIqSensor(simulation_config_path, 1),
-                                       VirtualIqSensor(simulation_config_path, 2)},
+    : iq_sensors_{VirtualIqSensor(simulation_config_path, 0),
+          VirtualIqSensor(simulation_config_path, 1),
+          VirtualIqSensor(simulation_config_path, 2)},
       shared_(shared) {
     const auto config = YAML::LoadFile(hal_config_path);
     const auto interface = config["interface"].as<std::string>();
@@ -50,6 +51,21 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
 
     const auto simulation = YAML::LoadFile(simulation_config_path);
     const auto actual_motor = simulation["motor"];
+    const bool require_zero = actual_motor["require_zero_position_setup"].as<bool>();
+
+    if (require_zero) {
+        std::mt19937_64 generator(std::random_device{}());
+        std::uniform_real_distribution<double> initial_position(
+            -3.141592653589793, 3.141592653589793);
+
+        for (int i = 0; i < 3; ++i)
+            mit_origin_[i] = encoder_origin[i] - initial_position(generator);
+    }
+
+    std::cout << "[simulation] encoder zero: "
+              << (require_zero ? "RANDOM / explicit zero setup required"
+                               : "MODEL / calibrated joint coordinates")
+              << std::endl;
     const auto axis_value = [&](const char* key, int axis) {
         const auto values = actual_motor[key];
 
@@ -229,9 +245,8 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
             Reply(axis, rom_parameters_);
         else if (bytes[0] == 0xC1) {
             if (modes_[axis] == MotorMode::Released) {
-                if (!user_zero_set_[axis])
-                    mit_origin_[axis] = data->qpos[axis];
-
+                // Both bootstrap policies initialize an encoder reference. Enabling
+                // never changes it; only an explicit C3 can rebase the coordinates.
                 targets_[axis] = {};
                 modes_[axis] = MotorMode::Enabled;
             }
@@ -246,7 +261,6 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
             const int offset = raw >= 0x8000 ? int(raw) - 0x10000 : int(raw);
             const double offset_rad = offset * (3.141592653589793 / 18000.0);
             mit_origin_[axis] = data->qpos[axis] - offset_rad;
-            user_zero_set_[axis] = true;
             zero_hold_remaining_[axis] = 0.020;
             targets_[axis] = {};
 
@@ -318,32 +332,38 @@ ControlData UpdateControlIO(ShmData& shm,
     mjData* gravity_data,
     std::array<double, 3>& reference,
     std::uint64_t measurement_sequence,
-    const MotorData* can_feedback) {
-    mj_forward(model, data);
-    mju_copy(gravity_data->qpos, data->qpos, model->nq);
-    mju_zero(gravity_data->qvel, model->nv);
-    mj_fwdPosition(model, gravity_data);
-    mj_fwdVelocity(model, gravity_data);
-
+    const MotorData* can_feedback,
+    bool publish_model) {
     ModelData state;
-    std::copy_n(gravity_data->qfrc_bias, 3, state.gravity_torque.begin());
-    std::copy_n(data->qfrc_bias, 3, state.bias_torque.begin());
-    std::copy_n(data->qfrc_passive, 3, state.passive_torque.begin());
-    std::copy_n(model->dof_frictionloss, 3, state.friction_limit.begin());
-    mj_fullM(model, state.mass.data(), data->qM);
-    const int site = mj_name2id(model, mjOBJ_SITE, "FL_foot");
+    if (publish_model) {
+        mj_forward(model, data);
+        mju_copy(gravity_data->qpos, data->qpos, model->nq);
+        mju_zero(gravity_data->qvel, model->nv);
+        mj_fwdPosition(model, gravity_data);
+        mj_fwdVelocity(model, gravity_data);
 
-    if (site < 0)
-        throw std::runtime_error("missing FL_foot site");
+        std::copy_n(gravity_data->qfrc_bias, 3, state.gravity_torque.begin());
+        std::copy_n(data->qfrc_bias, 3, state.bias_torque.begin());
+        std::copy_n(data->qfrc_passive, 3, state.passive_torque.begin());
+        std::copy_n(model->dof_frictionloss, 3, state.friction_limit.begin());
+        mj_fullM(model, state.mass.data(), data->qM);
+        const int site = mj_name2id(model, mjOBJ_SITE, "FL_foot");
 
-    mj_jacSite(model, data, state.jacobian.data(), nullptr, site);
-    std::copy_n(data->site_xpos + 3 * site, 3, state.toe_position.begin());
+        if (site < 0)
+            throw std::runtime_error("missing FL_foot site");
 
-    for (int i = 0; i < 3; ++i) {
-        state.joint_min[i] = model->jnt_range[2 * i];
-        state.joint_max[i] = model->jnt_range[2 * i + 1];
+        mj_jacSite(model, data, state.jacobian.data(), nullptr, site);
+        std::copy_n(data->site_xpos + 3 * site, 3, state.toe_position.begin());
+
+        for (int i = 0; i < 3; ++i) {
+            state.joint_min[i] = model->jnt_range[2 * i];
+            state.joint_max[i] = model->jnt_range[2 * i + 1];
+        }
+
+    } else if (!can_feedback) {
+        // Preserve explicit direct-torque simulation feedback; no model publication.
+        mj_forward(model, data);
     }
-
     ControlData control;
     MotorData motors;
     {
@@ -353,8 +373,10 @@ ControlData UpdateControlIO(ShmData& shm,
             throw std::runtime_error("SHM stopped during control");
 
         state.published_ns = shm_utils::MonotonicNs();
-        shm.model[(shm.model_sequence + 1) % kShmBufferCount] = state;
-        ++shm.model_sequence;
+        if (publish_model) {
+            shm.model[(shm.model_sequence + 1) % kShmBufferCount] = state;
+            ++shm.model_sequence;
+        }
 
         if (!can_feedback) {
             auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);

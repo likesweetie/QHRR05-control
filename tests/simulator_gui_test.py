@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import csv
 import io
+from itertools import groupby
 import os
 from pathlib import Path
 import signal
@@ -71,10 +72,16 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-simulator-gui-') as tmp:
         click(65, 765)  # Native Magnetic button.
         magnetic = lambda: [r for r in rows(telemetry) if r['controller'] == 'magnetic']
         wait_for(lambda: len(magnetic()) > 20, log.read_text)
+        # Hold the physical contact state while testing only the slider. Natural
+        # contact/release transitions in a moving model also increment event_seq.
+        key('space')
+        wait_for(lambda: magnetic()[-1]['sim_paused'] == '1', log.read_text)
+        time.sleep(.3)
         before = magnetic()[-1]
         click(225, 795)  # Live force slider must not restart the FSM.
         wait_for(lambda: float(magnetic()[-1]['force_target_n']) > 3.5, log.read_text)
         assert magnetic()[-1]['event_seq'] == before['event_seq']
+        key('space')
         holds = log.read_text().count('HOLD:')
         click(65, 735)  # Native Homing button.
         wait_for(lambda: log.read_text().count('HOLD:') > holds, log.read_text)
@@ -125,10 +132,13 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-simulator-gui-') as tmp:
         data = rows(telemetry)
         assert {'damping', 'homing', 'gravity', 'magnetic', 'tracking', 'ball'} <= {r['controller'] for r in data}
         first = [r for r in data if r['run_id'] == '0']
+        # Paused physics now publishes IPC heartbeats. Accumulate the control-clock
+        # span across each stationary simulation-time plateau instead of assuming
+        # that a pause produces a gap between two adjacent CSV rows.
+        pauses = [list(group) for _, group in groupby(first, lambda row: row['sim_time'])]
         assert any(
-            float(b['control_time']) - float(a['control_time'])
-            > float(b['sim_time']) - float(a['sim_time']) + 0.1
-            for a, b in zip(first, first[1:])
+            float(group[-1]['control_time']) - float(group[0]['control_time']) > .1
+            for group in pauses
         ), 'Controller stopped with paused physics'
         print('PASS: native H/G/M/T controls, slider without restart, pause independence, reset/exit')
 
@@ -141,7 +151,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-simulator-gui-') as tmp:
             event('mousemove', '--window', window, x, y, 'click', '--repeat', 2, '--delay', 120, 1)
             event('key', '--window', window, 'space')
             wait_for(
-                lambda: len([r for r in rows(telemetry) if r['controller'] == 'gravity']) > 20,
+                lambda: len([r for r in rows(telemetry)
+                             if r['controller'] == 'gravity' and r['sim_paused'] == '0']) > 20,
                 log.read_text,
             )
             baseline = rows(telemetry)[-1]

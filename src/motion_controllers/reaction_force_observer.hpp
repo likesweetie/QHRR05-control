@@ -1,5 +1,6 @@
 #pragma once
 
+#include "motion_controllers/numerics/math.hpp"
 #include <array>
 #include <cstdint>
 #include <string>
@@ -47,5 +48,8 @@ private:
     std::uint64_t measurement_ = 0;
     std::array<double, 3> force_{}, filtered_torque_{};
     double minimum_singular_value_ = 0;
+    numeric::JacobianSolver solver_;
+    numeric::Mat3 factored_jacobian_{};
+    bool factor_valid_ = false;
 };
 }  // namespace qhrr05

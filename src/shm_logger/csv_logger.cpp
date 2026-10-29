@@ -5,6 +5,8 @@
 #include <iostream>
 #include <memory>
 #include <cmath>
+#include <thread>
+#include <chrono>
 
 namespace {
 int LogCan(const char* name, const char* csv_path) {
@@ -129,6 +131,7 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
 
         shm_utils::Mapping mapping(argv[1]);
         auto& shm = *mapping.get();
+        simulation_ipc::Client simulation(argv[1]);
 
         const int fd = ::open(argv[2], O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 
@@ -166,7 +169,8 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
             for (const char* axis : {"x", "y", "z"})
                 std::fprintf(stream, ",%s_%s", field, axis);
 
-        std::fprintf(stream, ",sim_contact,sim_contact_event_seq,sim_contact_event_time\n");
+        std::fprintf(
+            stream, ",sim_contact,sim_contact_event_seq,sim_contact_event_time,sim_paused\n");
 
         std::uint64_t last_event = 0, last_motion = 0;
         std::uint64_t last_sequence = 0, skipped_total = 0, rows = 0;
@@ -180,27 +184,24 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
             std::uint64_t sample_sequence;
             bool has_sample;
 
+            simulation.Poll();
+            sample = simulation.Latest();
+            sample_sequence = sample.sequence;
+            has_sample = sample_sequence != last_sequence;
+            bool stopping;
             {
                 shm_utils::Lock lock(shm);
-
-                while (shm.simulation_sequence == last_sequence &&
-                       shm.control[shm.control_sequence % kShmBufferCount].command_sequence ==
-                           observed_command &&
-                       !shm.stopping && !shm.simulation_finished)
-                    lock.Wait();
-
                 if (shm.failed)
                     throw std::runtime_error("SHM stopped after a process failure");
-
-                if (shm.simulation_sequence == last_sequence &&
-                    (shm.stopping || shm.simulation_finished))
-                    break;
-
-                sample = shm.simulation[shm.simulation_sequence % kShmBufferCount];
-                sample_sequence = shm.simulation_sequence;
+                stopping = shm.stopping;
                 motors = shm.motors[shm.motor_sequence % kShmBufferCount];
                 command = shm.control[shm.control_sequence % kShmBufferCount];
-                has_sample = shm.simulation_sequence != last_sequence;
+            }
+            if (!has_sample && (stopping || sample.finished))
+                break;
+            if (!has_sample && command.command_sequence == observed_command) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
             }
 
             if (command.command_sequence > observed_command) {
@@ -251,12 +252,13 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
                 "%llu,%.12g,%s",
                 static_cast<unsigned long long>(sample.run_id),
                 sample.time,
-                command.mode == 0 ? "homing"
+                command.mode == 0   ? "homing"
                 : command.mode == 1 ? "gravity"
                 : command.mode == 2 ? "magnetic"
                 : command.mode == 3 ? "tracking"
                 : command.mode == 4 ? "ball"
-                : command.mode == 5 ? "damping" : "invalid");
+                : command.mode == 5 ? "damping"
+                                    : "invalid");
 
             std::array<double, 3> reference;
 
@@ -319,10 +321,11 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
                     std::fprintf(stream, ",%.12g", value);
 
             std::fprintf(stream,
-                ",%d,%llu,%.9g\n",
+                ",%d,%llu,%.9g,%d\n",
                 sample.contact,
                 static_cast<unsigned long long>(sample.contact_event_sequence),
-                sample.contact_event_time);
+                sample.contact_event_time,
+                sample.paused);
 
             if (std::ferror(stream) || std::fflush(stream) != 0)
                 throw std::runtime_error("CSV write failed");

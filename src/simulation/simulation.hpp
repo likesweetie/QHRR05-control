@@ -36,7 +36,6 @@ private:
     std::array<MitCommand, 3> targets_{};
     // MIT runtime zero is separate from the physical encoder's origin.
     std::array<double, 3> mit_origin_{}, zero_hold_remaining_{};
-    std::array<bool, 3> user_zero_set_{};
     double motor_time_ = -1;
     std::array<VirtualIqSensor, 3> iq_sensors_;
     std::array<double, 3> actual_kt_output_{}, gear_ratio_{}, pole_pairs_{}, electrical_zero_{};
@@ -50,12 +49,14 @@ private:
 
 std::array<double, 3> ReadPosition(const YAML::Node& value, const mjModel* model);
 void ResetSimulation(const std::array<double, 3>& initial, const mjModel* model, mjData* data);
+// publish_model is only for isolated numerical test fixtures; live control owns ModelData.
 ControlData UpdateControlIO(ShmData& shm,
     const mjModel* model,
     mjData* data,
     mjData* gravity_data,
     std::array<double, 3>& reference,
     std::uint64_t measurement_sequence = 0,
-    const MotorData* can_feedback = nullptr);
+    const MotorData* can_feedback = nullptr,
+    bool publish_model = false);
 std::array<double, 6> ReadContactGroundTruth(const mjModel* model, const mjData* data);
 }  // namespace qhrr05

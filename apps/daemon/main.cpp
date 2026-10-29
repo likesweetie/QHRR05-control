@@ -404,9 +404,10 @@ int main(int argc, char** argv) {
 
                 try {
                     StartProcess(daemon, application, children);
-                } catch (...) {
+                } catch (const std::exception& error) {
                     terminal->ReportStartupError(log_path);
-                    throw;
+                    throw std::runtime_error(
+                        std::string(error.what()) + "; startup log: " + log_path.string());
                 }
 
                 ::close(terminal->slave);

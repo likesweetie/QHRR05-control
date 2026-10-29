@@ -1,0 +1,4 @@
+# Preserve the byte-exact CAD delivery files and their original Windows line endings.
+models/qhrr-05/cad_source_properties.json -text whitespace=cr-at-eol
+models/qhrr-05/mass_properties.json -text whitespace=cr-at-eol
+models/qhrr-05/qhrr-05.urdf -text whitespace=cr-at-eol

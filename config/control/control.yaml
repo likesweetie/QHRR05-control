@@ -20,9 +20,22 @@ homing:  # 현재 관절각에서 호밍 자세까지 보간하는 위치 PD 제
 gravity_compensation:  # 자유 움직임을 위한 동역학 보상과 선택적 자세 유지
   gravity_only: false  # true: 중력만, false: 중력+코리올리·원심력 보상
   kp_motor: [2.0, 2.0, 2.0]  # 토크를 등가 위치로 변환하는 MIT 내부 P 게인(N·m/rad)
-  kd_motor: [0.3, 0.3, 0.3]  # MIT 내부 속도 감쇠 D 게인(N·m·s/rad)
+  kd_motor: [0.05, 0.05, 0.05]  # MIT 내부 속도 감쇠 D 게인(N·m·s/rad)
   alpha: 1.0  # 선택한 중력/bias 보상 비율(0: 보상 없음, 1: 전량 보상)
   task_stiffness: [0.0, 0.0, 0.0]  # 진입 관절각을 유지하는 강성(N·m/rad); 0이면 자세 유지 없음
+  damping_ratio: [0.5, 0.5, 0.5]  # 제어기가 모델 점성 감쇠의 50%를 보상, 50% 유지(0..1). ζ가 아님; kd_motor는 별도로 더해짐
+  friction_compensation:
+    coulomb_ratio: [0.85, 0.85, 0.85]  # 건마찰 보상 비율(0..1); 나머지 15%는 유지
+    velocity_scale_rad_s: 0.03  # tanh 전환 속도: 정지 부근의 급격한 토크 반전을 완화
+  torque_limit_nm: [53.7, 53.7, 53.7]  # 보상·보조를 합산한 최종 관절 토크 제한
+  virtual_inertia:
+    enabled: false  # 측정 외력 토크 기반 관성 축소; 명시적으로 켤 때만 동작
+    scale: 0.5  # 실제 관성 대비 목표 비율(0.25..1); 1은 추가 보조 없음
+    observer_hz: 8.0  # 외력 토크 추정 저역통과 대역폭
+    external_torque_deadband_nm: 0.15  # 노이즈에 의한 보조를 억제하는 연속 deadband
+    ramp_sec: 0.3  # G 모드 재진입 시 보조 토크 서서히 증가
+    assist_limit_nm: [3.0, 3.0, 3.0]  # 관성 보조만의 토크 제한
+    maximum_velocity_rad_s: 2.0  # 절반부터 가속 보조를 줄이고 이 속도에서 0; 강제 속도 제한은 아님
 
 magnetic_touch:  # 외력 감지 후 일정한 힘으로 물체를 누르며 따라가는 제어
   gravity_only: false  # true: 중력만, false: 전체 bias 보상; 물리 마찰·감쇠는 유지
@@ -50,7 +63,7 @@ magnetic_touch:  # 외력 감지 후 일정한 힘으로 물체를 누르며 따
   workspace_max_m: [0.7, 0.5, 0.45]  # 힘 추종을 허용하는 발끝 월드 X/Y/Z 좌표의 상한(m)
   observer:  # 관절 동역학 잔차로 외력을 추정하는 RFOB 설정
     bandwidth_hz: 20.0  # 외력 토크 추정 저역통과 필터의 대역폭(Hz)
-    regularization_m: 0.001  # 외력 변환용 감쇠 의사역행렬의 정규화 계수 λ(m)
+    regularization_m: 0.001  # 외력 변환 DLS 영역의 정규화 계수 λ(m); 정상 조건은 실제 역행렬
     minimum_singular_value_m: 0.01  # 야코비안 최소 특이값이 이 값 미만이면 관측 무효(m)
     maximum_estimate_n: 50.0  # 추정 외력 크기가 이 값을 넘으면 관측 무효(N); 출력 제한과 다름
     friction_velocity_rad_s: 0.01  # 건마찰 모델을 저속에서 부드럽게 만드는 속도 기준(rad/s)

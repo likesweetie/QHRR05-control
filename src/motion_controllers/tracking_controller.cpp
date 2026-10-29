@@ -10,7 +10,16 @@
 #include <yaml-cpp/yaml.h>
 
 namespace qhrr05 {
-TrackingController::TrackingController(const std::string& config_path) : ilc_(config_path) {
+TrackingController::TrackingController(const std::string& config_path)
+    : TrackingController(config_path, nullptr, 0) {
+}
+
+TrackingController::TrackingController(const std::string& config_path, ModelBackend& backend)
+    : TrackingController(config_path, &backend, 0) {
+}
+
+TrackingController::TrackingController(const std::string& config_path, ModelBackend* backend, int)
+    : ilc_(config_path), backend_(backend) {
     const auto config = YAML::LoadFile(config_path);
 
     if (config["robot"].as<std::string>() != "qhrr-05")
@@ -22,19 +31,33 @@ TrackingController::TrackingController(const std::string& config_path) : ilc_(co
     const auto id = settings["inverse_dynamics"];
 
     if (id && id["enabled"].IsDefined())
-        throw std::runtime_error("tracking.inverse_dynamics.enabled was removed; select mode=impedance to disable IDFF");
+        throw std::runtime_error(
+            "tracking.inverse_dynamics.enabled was removed; select mode=impedance to disable IDFF");
 
-    for (const char* key : {"period_sec", "ramp_sec", "arc_length_samples", "amplitude_x_m",
-             "amplitude_y_m", "amplitude_z_m", "kp_motor", "kd_motor", "torque_limit_nm",
-             "stiffness_n_m", "damping_ns_m"})
+    for (const char* key : {"period_sec",
+             "ramp_sec",
+             "arc_length_samples",
+             "amplitude_x_m",
+             "amplitude_y_m",
+             "amplitude_z_m",
+             "kp_motor",
+             "kd_motor",
+             "torque_limit_nm",
+             "stiffness_n_m",
+             "damping_ns_m"})
         if (settings[key].IsDefined())
             throw std::runtime_error(std::string("retired tracking key: ") + key +
-                "; use trajectory/motor/impedance/output_torque_limit_nm");
+                                     "; use trajectory/motor/impedance/output_torque_limit_nm");
 
-    for (const char* key : {"jacobian_regularization_m", "maximum_jacobian_regularization_m",
-             "singularity_threshold_m", "ik_tolerance_m", "ik_max_iterations", "ik_step_limit_rad"})
+    for (const char* key : {"jacobian_regularization_m",
+             "maximum_jacobian_regularization_m",
+             "singularity_threshold_m",
+             "ik_tolerance_m",
+             "ik_max_iterations",
+             "ik_step_limit_rad"})
         if (id && id[key].IsDefined())
-            throw std::runtime_error(std::string("common IK parameter belongs under tracking.ik: ") + key);
+            throw std::runtime_error(
+                std::string("common IK parameter belongs under tracking.ik: ") + key);
 
     const auto ctc = settings["ctc"];
 
@@ -83,14 +106,19 @@ TrackingController::TrackingController(const std::string& config_path) : ilc_(co
     if (timing == "uniform_acceleration")
         uniform_acceleration_ = true;
     else if (timing != "constant_speed")
-        throw std::runtime_error("tracking.trajectory.timing must be uniform_acceleration or constant_speed");
+        throw std::runtime_error(
+            "tracking.trajectory.timing must be uniform_acceleration or constant_speed");
 
     if (arc_length_samples_ < 64 || arc_length_samples_ > 65536 ||
-        std::any_of(amplitude_.begin(), amplitude_.end(), [](double value) { return value <= 0; }))
-        throw std::runtime_error("tracking trajectory needs positive amplitudes and 64..65536 arc-length samples");
+        std::any_of(amplitude_.begin(), amplitude_.end(), [](double value) {
+            return value <= 0;
+        }))
+        throw std::runtime_error(
+            "tracking trajectory needs positive amplitudes and 64..65536 arc-length samples");
 
     if (uniform_acceleration_ && arc_length_samples_ < 256)
-        throw std::runtime_error("uniform_acceleration needs at least 256 arc_length_samples for its smooth timing profile");
+        throw std::runtime_error(
+            "uniform_acceleration needs at least 256 arc_length_samples for its smooth timing profile");
 
     kp_motor_ = axes(motor, "kp_nm_rad");
     kd_motor_ = axes(motor, "kd_nm_s_rad");
@@ -134,14 +162,16 @@ TrackingController::TrackingController(const std::string& config_path) : ilc_(co
         trajectory_samples_ = ik["trajectory_samples"].as<int>();
         condition_limit_ = config["workspace"]["maximum_condition_number"].as<double>();
 
-        if (ik_iterations_ <= 0 || ik_iterations_ > 100 || maximum_regularization_ < regularization_)
+        if (ik_iterations_ <= 0 || ik_iterations_ > 100 ||
+            maximum_regularization_ < regularization_)
             throw std::runtime_error("invalid Tracking IK iteration count or damping bounds");
 
         if (trajectory_samples_ < 64 || trajectory_samples_ > 16384)
             throw std::runtime_error("tracking.ik.trajectory_samples must be in 64..16384");
 
         if (!std::isfinite(condition_limit_) || condition_limit_ < 1)
-            throw std::runtime_error("workspace.maximum_condition_number must be finite and at least 1");
+            throw std::runtime_error(
+                "workspace.maximum_condition_number must be finite and at least 1");
     }
 
     BuildArcLengthTables();
@@ -149,27 +179,14 @@ TrackingController::TrackingController(const std::string& config_path) : ilc_(co
     if (uniform_acceleration_)
         BuildAccelerationProfiles();
 
-    {
-        const auto path = std::filesystem::path(config_path).parent_path() /
-                          config["model_path"].as<std::string>();
-        char error[1024]{};
-        id_model_.reset(mj_loadXML(path.c_str(), nullptr, error, sizeof(error)));
-
-        if (!id_model_)
-            throw std::runtime_error("tracking model load failed: " + std::string(error));
-
-        if (id_model_->nq != 3 || id_model_->nv != 3 || id_model_->nu != 3)
-            throw std::runtime_error("tracking model requires three joints and actuators");
-
-        toe_site_ = mj_name2id(id_model_.get(), mjOBJ_SITE, "FL_foot");
-        id_data_.reset(mj_makeData(id_model_.get()));
-
-        if (toe_site_ < 0 || !id_data_)
-            throw std::runtime_error("tracking model needs FL_foot and allocated mjData");
+    if (!backend_) {
+        owned_backend_ = MakeMujocoBackend(config_path);
+        backend_ = owned_backend_.get();
     }
 }
 
-void TrackingController::Start(double time, const std::array<double, 3>& toe_position,
+void TrackingController::Start(double time,
+    const std::array<double, 3>& toe_position,
     const std::array<double, 3>& joint_position,
     TrackingPlane plane) {
     TrackingPlaneAxes(plane);  // Reject unknown planes before changing the active trajectory.
@@ -196,6 +213,7 @@ void TrackingController::Start(double time, const std::array<double, 3>& toe_pos
     torque_saturated_ = false;
     ik_failed_ = false;
     ik_failure_reason_ = "";
+    factor_valid_ = false;
     minimum_singular_value_ = 0;
     jacobian_damping_ = regularization_;
     ilc_.Reset();
@@ -209,19 +227,11 @@ void TrackingController::Start(double time, const std::array<double, 3>& toe_pos
 }
 
 bool TrackingController::CheckCondition(const std::array<double, 9>& jacobian) {
-    double jjt[9]{};
-
-    for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column)
-            for (int joint = 0; joint < 3; ++joint)
-                jjt[3 * row + column] += jacobian[3 * row + joint] * jacobian[3 * column + joint];
-
-    double eigenvalues[3], eigenvectors[9], quaternion[4];
-    mju_eig3(eigenvalues, eigenvectors, quaternion, jjt);
-    const double minimum = *std::min_element(eigenvalues, eigenvalues + 3);
-    const double maximum = *std::max_element(eigenvalues, eigenvalues + 3);
-    condition_number_ = minimum > 1e-24 && std::isfinite(minimum) && std::isfinite(maximum)
-        ? std::sqrt(maximum / minimum) : std::numeric_limits<double>::infinity();
+    if (!FactorJacobian(jacobian)) {
+        ik_failure_reason_ = "invalid Jacobian factorization";
+        return false;
+    }
+    condition_number_ = solver_.spectrum().condition;
 
     if (condition_number_ > condition_limit_) {
         ik_failure_reason_ = "Jacobian condition limit exceeded";
@@ -236,9 +246,7 @@ bool TrackingController::CheckTrajectory() {
     std::array<double, 9> jacobian;
     const auto held_joint = joint_reference_;
     joint_reference_ = validation_joint_;
-    std::copy(validation_joint_.begin(), validation_joint_.end(), id_data_->qpos);
-    mj_fwdPosition(id_model_.get(), id_data_.get());
-    mj_jacSite(id_model_.get(), id_data_.get(), jacobian.data(), nullptr, toe_site_);
+    jacobian = backend_->Evaluate(validation_joint_).jacobian;
     // Bound work per control tick. Physics/CAN never has to advance for this check.
     const int end = std::min(checked_samples_ + 4, trajectory_samples_ + 1);
 
@@ -287,11 +295,7 @@ void TrackingController::Hold(const std::array<double, 3>& joint_position) {
     toe_acceleration_reference_.fill(0);
     inverse_dynamics_torque_.fill(0);
     ctc_torque_.fill(0);
-    std::copy(joint_position.begin(), joint_position.end(), id_data_->qpos);
-    mju_zero(id_data_->qvel, 3);
-    mju_zero(id_data_->qacc, 3);
-    mj_fwdPosition(id_model_.get(), id_data_.get());
-    std::copy_n(id_data_->site_xpos + 3 * toe_site_, 3, toe_reference_.begin());
+    toe_reference_ = backend_->Evaluate(joint_position, false).position;
 }
 
 void TrackingController::BuildArcLengthTables() {
@@ -310,8 +314,8 @@ void TrackingController::BuildArcLengthTables() {
         // Simpson integration of |dx/dphase|; tables are built only at initialization.
         for (int i = 0; i < arc_length_samples_; ++i) {
             const double lo = i * phase_step, hi = (i + 1) * phase_step;
-            lengths[i + 1] = lengths[i] + phase_step / 6 *
-                (speed(lo) + 4 * speed((lo + hi) / 2) + speed(hi));
+            lengths[i + 1] =
+                lengths[i] + phase_step / 6 * (speed(lo) + 4 * speed((lo + hi) / 2) + speed(hi));
 
             if (!std::isfinite(lengths[i + 1]) || lengths[i + 1] <= lengths[i])
                 throw std::runtime_error("tracking arc-length table must be finite and increasing");
@@ -321,12 +325,8 @@ void TrackingController::BuildArcLengthTables() {
 
 double TrackingController::PhaseTimeDensity(TrackingPlane plane, double phase) const {
     const auto& coefficients = timing_coefficients_[static_cast<int>(plane)];
-    double log_speed = 0;
-
-    for (int harmonic = 0; harmonic < kTimingHarmonics; ++harmonic)
-        log_speed += coefficients[harmonic] * std::cos(2 * (harmonic + 1) * phase);
-
-    return std::exp(-log_speed);
+    return std::exp(
+        -numeric::EvaluateCosineSeries(coefficients.data(), coefficients.size(), 2 * phase).value);
 }
 
 void TrackingController::BuildAccelerationProfiles() {
@@ -337,7 +337,8 @@ void TrackingController::BuildAccelerationProfiles() {
     for (const auto plane : {TrackingPlane::XY, TrackingPlane::XZ, TrackingPlane::YZ}) {
         const auto axes = TrackingPlaneAxes(plane);
         const double a = amplitude_[axes[0]], b = amplitude_[axes[1]];
-        std::array<double, samples> tangent_norm, curvature, midpoint_curvature, distance, speed_squared;
+        std::array<double, samples> tangent_norm, curvature, midpoint_curvature, distance,
+            speed_squared;
         const auto geometry = [&](double phase, double& norm, double& kappa) {
             const double x = a * std::cos(phase), y = 2 * b * std::cos(2 * phase);
             const double xx = -a * std::sin(phase), yy = -4 * b * std::sin(2 * phase);
@@ -357,9 +358,10 @@ void TrackingController::BuildAccelerationProfiles() {
             double midpoint_norm, unused;
             geometry((i + .5) * phase_step, midpoint_norm, unused);
             distance[i] = phase_step / 6 *
-                (tangent_norm[i] + 4 * midpoint_norm + tangent_norm[(i + 1) % samples]);
-            speed_squared[i] = 1 / std::max({curvature[i], midpoint_curvature[i],
-                midpoint_curvature[(i + samples - 1) % samples]});
+                          (tangent_norm[i] + 4 * midpoint_norm + tangent_norm[(i + 1) % samples]);
+            speed_squared[i] = 1 / std::max({curvature[i],
+                                       midpoint_curvature[i],
+                                       midpoint_curvature[(i + samples - 1) % samples]});
 
             if (!std::isfinite(speed_squared[i]) || speed_squared[i] <= 0 ||
                 !std::isfinite(distance[i]) || distance[i] <= 0)
@@ -375,7 +377,7 @@ void TrackingController::BuildAccelerationProfiles() {
                 throw std::runtime_error("tracking acceleration envelope has an infeasible edge");
 
             return ((1 - kd * kd) * u + 2 * ds * std::sqrt(std::max(0.0, radicand))) /
-                (1 + kd * kd);
+                   (1 + kd * kd);
         };
         bool converged = false;
 
@@ -388,7 +390,8 @@ void TrackingController::BuildAccelerationProfiles() {
             }
 
             for (int i = samples - 1; i >= 0; --i)
-                speed_squared[i] = std::min(speed_squared[i], reachable(speed_squared[(i + 1) % samples], i));
+                speed_squared[i] =
+                    std::min(speed_squared[i], reachable(speed_squared[(i + 1) % samples], i));
 
             double change = 0, scale = 0;
 
@@ -416,10 +419,10 @@ void TrackingController::BuildAccelerationProfiles() {
 
             for (int i = 0; i < samples; ++i)
                 sum += (.5 * std::log(speed_squared[i]) - std::log(tangent_norm[i])) *
-                    std::cos(frequency * i * phase_step);
+                       std::cos(frequency * i * phase_step);
 
-            coefficients[harmonic] = 2 * sum / samples *
-                std::exp(-.5 * std::pow(frequency * smoothing_width, 2));
+            coefficients[harmonic] =
+                2 * sum / samples * std::exp(-.5 * std::pow(frequency * smoothing_width, 2));
 
             if (!std::isfinite(coefficients[harmonic]))
                 throw std::runtime_error("non-finite tracking acceleration timing coefficient");
@@ -431,8 +434,10 @@ void TrackingController::BuildAccelerationProfiles() {
         const double step = 2 * std::acos(-1.0) / arc_length_samples_;
 
         for (int i = 0; i < arc_length_samples_; ++i) {
-            times[i + 1] = times[i] + step / 6 * (PhaseTimeDensity(plane, i * step) +
-                4 * PhaseTimeDensity(plane, (i + .5) * step) + PhaseTimeDensity(plane, (i + 1) * step));
+            times[i + 1] = times[i] + step / 6 *
+                                          (PhaseTimeDensity(plane, i * step) +
+                                              4 * PhaseTimeDensity(plane, (i + .5) * step) +
+                                              PhaseTimeDensity(plane, (i + 1) * step));
 
             if (!std::isfinite(times[i + 1]) || times[i + 1] <= times[i])
                 throw std::runtime_error("tracking phase-time table must be finite and increasing");
@@ -443,36 +448,38 @@ void TrackingController::BuildAccelerationProfiles() {
 void TrackingController::ComputeReference(double elapsed) {
     const auto axes = TrackingPlaneAxes(plane_);
     const auto& integral = uniform_acceleration_ ? phase_times_[static_cast<int>(plane_)]
-                                               : arc_lengths_[static_cast<int>(plane_)];
+                                                 : arc_lengths_[static_cast<int>(plane_)];
     const double s = std::clamp(elapsed / ramp_time_, 0.0, 1.0);
     const double ramp = s * s * s * (10 + s * (-15 + 6 * s));
     const double ramp_rate = 30 * s * s * (1 - s) * (1 - s) / ramp_time_;
 
     // Ramp the profile clock, preserving position/velocity/acceleration continuity.
     const double travel_time = elapsed < ramp_time_
-        ? ramp_time_ * s * s * s * s * (2.5 + s * (-3 + s))
-        : elapsed - .5 * ramp_time_;
+                                   ? ramp_time_ * s * s * s * s * (2.5 + s * (-3 + s))
+                                   : elapsed - .5 * ramp_time_;
     const double progress = std::fmod(travel_time, period_) / period_ * integral.back();
     const auto upper = std::upper_bound(integral.begin(), integral.end(), progress);
-    const int segment = std::min(static_cast<int>(upper - integral.begin()) - 1,
-        arc_length_samples_ - 1);
+    const int segment =
+        std::min(static_cast<int>(upper - integral.begin()) - 1, arc_length_samples_ - 1);
     const double phase_step = 2 * std::acos(-1.0) / arc_length_samples_;
     const double lo = segment * phase_step, hi = (segment + 1) * phase_step;
     const auto density = [&](double phase) {
         return uniform_acceleration_ ? PhaseTimeDensity(plane_, phase)
-            : std::hypot(amplitude_[axes[0]] * std::cos(phase),
-            2 * amplitude_[axes[1]] * std::cos(2 * phase));
+                                     : std::hypot(amplitude_[axes[0]] * std::cos(phase),
+                                           2 * amplitude_[axes[1]] * std::cos(2 * phase));
     };
-    double phase = lo + phase_step *
-        (progress - integral[segment]) / (integral[segment + 1] - integral[segment]);
+    double phase = lo + phase_step * (progress - integral[segment]) /
+                            (integral[segment + 1] - integral[segment]);
 
     // Refine the inverse distance/time integral inside one cell. No accumulated phase
     // integration: skipped/irregular controller ticks still sample the same path.
+    const double density_lo = density(lo);
     for (int iteration = 0; iteration < 3; ++iteration) {
-        const double local_integral = (phase - lo) / 6 *
-            (density(lo) + 4 * density((lo + phase) / 2) + density(phase));
-        phase = std::clamp(phase - (integral[segment] + local_integral - progress) / density(phase),
-            lo, hi);
+        const double density_phase = density(phase);
+        const double local_integral =
+            (phase - lo) / 6 * (density_lo + 4 * density((lo + phase) / 2) + density_phase);
+        phase = std::clamp(
+            phase - (integral[segment] + local_integral - progress) / density_phase, lo, hi);
     }
 
     const std::array<double, 2> tangent{
@@ -480,22 +487,20 @@ void TrackingController::ComputeReference(double elapsed) {
     const std::array<double, 2> curvature{
         -amplitude_[axes[0]] * std::sin(phase), -4 * amplitude_[axes[1]] * std::sin(2 * phase)};
     const double tangent_norm = std::hypot(tangent[0], tangent[1]);
-    double log_rate_derivative = -(tangent[0] * curvature[0] + tangent[1] * curvature[1]) /
-        (tangent_norm * tangent_norm);
+    double log_rate_derivative =
+        -(tangent[0] * curvature[0] + tangent[1] * curvature[1]) / (tangent_norm * tangent_norm);
 
     if (uniform_acceleration_) {
-        log_rate_derivative = 0;
         const auto& coefficients = timing_coefficients_[static_cast<int>(plane_)];
-
-        for (int harmonic = 0; harmonic < kTimingHarmonics; ++harmonic) {
-            const double frequency = 2 * (harmonic + 1);
-            log_rate_derivative -= frequency * coefficients[harmonic] * std::sin(frequency * phase);
-        }
+        log_rate_derivative =
+            2 * numeric::EvaluateCosineSeries(coefficients.data(), coefficients.size(), 2 * phase)
+                    .derivative;
     }
 
     const double rate = integral.back() / period_ / density(phase);
     const double phase_rate = rate * ramp;
-    const double phase_acceleration = rate * ramp_rate + log_rate_derivative * phase_rate * phase_rate;
+    const double phase_acceleration =
+        rate * ramp_rate + log_rate_derivative * phase_rate * phase_rate;
 
     toe_reference_ = center_;
     toe_velocity_reference_.fill(0);
@@ -506,170 +511,93 @@ void TrackingController::ComputeReference(double elapsed) {
         toe_reference_[axis] += amplitude_[axis] * std::sin((component + 1) * phase);
         toe_velocity_reference_[axis] = tangent[component] * phase_rate;
         toe_acceleration_reference_[axis] = curvature[component] * phase_rate * phase_rate +
-            tangent[component] * phase_acceleration;
+                                            tangent[component] * phase_acceleration;
     }
 }
 
+bool TrackingController::FactorJacobian(const numeric::Mat3& jacobian) {
+    if (!factor_valid_ || jacobian != factored_jacobian_) {
+        factor_valid_ = solver_.Factor(jacobian,
+            {singularity_threshold_, regularization_, maximum_regularization_, condition_limit_});
+        factored_jacobian_ = jacobian;
+    }
+    minimum_singular_value_ = solver_.spectrum().minimum;
+    jacobian_damping_ = solver_.damping();
+    return factor_valid_;
+}
+
 bool TrackingController::SolveJacobian(const std::array<double, 9>& jacobian,
-    const std::array<double, 3>& cartesian, std::array<double, 3>& result) {
-    for (double value : jacobian)
-        if (!std::isfinite(value))
-            return false;
-
-    for (double value : cartesian)
-        if (!std::isfinite(value))
-            return false;
-
-    // Adaptive DLS: use the smallest singular value of J to increase damping
-    // smoothly near singularities. The same inverse maps position, velocity and acceleration.
-    double jjt[9]{};
-
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            for (int k = 0; k < 3; ++k)
-                jjt[3 * i + j] += jacobian[3 * i + k] * jacobian[3 * j + k];
-
-    double eigenvalues[3], eigenvectors[9], quaternion[4];
-    mju_eig3(eigenvalues, eigenvectors, quaternion, jjt);
-    const double minimum_eigenvalue = *std::min_element(eigenvalues, eigenvalues + 3);
-
-    if (!std::isfinite(minimum_eigenvalue))
-        return false;
-
-    minimum_singular_value_ = std::sqrt(std::max(0.0, minimum_eigenvalue));
-    const double ratio = std::min(1.0, minimum_singular_value_ / singularity_threshold_);
-    const double weight = 1 - ratio * ratio;
-    const double damping_squared = regularization_ * regularization_ +
-        (maximum_regularization_ * maximum_regularization_ - regularization_ * regularization_) *
-            weight * weight;
-    jacobian_damping_ = std::sqrt(damping_squared);
-
-    for (int i = 0; i < 3; ++i)
-        jjt[3 * i + i] += damping_squared;
-
-    if (mju_cholFactor(jjt, 3, 0) != 3)
-        return false;
-
-    double solved[3];
-    mju_cholSolve(solved, jjt, cartesian.data(), 3);
-    result.fill(0);
-
-    for (int joint = 0; joint < 3; ++joint)
-        for (int axis = 0; axis < 3; ++axis)
-            result[joint] += jacobian[3 * axis + joint] * solved[axis];
-
-    return std::all_of(result.begin(), result.end(), [](double value) { return std::isfinite(value); });
+    const std::array<double, 3>& cartesian,
+    std::array<double, 3>& result) {
+    return FactorJacobian(jacobian) && solver_.Solve(cartesian, result);
 }
 
 bool TrackingController::SolvePosition(std::array<double, 9>& jacobian) {
-    auto* model = id_model_.get();
-    auto* data = id_data_.get();
-    std::copy(joint_reference_.begin(), joint_reference_.end(), data->qpos);
-
-    // Warm-start geometric IK from the preceding desired pose. Do not silently
-    // project the user's trajectory onto the physical joint-limit workspace.
+    auto q = joint_reference_;
+    // Warm-started IK uses only FK/Jacobian, never the contact/constraint solver.
     for (int iteration = 0; iteration <= ik_iterations_; ++iteration) {
-        mj_fwdPosition(model, data);
-        mj_jacSite(model, data, jacobian.data(), nullptr, toe_site_);
-        std::array<double, 3> error;
-
-        for (int axis = 0; axis < 3; ++axis)
-            error[axis] = toe_reference_[axis] - data->site_xpos[3 * toe_site_ + axis];
-
-        ik_error_ = mju_norm3(error.data());
-
-        if (ik_error_ <= ik_tolerance_)
-            break;
-
+        const auto kinematics = backend_->Evaluate(q);
+        jacobian = kinematics.jacobian;
+        const auto error = numeric::Subtract(toe_reference_, kinematics.position);
+        ik_error_ = numeric::Norm(error);
+        if (ik_error_ <= ik_tolerance_) {
+            joint_reference_ = q;
+            return true;
+        }
         if (iteration == ik_iterations_ || !std::isfinite(ik_error_)) {
             ik_failure_reason_ = "IK did not converge";
             return false;
         }
-
         std::array<double, 3> step;
-
         if (!SolveJacobian(jacobian, error, step)) {
             ik_failure_reason_ = "IK Jacobian solve failed";
             return false;
         }
-
-        const double scale = std::min(1.0, ik_step_limit_ / std::max(mju_norm3(step.data()), 1e-12));
-
+        const double scale = std::min(1.0, ik_step_limit_ / std::max(numeric::Norm(step), 1e-12));
         for (int joint = 0; joint < 3; ++joint)
-            data->qpos[joint] += scale * step[joint];
+            q[joint] += scale * step[joint];
     }
-
-    std::copy_n(data->qpos, 3, joint_reference_.begin());
-    return true;
+    return false;
 }
 
 bool TrackingController::ComputeJointReference() {
-    auto* model = id_model_.get();
-    auto* data = id_data_.get();
     std::array<double, 9> jacobian{};
-
     if (!SolvePosition(jacobian) || !CheckCondition(jacobian))
         return false;
-
     if (!SolveJacobian(jacobian, toe_velocity_reference_, joint_velocity_reference_)) {
         ik_failure_reason_ = "desired velocity solve failed";
         return false;
     }
-
-    std::copy(joint_velocity_reference_.begin(), joint_velocity_reference_.end(), data->qvel);
-    mj_forward(model, data);
-
-    std::array<double, 9> jacobian_dot{};
-    mj_jacDot(model, data, jacobian_dot.data(), nullptr,
-        data->site_xpos + 3 * toe_site_, model->site_bodyid[toe_site_]);
-    auto acceleration = toe_acceleration_reference_;
-
-    for (int axis = 0; axis < 3; ++axis)
-        for (int joint = 0; joint < 3; ++joint)
-            acceleration[axis] -= jacobian_dot[3 * axis + joint] * joint_velocity_reference_[joint];
-
+    const auto convective =
+        backend_->ConvectiveAcceleration(joint_reference_, joint_velocity_reference_);
+    const auto acceleration = numeric::Subtract(toe_acceleration_reference_, convective);
+    // Same factorization as velocity: no repeated spectrum or Cholesky computation.
     if (!SolveJacobian(jacobian, acceleration, joint_acceleration_reference_)) {
         ik_failure_reason_ = "desired acceleration solve failed";
         return false;
     }
-
     return true;
 }
 
-bool TrackingController::ComputeDynamicsTorque(const std::array<double, 3>& joint_position,
-    const std::array<double, 3>& joint_velocity) {
-    auto* model = id_model_.get();
-    auto* data = id_data_.get();
-
-    if (method_ == TrackingMethod::CTC) {
-        // Feedback is shaped in acceleration units. Evaluate M and bias at the
-        // measured state; the IK state above remains only the desired reference.
-        std::copy(joint_position.begin(), joint_position.end(), data->qpos);
-        std::copy(joint_velocity.begin(), joint_velocity.end(), data->qvel);
-        mj_forward(model, data);
-
+bool TrackingController::ComputeDynamicsTorque(
+    const std::array<double, 3>& joint_position, const std::array<double, 3>& joint_velocity) {
+    auto acceleration = joint_acceleration_reference_;
+    const bool ctc = method_ == TrackingMethod::CTC;
+    if (ctc) {
         for (int joint = 0; joint < 3; ++joint)
-            data->qacc[joint] = joint_acceleration_reference_[joint] +
+            acceleration[joint] +=
                 ctc_kp_[joint] * (joint_reference_[joint] - joint_position[joint]) +
                 ctc_kd_[joint] * (joint_velocity_reference_[joint] - joint_velocity[joint]);
-    } else {
-        std::copy(joint_acceleration_reference_.begin(), joint_acceleration_reference_.end(), data->qacc);
     }
-
-    auto& dynamics_torque = method_ == TrackingMethod::CTC ? ctc_torque_ : inverse_dynamics_torque_;
-    mj_rne(model, data, 1, dynamics_torque.data());
-
-    // RNE excludes armature. Include rotor inertia to match MuJoCo's full M(q),
-    // while deliberately omitting passive damping/springs/friction and contacts.
-    for (int joint = 0; joint < 3; ++joint) {
-        dynamics_torque[joint] += model->dof_armature[joint] * data->qacc[joint];
-
-        if (!std::isfinite(dynamics_torque[joint])) {
+    auto& torque = ctc ? ctc_torque_ : inverse_dynamics_torque_;
+    torque = backend_->InverseDynamics(ctc ? joint_position : joint_reference_,
+        ctc ? joint_velocity : joint_velocity_reference_,
+        acceleration);
+    for (double value : torque)
+        if (!std::isfinite(value)) {
             ik_failure_reason_ = "non-finite inverse dynamics torque";
             return false;
         }
-    }
-
     return true;
 }
 
@@ -684,8 +612,8 @@ void TrackingController::Compute(double time,
         throw std::runtime_error("invalid tracking time");
 
     for (int i = 0; i < 3; ++i)
-        if (!std::isfinite(joint_position[i]) || !std::isfinite(joint_velocity[i]) || !std::isfinite(gravity_torque[i]) ||
-            !std::isfinite(toe_position[i]))
+        if (!std::isfinite(joint_position[i]) || !std::isfinite(joint_velocity[i]) ||
+            !std::isfinite(gravity_torque[i]) || !std::isfinite(toe_position[i]))
             throw std::runtime_error("invalid tracking feedback");
 
     for (double value : jacobian)
@@ -782,7 +710,7 @@ void TrackingController::Compute(double time,
             toe_error[i] = toe_reference_[i] - toe_position[i];
         }
 
-        ilc_.Record(position_error, velocity_error, mju_norm3(toe_error.data()), torque_saturated_);
+        ilc_.Record(position_error, velocity_error, numeric::Norm(toe_error), torque_saturated_);
     }
 }
 }  // namespace qhrr05

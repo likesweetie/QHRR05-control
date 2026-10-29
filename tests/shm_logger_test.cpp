@@ -1,4 +1,5 @@
 #include "ipc/shm_utils.hpp"
+#include "simulation_ipc_fixture.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -51,10 +52,9 @@ int main(int argc, char** argv) {
         const std::string csv = std::string(directory) + "/data.csv";
         shm_utils::Mapping mapping(name, true);
         auto& shm = *mapping.get();
+        SimulationData sample;
         {
             shm_utils::Lock lock(shm);
-            auto& sample = shm.simulation[1];
-            shm.simulation_sequence = 5;  // Reader starts after four missed publications.
             sample.run_id = 7;
             shm.control[0].input_model_sequence = 42;
             shm.control[0].command_sequence = 17;
@@ -69,8 +69,9 @@ int main(int argc, char** argv) {
             shm.control[0].input_model_published_ns = now - 5000000;
             shm.control[0].published_ns = now - 2000000;
             sample.published_ns = now;
-            shm.simulation_finished = true;
+            sample.finished = true;
         }
+        SimulationIpcFixture simulation_ipc(name, sample, 5);
 
         Require(Run(argv[1], name, csv) == 0, "logger failed");
         std::ifstream input(csv);

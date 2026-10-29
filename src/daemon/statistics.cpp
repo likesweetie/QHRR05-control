@@ -89,15 +89,14 @@ void ShmStatistics::Sample(ShmData& shm) {
     const auto& motors = shm.motors[shm.motor_sequence % kShmBufferCount];
     const auto& model = shm.model[shm.model_sequence % kShmBufferCount];
     const auto& control = shm.control[shm.control_sequence % kShmBufferCount];
-    const auto& simulation = shm.simulation[shm.simulation_sequence % kShmBufferCount];
     const std::array<std::uint64_t, 4> sequence{motors.command_sequence,
         motors.feedback_sequence,
         shm.model_sequence,
-        shm.simulation_sequence};
+        shm.control_sequence};
     const std::array<std::uint64_t, 4> publication{motors.command_published_ns,
         motors.feedback_published_ns,
         model.published_ns,
-        simulation.published_ns};
+        control.published_ns};
     const auto control_sequence = control.command_sequence;
     const auto control_published_ns = control.published_ns;
     const auto input_model_published_ns = control.input_model_published_ns;
@@ -203,7 +202,7 @@ std::string ShmStatistics::Report(std::uint64_t now_ns, bool color) {
     const auto section = [&](const char* heading) {
         text << title << heading << reset << '\n';
     };
-    const std::array<const char*, 4> names{"command", "feedback", "model", "simulation"};
+    const std::array<const char*, 4> names{"command", "feedback", "model", "control"};
 
     section("--- DATA AGE [us] ---------------------------------------------------------------");
     for (std::size_t i = 0; i < names.size(); ++i)

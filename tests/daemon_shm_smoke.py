@@ -59,7 +59,11 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
                 text = csv_path.read_text()
                 complete = text[:text.rfind('\n') + 1]
                 observed = list(csv.DictReader(complete.splitlines()))
-                ready = len(observed) > 1 and any(int(row['command_seq']) > 0 for row in observed)
+                ready = (
+                    len(observed) > 1
+                    and any(int(row['command_seq']) > 0 for row in observed)
+                    and any(row['sample_seq'] != row['command_seq'] for row in observed)
+                )
                 if ready:
                     break
             time.sleep(.01)
@@ -84,7 +88,9 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-daemon-shm-') as tmp:
 
     assert all(a < b for a, b in zip(sequences, sequences[1:]))
     assert sum(int(row['skipped_samples']) for row in rows) == sequences[-1] - len(rows)
-    assert any(row['state_seq'] != row['command_seq'] for row in rows)
+    # sample_seq belongs to physics; state_seq is now the controller-owned
+    # measured-state model counter and can legitimately equal command_seq.
+    assert any(row['sample_seq'] != row['command_seq'] for row in rows)
     assert all(
         (not row['control_latency_us'] or float(row['control_latency_us']) >= 0)
         and float(row['sample_age_us']) >= 0

@@ -1,6 +1,7 @@
 # Independent simulation truth. These values are never written to motor ROM or SHM.
 # Arrays follow HR / HP / KP; scalar sensor parameters apply to all three axes.
 motor:
+  require_zero_position_setup: false  # false: model joint coordinates; true: random initial encoder zero, explicit C3 calibration required.
   kt_motor_nm_a: [0.16, 0.16, 0.16]  # Motor-shaft Kt; default 9 * 0.16 = 1.44 Nm/A.
   gear_ratio: [9.0, 9.0, 9.0]
   pole_pairs: [12, 12, 12]  # Simulation phase setting, not identified AK10-9 hardware data.

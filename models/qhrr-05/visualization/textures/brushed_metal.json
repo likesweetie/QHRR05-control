@@ -1,0 +1,19 @@
+{
+  "asset": "ambientCG Metal009",
+  "author": "Lennart Demes",
+  "source": "https://ambientcg.com/view?id=Metal009",
+  "download": "https://ambientcg.com/get?file=Metal009_4K-PNG.zip",
+  "license": "CC0-1.0",
+  "license_url": "https://docs.ambientcg.com/license/",
+  "archive_sha256": "2e740afb0818258d177a71280076a9a18903e23fff5e2b7563322f6c0e99c6e4",
+  "resolution": [
+    4096,
+    4096
+  ],
+  "processing": "neutral albedo; bounded roughness; original brush direction preserved",
+  "texture_tile_m": 0.08,
+  "output_sha256": {
+    "brushed_metal_color.png": "2725c9134c82bc8f0703d7c49102f988edad963cabc6a4ccf480cf6463f87228",
+    "brushed_metal_roughness.png": "b28934518c4b3a4b62aa25d6c8d73b480ad02bd777a9d233488280119b4aa9d5"
+  }
+}

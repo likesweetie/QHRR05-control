@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ipc/shared_memory.hpp"
+#include "ipc/simulation/channel.hpp"
 #include <array>
 #include <atomic>
 #include <memory>
@@ -29,7 +30,7 @@ struct ReaderCounters {
 
 class SnapshotReader {
 public:
-    explicit SnapshotReader(const std::string& name);
+    explicit SnapshotReader(const std::string& name, bool simulation = true);
     ~SnapshotReader();
     SnapshotReader(const SnapshotReader&) = delete;
     SnapshotReader& operator=(const SnapshotReader&) = delete;
@@ -43,6 +44,7 @@ private:
     ShmData* shm_ = nullptr;
     int fd_ = -1;
     std::uint64_t device_ = 0, inode_ = 0;
+    std::unique_ptr<simulation_ipc::Client> simulation_;
     std::atomic<std::uint64_t> attempts_{0}, successes_{0}, misses_{0}, recoveries_{0},
         failures_{0}, wait_ns_{0}, wait_max_ns_{0}, hold_ns_{0}, hold_max_ns_{0};
 };

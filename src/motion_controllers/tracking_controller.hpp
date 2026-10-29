@@ -4,7 +4,8 @@
 #include <string>
 #include <memory>
 #include <vector>
-#include <mujoco/mujoco.h>
+#include "robot_model/backend.hpp"
+#include "motion_controllers/numerics/math.hpp"
 #include "ipc/control_types.hpp"
 #include "motion_controllers/tracking_ilc.hpp"
 
@@ -12,8 +13,10 @@ namespace qhrr05 {
 class TrackingController {
 public:
     explicit TrackingController(const std::string& config_path);
+    TrackingController(const std::string& config_path, ModelBackend& backend);
 
-    void Start(double time, const std::array<double, 3>& toe_position,
+    void Start(double time,
+        const std::array<double, 3>& toe_position,
         const std::array<double, 3>& joint_position,
         TrackingPlane plane = TrackingPlane::XY);
     void Compute(double time,
@@ -113,6 +116,8 @@ public:
     }
 
 private:
+    TrackingController(const std::string& config_path, ModelBackend* backend, int);
+    bool FactorJacobian(const numeric::Mat3& jacobian);
     TrackingILC ilc_;
     void BuildArcLengthTables();
     void BuildAccelerationProfiles();
@@ -123,10 +128,11 @@ private:
     bool SolvePosition(std::array<double, 9>& jacobian);
     void Hold(const std::array<double, 3>& joint_position);
     bool ComputeJointReference();
-    bool ComputeDynamicsTorque(const std::array<double, 3>& joint_position,
-        const std::array<double, 3>& joint_velocity);
+    bool ComputeDynamicsTorque(
+        const std::array<double, 3>& joint_position, const std::array<double, 3>& joint_velocity);
     bool SolveJacobian(const std::array<double, 9>& jacobian,
-        const std::array<double, 3>& cartesian, std::array<double, 3>& result);
+        const std::array<double, 3>& cartesian,
+        std::array<double, 3>& result);
 
     std::array<double, 3> kp_motor_, kd_motor_, stiffness_, damping_, torque_limit_;
     std::array<double, 3> center_{}, toe_reference_{}, toe_velocity_reference_{};
@@ -155,12 +161,14 @@ private:
     bool ik_failed_ = false;
     const char* ik_failure_reason_ = "";
 
-    // Controller-local mathematical model; never shares the simulator's mjData or clock.
-    std::unique_ptr<mjModel, decltype(&mj_deleteModel)> id_model_{nullptr, mj_deleteModel};
-    std::unique_ptr<mjData, decltype(&mj_deleteData)> id_data_{nullptr, mj_deleteData};
+    std::unique_ptr<ModelBackend> owned_backend_;
+    ModelBackend* backend_ = nullptr;
+    numeric::JacobianSolver solver_;
+    numeric::Mat3 factored_jacobian_{};
+    bool factor_valid_ = false;
     double id_alpha_ = 0, regularization_ = 0, ik_tolerance_ = 0, ik_step_limit_ = 0, ik_error_ = 0;
     double maximum_regularization_ = 0, singularity_threshold_ = 0;
     double minimum_singular_value_ = 0, jacobian_damping_ = 0;
-    int ik_iterations_ = 0, toe_site_ = -1;
+    int ik_iterations_ = 0;
 };
 }  // namespace qhrr05

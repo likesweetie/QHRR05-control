@@ -80,12 +80,30 @@ gravity_compensation:
   kd_motor: [1,2,3]
   alpha: .5
   task_stiffness: [2,4,6]
+  damping_ratio: 1
+  friction_compensation:
+    coulomb_ratio: 0
+    velocity_scale_rad_s: .03
+  torque_limit_nm: 53.7
+  virtual_inertia:
+    enabled: false
+    scale: .5
+    observer_hz: 8
+    external_torque_deadband_nm: .15
+    ramp_sec: .3
+    assist_limit_nm: 3
+    maximum_velocity_rad_s: 2
 )");
         save(gravity);  // No homing section; use independent motor gains.
         qhrr05::GravityCompensationController compensation(path);
         const double desired[] = {.1, .2, .3}, position[] = {.2, .4, .6}, g[] = {1, 2, 3};
         compensation.Start(desired);
-        compensation.Compute(position, dq, g, g, torque, reference);
+        qhrr05::RobotModelState state;
+        std::copy_n(position, 3, state.joint_position.begin());
+        std::copy_n(dq, 3, state.joint_velocity.begin());
+        std::copy_n(g, 3, state.gravity.begin());
+        state.bias = state.gravity;
+        compensation.Compute(state, {}, torque, reference);
         const double expected_gravity[] = {.2, -.2, -1.2};
 
         for (int i = 0; i < 3; ++i)

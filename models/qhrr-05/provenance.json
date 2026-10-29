@@ -57,6 +57,48 @@
       "upstream_sha256": "49ddec0129546e5dd2075d5beacf7f207baa2860aeff7626818e64d2efbf3821",
       "local_sha256": "f40ed417fe611edd05827f59965988754d165771e6efeb953b95bd2ecc651474",
       "modification": "visual crop x<=0.1881,z<=0.057; no collision/inertia derived from mesh"
+    },
+    "qhrr_base.obj": {
+      "source_archive": "qhrr-05_new.zip",
+      "source_file": "qhrr-05/assets/qhrr_base.obj",
+      "local_sha256": "f3e4bda9070ff70337435970a45b84c96ac7018f8d9346c0d85ac42415bb0e7d",
+      "modification": "unchanged; active CAD mesh"
+    },
+    "qhrr_hip.obj": {
+      "source_archive": "qhrr-05_new.zip",
+      "source_file": "qhrr-05/assets/qhrr_hip.obj",
+      "local_sha256": "3b9158cfac733fdf96e463f0424333c3d5720d9f3992b22ab70c2c2d988939ea",
+      "modification": "unchanged; active CAD mesh"
+    },
+    "qhrr_thigh.obj": {
+      "source_archive": "qhrr-05_new.zip",
+      "source_file": "qhrr-05/assets/qhrr_thigh.obj",
+      "local_sha256": "3cac5e0bc65eff7555f26635988dec62c5995b8d35b856a381b6a737fcf80da6",
+      "modification": "unchanged; active CAD mesh"
+    },
+    "qhrr_calf.obj": {
+      "source_archive": "qhrr-05_new.zip",
+      "source_file": "qhrr-05/assets/qhrr_calf.obj",
+      "local_sha256": "cc563e036954976b361c2c166b7e9d69b75b0357a9a2c84ac281b3cfa86b7d16",
+      "modification": "unchanged; active CAD mesh"
     }
+  },
+  "active_model": {
+    "source_archive": "qhrr-05_new.zip",
+    "source_archive_sha256": "b0b8c6f1779aa61250a2e1cea79a585c31b6c90b7263ed407d5f33060c60635f",
+    "source_model": "qhrr-05/qhrr-05.xml",
+    "source_model_sha256": "49a1e0a8c8f024b3b5dd34b699e51c04a52af53af7770f1a66ecbbae57190791",
+    "description": "User-supplied SolidWorks QHRR model; legacy Menagerie fields above describe the retained, inactive assets only.",
+    "body_name_mapping": {
+      "hip": "FL_hip",
+      "thigh": "FL_thigh",
+      "calf": "FL_calf"
+    },
+    "material_name_mapping": {
+      "qhrr_metal": "gray"
+    },
+    "integration": "Existing entry paths, joint/actuator/site names and PBR material names retained. New dimensions, full inertia, joint ranges and collisions copied from the source model.",
+    "local_model_sha256": "0324e4cbc95886bcd390c228a112749841354071423f879f95c1916cfff724bf",
+    "compiler_inertiafromgeom": "auto: all four robot bodies retain explicit source inertials; preserve inference for unchanged scene props"
   }
 }

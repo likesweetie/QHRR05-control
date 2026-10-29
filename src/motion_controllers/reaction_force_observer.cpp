@@ -5,80 +5,6 @@
 #include <yaml-cpp/yaml.h>
 
 namespace qhrr05 {
-namespace {
-double MinimumEigenvalue(std::array<double, 9> a) {
-    // Jacobi diagonalization of the symmetric 3x3 J*J^T.
-    for (int sweep = 0; sweep < 12; ++sweep) {
-        int p = 0, q = 1;
-
-        if (std::abs(a[2]) > std::abs(a[1]))
-            q = 2;
-
-        if (std::abs(a[5]) > std::abs(a[3 * p + q])) {
-            p = 1;
-            q = 2;
-        }
-
-        if (std::abs(a[3 * p + q]) < 1e-14)
-            break;
-
-        const double angle = .5 * std::atan2(2 * a[3 * p + q], a[3 * q + q] - a[3 * p + p]);
-        const double c = std::cos(angle), s = std::sin(angle);
-        const double pp = a[3 * p + p], qq = a[3 * q + q], pq = a[3 * p + q];
-
-        for (int k = 0; k < 3; ++k)
-            if (k != p && k != q) {
-                const double kp = a[3 * k + p], kq = a[3 * k + q];
-                a[3 * k + p] = a[3 * p + k] = c * kp - s * kq;
-                a[3 * k + q] = a[3 * q + k] = s * kp + c * kq;
-            }
-
-        a[3 * p + p] = c * c * pp - 2 * c * s * pq + s * s * qq;
-        a[3 * q + q] = s * s * pp + 2 * c * s * pq + c * c * qq;
-        a[3 * p + q] = a[3 * q + p] = 0;
-    }
-
-    return std::min({a[0], a[4], a[8]});
-}
-
-std::array<double, 3> Solve(std::array<double, 9> a, std::array<double, 3> b) {
-    // Positive definite due to damped least squares; small Cholesky solve.
-    double l[9] = {};
-
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j <= i; ++j) {
-            double v = a[3 * i + j];
-
-            for (int k = 0; k < j; ++k)
-                v -= l[3 * i + k] * l[3 * j + k];
-
-            if (i == j) {
-                if (v <= 0)
-                    throw std::runtime_error("RFOB matrix is not positive definite");
-
-                l[3 * i + j] = std::sqrt(v);
-            } else
-                l[3 * i + j] = v / l[3 * j + j];
-        }
-
-    for (int i = 0; i < 3; ++i) {
-        for (int k = 0; k < i; ++k)
-            b[i] -= l[3 * i + k] * b[k];
-
-        b[i] /= l[3 * i + i];
-    }
-
-    for (int i = 2; i >= 0; --i) {
-        for (int k = i + 1; k < 3; ++k)
-            b[i] -= l[3 * k + i] * b[k];
-
-        b[i] /= l[3 * i + i];
-    }
-
-    return b;
-}
-}
-
 ReactionForceObserver::ReactionForceObserver(const std::string& path) {
     const auto node = YAML::LoadFile(path)["magnetic_touch"]["observer"];
     bandwidth_ = node["bandwidth_hz"].as<double>();
@@ -95,6 +21,7 @@ ReactionForceObserver::ReactionForceObserver(const std::string& path) {
 
 void ReactionForceObserver::Reset() {
     measurement_ = 0;
+    factor_valid_ = false;
     valid_ = false;
     force_.fill(0);
     filtered_torque_.fill(0);
@@ -129,14 +56,16 @@ void ReactionForceObserver::Update(std::uint64_t measurement_sequence,
                 return;
             }
 
-    std::array<double, 9> jjt{};
-
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            for (int k = 0; k < 3; ++k)
-                jjt[3 * i + j] += jacobian[3 * i + k] * jacobian[3 * j + k];
-
-    minimum_singular_value_ = std::sqrt(std::max(0.0, MinimumEigenvalue(jjt)));
+    if (!factor_valid_ || factored_jacobian_ != jacobian) {
+        factor_valid_ =
+            solver_.Factor(jacobian, {singular_limit_, regularization_, regularization_, 10});
+        factored_jacobian_ = jacobian;
+    }
+    if (!factor_valid_) {
+        valid_ = false;
+        return;
+    }
+    minimum_singular_value_ = solver_.spectrum().minimum;
 
     if (minimum_singular_value_ < singular_limit_) {
         valid_ = false;
@@ -171,16 +100,10 @@ void ReactionForceObserver::Update(std::uint64_t measurement_sequence,
 
     measurement_ = measurement_sequence;
 
-    std::array<double, 3> rhs{};
-
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j)
-            rhs[i] += jacobian[3 * i + j] * filtered_torque_[j];
-
-        jjt[3 * i + i] += regularization_ * regularization_;
+    if (!solver_.SolveTranspose(filtered_torque_, force_)) {
+        valid_ = false;
+        return;
     }
-
-    force_ = Solve(jjt, rhs);
     double squared = 0;
 
     for (double value : force_)

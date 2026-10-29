@@ -100,7 +100,7 @@ LoggerService::~LoggerService() {
 }
 
 void LoggerService::Attach() {
-    reader_ = std::make_unique<SnapshotReader>(shm_name_);
+    reader_ = std::make_unique<SnapshotReader>(shm_name_, runtime_mode_ == "simulation");
     health_.state = "READY";
     std::cout << "[shm_logger] attached " << shm_name_ << " ABI=" << kShmAbiVersion << '\n';
 }

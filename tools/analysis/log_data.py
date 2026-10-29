@@ -38,7 +38,8 @@ def inspect(path, faults=False):
         'shm/motor_sequence',
         'shm/model_sequence',
         'control/command_sequence',
-        'shm/simulation_sequence',
+        'shm/simulation_sequence',  # Legacy recordings before simulation IPC separation.
+        'simulation/ipc_sequence',
         'motor/command_sequence',
         'motor/feedback_sequence',
     )

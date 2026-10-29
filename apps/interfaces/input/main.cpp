@@ -1,4 +1,4 @@
-#include "input/joystick.hpp"
+#include "interfaces/input/joystick.hpp"
 #include "ipc/shm_utils.hpp"
 #include <chrono>
 #include <csignal>
@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
         while (!stopped && joystick.isRunning()) {
             {
                 shm_utils::Lock lock(shm);
-                finished = shm.stopping || shm.simulation_finished;
+                finished = shm.stopping;
             }
 
             if (finished)

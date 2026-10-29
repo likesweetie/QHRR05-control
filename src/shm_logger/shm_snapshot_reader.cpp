@@ -5,7 +5,9 @@
 #include <algorithm>
 
 namespace qhrr05::logging {
-SnapshotReader::SnapshotReader(const std::string& name) : name_(name) {
+SnapshotReader::SnapshotReader(const std::string& name, bool simulation) : name_(name) {
+    if (simulation)
+        simulation_ = std::make_unique<simulation_ipc::Client>(name);
     if (name.size() < 2 || name.front() != '/' || name.find('/', 1) != std::string::npos)
         throw std::runtime_error("logger SHM name must be / followed by a single name");
 
@@ -45,6 +47,8 @@ SnapshotReader::~SnapshotReader() {
 }
 
 bool SnapshotReader::Read(LogFrame& frame) {
+    if (simulation_)
+        simulation_->Poll();
     const auto before = shm_utils::MonotonicNs();
     ++attempts_;
     const int result = ::pthread_mutex_trylock(&shm_->mutex);
@@ -78,18 +82,20 @@ bool SnapshotReader::Read(LogFrame& frame) {
     frame.motor_sequence = shm_->motor_sequence;
     frame.model_sequence = shm_->model_sequence;
     frame.control_sequence = shm_->control_sequence;
-    frame.simulation_sequence = shm_->simulation_sequence;
     frame.stopping = shm_->stopping;
     frame.failed = shm_->failed;
-    frame.simulation_finished = shm_->simulation_finished;
     frame.can_enabled = shm_->can_enabled;
     frame.motor = shm_->motors[frame.motor_sequence % kShmBufferCount];
     frame.model = shm_->model[frame.model_sequence % kShmBufferCount];
     frame.control = shm_->control[frame.control_sequence % kShmBufferCount];
-    frame.simulation = shm_->simulation[frame.simulation_sequence % kShmBufferCount];
     const int unlock = ::pthread_mutex_unlock(&shm_->mutex);
     frame.lock_released_ns = shm_utils::MonotonicNs();
     shm_utils::Check(unlock, "logger SHM unlock");
+    if (simulation_) {
+        frame.simulation = simulation_->Latest();
+        frame.simulation_sequence = frame.simulation.sequence;
+        frame.simulation_finished = frame.simulation.finished;
+    }
 
     const auto hold = frame.lock_released_ns - acquired;
     hold_ns_ += hold;

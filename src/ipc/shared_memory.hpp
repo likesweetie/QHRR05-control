@@ -9,7 +9,7 @@
 
 // Shared-memory protocol. Increment the ABI version when layout or field semantics change.
 inline constexpr std::uint64_t kShmMagic = 0x5148525253484D31ULL;  // QHRRSHM1
-inline constexpr std::uint32_t kShmAbiVersion = 11;
+inline constexpr std::uint32_t kShmAbiVersion = 13;
 inline constexpr std::size_t kShmBufferCount = 2;
 inline constexpr unsigned kShmPermissions = 0600;
 inline constexpr clockid_t kShmClock = CLOCK_MONOTONIC;
@@ -38,7 +38,7 @@ struct MotorData {
     bool running = false;
 };
 
-// Simulator-owned model information, evaluated at decoded joint positions.
+// Controller-owned model information, evaluated by its backend at decoded joint positions.
 struct ModelData {
     std::uint64_t published_ns = 0;
     std::array<double, 3> gravity_torque{}, bias_torque{}, passive_torque{}, friction_limit{};
@@ -47,7 +47,8 @@ struct ModelData {
 };
 
 struct ControlData {
-    int requested_mode = 5;  // 0: homing, 1: gravity, 2: magnetic, 3: tracking, 4: ball, 5: damping.
+    int requested_mode =
+        5;  // 0: homing, 1: gravity, 2: magnetic, 3: tracking, 4: ball, 5: damping.
     // GUI owns requests. Slider edits preserve motion_sequence.
     double target_force = 3;
     TrackingPlane requested_tracking_plane = TrackingPlane::XY;
@@ -57,7 +58,8 @@ struct ControlData {
 
     int mode = 5;  // Controller owns status and observer output. Startup is damping only.
     bool holding = false;
-    std::array<double, 3> damping_toe_reference{};  // Captured on damping entry, no position stiffness.
+    std::array<double, 3>
+        damping_toe_reference{};  // Captured on damping entry, no position stiffness.
     bool damping_reference_valid = false;  // False until the first model sample is available.
     double control_time = 0;
     std::uint64_t command_sequence = 0, published_ns = 0, active_motion_sequence = 0;
@@ -71,14 +73,18 @@ struct ControlData {
     std::array<double, 3> tracking_joint_velocity_reference{};  // rad/s; q_d is motors.reference
     std::array<double, 3> tracking_joint_acceleration_reference{};  // rad/s^2
     std::array<double, 3> tracking_inverse_dynamics_torque{};  // Nm, before alpha blending/clipping
-    std::array<double, 3> tracking_ctc_torque{};  // Nm, full CTC output before clipping; zero outside CTC.
+    std::array<double, 3>
+        tracking_ctc_torque{};  // Nm, full CTC output before clipping; zero outside CTC.
     TrackingILCState tracking_ilc_state = TrackingILCState::Off;
-    std::array<double, 3> tracking_ilc_torque{};  // Nm, bounded learned correction added before final clipping.
+    std::array<double, 3>
+        tracking_ilc_torque{};  // Nm, bounded learned correction added before final clipping.
     std::uint64_t tracking_ilc_updates = 0, tracking_ilc_skipped_cycles = 0;
     bool tracking_ilc_limited = false;  // Last accepted update reached an ILC step/torque limit.
-    double tracking_ilc_last_rmse_m = 0;  // Last fully sampled lap; NaN until available when enabled.
+    double tracking_ilc_last_rmse_m =
+        0;  // Last fully sampled lap; NaN until available when enabled.
     bool tracking_idff_enabled = false;
-    bool tracking_ik_failed = false;  // IK/condition rejection: latched hold until explicit restart.
+    bool tracking_ik_failed =
+        false;  // IK/condition rejection: latched hold until explicit restart.
     bool tracking_checking = false;  // Entry pose is held until the full path is approved.
     double tracking_check_progress = 0;  // Completed fraction of the sampled path, 0..1.
     double tracking_ik_error_m = 0;
@@ -94,17 +100,6 @@ struct ControlData {
     bool joystick_connected = false;
 };
 
-// Physical truth and object/contact events stay on the simulation SHM path.
-struct SimulationData {
-    std::uint64_t published_ns = 0, run_id = 0;
-    double time = 0;
-    std::array<double, 3> position_gt{}, torque_gt{}, toe_position{};
-    std::array<double, 3> contact_force{}, contact_torque{}, object_position{};
-    bool contact = false;
-    std::uint64_t contact_event_sequence = 0;
-    double contact_event_time = 0;
-};
-
 struct ShmData {
     // The owner sets magic last, after initializing the process-shared synchronization.
     std::uint64_t magic = 0;
@@ -114,16 +109,14 @@ struct ShmData {
 
     pthread_mutex_t mutex;
     pthread_cond_t changed;
-    bool stopping = false, failed = false, simulation_finished = false, can_enabled = false;
+    bool stopping = false, failed = false, can_enabled = false;
 
     // All copies/publications hold mutex. Multiwriter channels copy the CURRENT
     // published slot before updating their own fields; never publish a stale bank.
-    std::uint64_t motor_sequence = 0, model_sequence = 0, control_sequence = 0,
-                  simulation_sequence = 0;
+    std::uint64_t motor_sequence = 0, model_sequence = 0, control_sequence = 0;
     std::array<MotorData, kShmBufferCount> motors{};
     std::array<ModelData, kShmBufferCount> model{};
     std::array<ControlData, kShmBufferCount> control{};
-    std::array<SimulationData, kShmBufferCount> simulation{};
 };
 
 inline constexpr std::size_t kShmByteSize = sizeof(ShmData);

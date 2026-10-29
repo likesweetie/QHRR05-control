@@ -1,6 +1,6 @@
 # 텔레메트리 기록과 분석
 
-`shm_logger`는 기본 daemon의 선택적 프로세스입니다. **500 Hz 상태·10 Hz 건전성·이벤트·세션 정보를 DataTamer 2.0.0 MCAP에 기록**하고, 기본 5초 이전/2초 이후 Flight Recorder를 함께 운영합니다. 현재 런타임의 SHM ABI 11을 사용하며 기록을 위해 제어 루프에 계측을 추가하지 않습니다. `config/shm_logger/shm_logger.yaml`에서 켜기·끄기·주기·버퍼·저장 정책을 조정합니다.
+`shm_logger`는 기본 daemon의 선택적 프로세스입니다. **500 Hz 상태·10 Hz 건전성·이벤트·세션 정보를 DataTamer 2.0.0 MCAP에 기록**하고, 기본 5초 이전/2초 이후 Flight Recorder를 함께 운영합니다. 하드웨어 상태는 SHM ABI 13, 시뮬레이션 전용 상태는 별도 simulation IPC로 받으며 기록을 위해 제어 루프에 계측을 추가하지 않습니다. `config/shm_logger/shm_logger.yaml`에서 켜기·끄기·주기·버퍼·저장 정책을 조정합니다.
 
 ## 빌드와 시작
 
@@ -75,7 +75,7 @@ daemon의 로거 항목은 `critical: false`, `restart_limit: 3`, `restart_delay
 
 ## 수집·시각·지표의 의미
 
-별도 수집 스레드가 `pthread_mutex_trylock()` 후 현재 게시 슬롯의 논리 데이터만 복사하고 즉시 해제합니다. 등록·직렬화·파일/소켓 처리는 SHM 잠금 밖에서 수행합니다. 500 Hz 정상 수집 경로는 고정 로컬 객체와 사전 할당한 DataTamer 풀을 사용합니다. 느린 sink가 풀을 모두 점유하면 스냅샷을 버리고 계측합니다. 로거가 잠근 동안 제어기가 기다리는 짧은 시간까지 없애는 설계는 아닙니다.
+시뮬레이션 모드에서는 통일된 simulation IPC를 nonblocking으로 구독해 GT·물체·접촉·pause/finished를 받습니다. 하드웨어 모드는 이 구독을 생성하지 않습니다. 별도 수집 스레드가 `pthread_mutex_trylock()` 후 현재 게시 슬롯의 논리 데이터만 복사하고 즉시 해제합니다. 등록·직렬화·파일/소켓 처리는 SHM 잠금 밖에서 수행합니다. 500 Hz 정상 수집 경로는 고정 로컬 객체와 사전 할당한 DataTamer 풀을 사용합니다. 느린 sink가 풀을 모두 점유하면 스냅샷을 버리고 계측합니다. 로거가 잠근 동안 제어기가 기다리는 짧은 시간까지 없애는 설계는 아닙니다.
 
 | 채널 | 내용 |
 | --- | --- |
@@ -86,7 +86,7 @@ daemon의 로거 항목은 `critical: false`, `restart_limit: 3`, `restart_delay
 
 MCAP 메시지 시각은 `CLOCK_MONOTONIC` 수집 시각입니다. SHM의 원본 시각은 별도 필드에 보존하며, 세션의 UTC↔monotonic 대응 관계로 실험 간 비교를 할 수 있습니다. 서로 다른 채널이 같은 제어 주기에 만들어졌다고 가정하지 않습니다.
 
-`motor/HR/...`, `motor/HP/...`, `motor/KP/...` 별칭에는 단위를 이름에 넣었습니다. 원본 구조체 필드와 배열도 모두 기록합니다. 수집 후 원본이 바뀌어도 이미 복사한 프레임은 영향을 받지 않습니다. `runtime_mode: hardware`이면 GT 구조체를 스키마에서 제외합니다. simulation 모드에서도 첫 유효 게시 전에는 GT 값을 비활성화하며 `simulation/valid`를 제공합니다.
+`motor/HR/...`, `motor/HP/...`, `motor/KP/...` 별칭에는 단위를 이름에 넣었습니다. 원본 구조체 필드와 배열도 모두 기록합니다. SHM에는 Motor/Model/Control만 있으며, simulation 필드는 별도 IPC에서 받은 로컬 스냅샷입니다. `simulation/ipc_sequence`와 `simulation/finished`를 기록하며 기존 녹화 파일의 `shm/simulation_sequence`는 분석 도구에서 계속 읽을 수 있습니다. 수집 후 원본이 바뀌어도 이미 복사한 프레임은 영향을 받지 않습니다. `runtime_mode: hardware`이면 GT 구조체를 스키마에서 제외합니다. simulation 모드에서도 첫 유효 게시 전에는 GT 값을 비활성화하며 `simulation/valid`를 제공합니다.
 
 건전성의 mutex 수치는 **로거의 trylock 시도 시간과 복사+unlock 시간**입니다. 제어기/HAL의 mutex wait/hold는 아닙니다. `source_sequence_gaps`는 motor 루트/model/control command/simulation/motor command/motor feedback 순서의 **이 관측기가 놓친 게시 수**이며 CAN 손실률이 아닙니다. 데이터 Age는 아직 값이 없거나 하드웨어 GT이면 무효로 표시합니다. `accepted_output_rate_hz`는 sink 큐가 수락한 state 비율, `sink_delivered`는 모든 채널·sink의 전달 합계입니다. 실제 파일별 sample rate는 아래 inspect로 확인합니다.
 

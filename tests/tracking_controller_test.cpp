@@ -383,7 +383,9 @@ int main(int argc, char** argv) {
 
         // The current pose is well conditioned, but a later section is not.
         auto guarded_config = YAML::Clone(fixed_config);
-        guarded_config["workspace"]["maximum_condition_number"] = 2.45;
+        // Between the current CAD model's entry condition and its path peak.
+        guarded_config["workspace"]["maximum_condition_number"] =
+            qhrr05::numeric::SingularValues(home_jacobian).condition * 1.02;
         const auto guarded_path = temporary_directory + "/guarded.yaml";
         std::ofstream(guarded_path) << guarded_config;
         qhrr05::TrackingController guarded(guarded_path);

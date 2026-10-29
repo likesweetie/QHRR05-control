@@ -1,0 +1,38 @@
+[
+  {
+    "Package": "clang-18",
+    "Version": "1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144",
+    "Filename": "pool/main/l/llvm-toolchain-18/clang-18_18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144_amd64.deb",
+    "SHA256": "dd79eea36f41d2ea0d609ce1bcfa4e8e6a2afe6dd5ec6528c36ac96dd51fdcdd"
+  },
+  {
+    "Package": "libclang-common-18-dev",
+    "Version": "1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144",
+    "Filename": "pool/main/l/llvm-toolchain-18/libclang-common-18-dev_18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144_amd64.deb",
+    "SHA256": "828b9a2b64634845374757a87ac4f2c0ddf362497e3ac52a3290393ee4d8971c"
+  },
+  {
+    "Package": "libclang-cpp18",
+    "Version": "1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144",
+    "Filename": "pool/main/l/llvm-toolchain-18/libclang-cpp18_18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144_amd64.deb",
+    "SHA256": "0dace71f4e75a1845cc62c78c9113d7068405d4545b35c01b639d40d6fd9577a"
+  },
+  {
+    "Package": "libclang1-18",
+    "Version": "1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144",
+    "Filename": "pool/main/l/llvm-toolchain-18/libclang1-18_18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144_amd64.deb",
+    "SHA256": "1588b2bad6efedd7afd2cbd23ad515ae3a26dd2d9d41b5ba002ab76c8389ce7f"
+  },
+  {
+    "Package": "libllvm18",
+    "Version": "1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144",
+    "Filename": "pool/main/l/llvm-toolchain-18/libllvm18_18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144_amd64.deb",
+    "SHA256": "c1e09f8da408cb1eb39a92ddf849d81b2fe258668a827843d3da4ee9c59354ab"
+  },
+  {
+    "Package": "llvm-18-linker-tools",
+    "Version": "1:18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144",
+    "Filename": "pool/main/l/llvm-toolchain-18/llvm-18-linker-tools_18.1.8~++20240731024944+3b5b5c1ec4a3-1~exp1~20240731145000.144_amd64.deb",
+    "SHA256": "b2336c56bfeaf71d6b68276953201c16cec99708882ccfd85f7c93f695fbe79b"
+  }
+]

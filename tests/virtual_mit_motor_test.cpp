@@ -129,23 +129,31 @@ int main(int argc, char** argv) {
         };
 
         Require(exchange(0, {0xC4}) == expected_profile, "C4 profile mismatch");
-        feedback(0);
-        Near(data->ctrl[0], 0, 0, "C0 enabled a released motor");
+
+        for (int axis = 0; axis < 3; ++axis) {
+            Near(feedback(axis).position,
+                data->qpos[axis],
+                .0004,
+                "known model zero did not return the model joint angle");
+            Near(data->ctrl[axis], 0, 0, "C0 enabled a released motor");
+        }
+
+        // Mechanical motion before the first enable must not move a calibrated zero.
         data->qpos[0] = .14;
         Require(exchange(0, {0xC1}) == openrobot::Payload{0xC1, 3}, "C1 Kd scale echo mismatch");
         Near(data->ctrl[0], 0, 0, "C1 replayed a command received while disabled");
-        Near(feedback(0).position, 0, .0004, "first C1 did not capture current position");
-        Near(data->ctrl[0], expected_torque(0, 0), 1e-10, "MIT PD output mismatch");
+        Near(feedback(0).position, .14, .0004, "first C1 rebased the calibrated model zero");
+        Near(data->ctrl[0], expected_torque(0, .14), 1e-10, "MIT PD output mismatch");
         data->qpos[0] += .03;
         data->qvel[0] = .4;
         advance(.005);
         Near(data->ctrl[0],
-            expected_torque(0, .03),
+            expected_torque(0, .17),
             1e-10,
             "motor did not hold the last received target");
         exchange(0, {0xC1});
         Near(data->ctrl[0],
-            expected_torque(0, .03),
+            expected_torque(0, .17),
             1e-10,
             "repeated C1 changed an active target/origin");
 
@@ -253,13 +261,63 @@ int main(int argc, char** argv) {
         motors.reset();
         motors = std::make_unique<qhrr05::VirtualMotors>(hal_path, argv[3], origin, shm);
         exchange(0, {0xC1});
-        Near(feedback(0).position, 0, .0004, "motor power cycle retained runtime zero");
+        Near(feedback(0).position, origin[0], .0004, "motor power cycle retained runtime zero");
+        exchange(1, {0xC1});
+        Near(feedback(1).position,
+            origin[1],
+            .0004,
+            "power cycle did not restore model joint coordinates");
+
+        // Unknown encoder zeros are random only at construction, and remain fixed
+        // across enable/release, pause and mechanical reset until an explicit C3.
+        auto simulation = YAML::LoadFile(argv[3]);
+        simulation["motor"]["require_zero_position_setup"] = true;
+        const auto random_path = (directory / "random.yaml").string();
+        std::ofstream(random_path) << simulation;
+        motors.reset();
+        motors = std::make_unique<qhrr05::VirtualMotors>(hal_path, random_path, origin, shm);
+        std::array<double, 3> random_positions{};
+        bool differs_from_model = false;
+
+        for (int axis = 0; axis < 3; ++axis) {
+            random_positions[axis] = feedback(axis).position;
+            differs_from_model |= std::abs(random_positions[axis] - origin[axis]) > .01;
+            exchange(axis, {0xC1});
+            Near(feedback(axis).position,
+                random_positions[axis],
+                .0004,
+                "enable overwrote the unknown encoder zero");
+            exchange(axis, {0xC2});
+            exchange(axis, {0xC1});
+            Near(feedback(axis).position,
+                random_positions[axis],
+                .0004,
+                "re-enable overwrote the unknown encoder zero");
+        }
+
+        Require(
+            differs_from_model, "random zero policy still exposes calibrated model coordinates");
+        data->qpos[0] += .03;
+        Near(feedback(0).position,
+            random_positions[0] + .03,
+            .0004,
+            "random encoder zero was resampled during motion");
+        qhrr05::ResetSimulation(origin, model.get(), data.get());
+        Near(feedback(0).position,
+            random_positions[0],
+            .0004,
+            "mechanical reset changed the unknown encoder zero");
+        zero(0, 0);
+        advance(.020);
+        exchange(0, {0xC1});
+        Near(feedback(0).position, 0, .0004, "C3 did not calibrate an unknown encoder zero");
 
         ::close(peer);
         peer = -1;
         std::filesystem::remove_all(directory);
-        std::cout << "PASS: real CAN MIT enable/release, automatic zero, signed C3 offset, "
-                     "20ms physics hold, stale command rejection, per-axis state, pause/reset\n";
+        std::cout
+            << "PASS: real CAN MIT enable/release, model/random zero policies, signed C3 offset, "
+               "20ms physics hold, stale command rejection, per-axis state, pause/reset\n";
         return 0;
     } catch (const std::exception& error) {
         if (peer >= 0)
