@@ -1,5 +1,6 @@
 #include <array>
 #include "simulation/simulation.hpp"
+#include "control/limits.hpp"
 #include "simulation/interaction.hpp"
 #include "daemon/daemon.hpp"
 #include "interfaces/input/interface.hpp"
@@ -167,11 +168,7 @@ int main(int argc, char** argv) {
                 options.hal_config, options.simulation_config, initial, shm);
         }
 
-        const auto configured_limits =
-            config["tracking"]["output_torque_limit_nm"].as<std::vector<double>>();
-
-        if (configured_limits.size() != 3)
-            throw std::runtime_error("torque headroom needs three tracking torque limits");
+        const auto configured_limits = qhrr05::ReadControlTorqueLimits(config);
 
         std::array<double, 3> torque_limits;
 

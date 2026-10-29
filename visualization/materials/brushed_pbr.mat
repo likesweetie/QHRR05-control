@@ -62,7 +62,8 @@ fragment {
     vec3 brushLocal = transpose(getWorldTangentFrame()) * brushWorld;
     float directionLength = length(brushLocal.xy);
     float validDirection = step(1e-10, abs(determinant)) * step(1e-10, directionLength);
-    material.anisotropy = 0.38 * smoothstep(0.7, 1.0, material.metallic) * validDirection;
+    // Mild brushing on full-metal alloys; the coated black housing stays isotropic.
+    material.anisotropy = 0.20 * smoothstep(0.95, 1.0, material.metallic) * validDirection;
     material.anisotropyDirection = directionLength > 1e-10
         ? vec3(brushLocal.xy / directionLength, 0.0) : vec3(1.0, 0.0, 0.0);
     material.emissive         = texture(materialParams_Emissive, uv);

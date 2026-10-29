@@ -1,4 +1,5 @@
 #include "control/control.hpp"
+#include "control/limits.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -25,7 +26,9 @@ TaskController::TaskController(
             throw std::runtime_error("SHM transport does not match controller mode");
     }
 
-    const double frequency = YAML::LoadFile(config_path)["control"]["frequency_hz"].as<double>();
+    const auto config = YAML::LoadFile(config_path);
+    torque_limits_ = ReadControlTorqueLimits(config);
+    const double frequency = config["control"]["frequency_hz"].as<double>();
 
     if (!std::isfinite(frequency) || frequency <= 0)
         throw std::runtime_error("control.frequency_hz must be positive and finite");
@@ -212,14 +215,9 @@ bool TaskController::ReadInput() {
         measurement_ns_ = newest_ns;
 
         if (without_can_) {
-            const auto next_measurement = *std::max_element(
+            measurement_sequence_ = *std::max_element(
                 previous_received_sequence_.begin(), previous_received_sequence_.end());
-            gravity_measurement_dt_ =
-                measurement_dt_ *
-                (measurement_sequence_ ? next_measurement - measurement_sequence_ : 1);
-            measurement_sequence_ = next_measurement;
         } else {
-            gravity_measurement_dt_ = measurement_dt_;
             ++measurement_sequence_;
         }
     }
@@ -295,10 +293,8 @@ void TaskController::Control() {
             position_reference_.data());
         holding_ = homing_->Reference(control_time_).holding;
     } else if (mode_ == 1) {
-        gravity_->Compute(model_backend_->state(),
-            {joint_acceleration_, motor_torque_, measurement_sequence_, gravity_measurement_dt_},
-            torque_command_.data(),
-            position_reference_.data());
+        gravity_->Compute(
+            model_backend_->state(), torque_command_.data(), position_reference_.data());
     } else if (mode_ == 2) {
         magnetic_->Compute(control_time_,
             joint_position_,
@@ -363,10 +359,17 @@ void TaskController::Control() {
             torque_command_[i] = -joint_velocity_[i];
     }
 
+    for (int i = 0; i < 3; ++i)
+        torque_command_[i] = std::clamp(torque_command_[i], -torque_limits_[i], torque_limits_[i]);
+
     if (!without_can_ && mode_ == 5) {
         // Pure MIT damping has no position surrogate and never divides by kp=0.
         for (int i = 0; i < 3; ++i)
-            motor_targets_[i] = {position_reference_[i] - encoder_origin_[i], 0, 0, 1, 0};
+            motor_targets_[i] = {position_reference_[i] - encoder_origin_[i],
+                joint_velocity_[i] + torque_command_[i],
+                0,
+                1,
+                0};
     } else if (!without_can_) {
         const auto& kp = mode_ == 0   ? homing_->kp()
                          : mode_ == 1 ? gravity_->kp_motor()
@@ -383,12 +386,11 @@ void TaskController::Control() {
         for (int i = 0; i < 3; ++i) {
             // Remove the motor D term already included in torque_command_, then
             // represent the resulting effort as an actual MIT position target.
+            const double target_velocity = mode_ == 0 ? home.velocity[i] : 0;
             const double position =
-                mode_ == 0 ? home.position[i]
-                           : joint_position_[i] +
-                                 (torque_command_[i] + kd[i] * joint_velocity_[i]) / kp[i];
-            motor_targets_[i] = {
-                position - encoder_origin_[i], mode_ == 0 ? home.velocity[i] : 0, kp[i], kd[i], 0};
+                joint_position_[i] +
+                (torque_command_[i] - kd[i] * (target_velocity - joint_velocity_[i])) / kp[i];
+            motor_targets_[i] = {position - encoder_origin_[i], target_velocity, kp[i], kd[i], 0};
         }
     }
 }

@@ -1,4 +1,5 @@
 #include "motion_controllers/magnetic_touch_controller.hpp"
+#include "control/limits.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -45,7 +46,7 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
     damping_ = joints("joint_damping_nm_s_rad");
     kp_motor_ = joints("kp_motor");
     kd_motor_ = joints("kd_motor");
-    torque_limit_ = joints("torque_limit_nm");
+    torque_limit_ = ReadControlTorqueLimits(config);
     workspace_min_ = joints("workspace_min_m");
     workspace_max_ = joints("workspace_max_m");
 

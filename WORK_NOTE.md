@@ -1,6 +1,28 @@
 # 작업 요약
 
-갱신: 2026-10-29 · 브랜치: `GUI` · 기준 커밋: `eac40f6` (main/GUI 원격 반영 완료)
+갱신: 2026-10-29 · 브랜치: `refactoring` · 기준 커밋: `2f27d0e` (main 병합·원격 반영 완료)
+
+## 마찰 보상 스위치·공통 출력 토크 제한 — 2026-10-29
+
+- `gravity_compensation.friction_compensation.enabled`를 추가했습니다(현재 true). false는 건마찰과 모델 점성감쇠 보상을 함께 끄며 중력/bias·자세 강성·motor kd를 유지합니다. 보상 비율·속도 파라미터는 저장값을 유지하고, bool 누락/오류는 시작 오류입니다.
+- 각 모션의 최종 토크 제한을 최상위 `limits.torque_nm: 60.7`로 통일했습니다. 현재 YAML의 최대 최종 출력값 60.7을 모든 관절에 적용하며, 스칼라/3개 배열을 지원합니다. 공통 파서는 src/control/limits.hpp입니다. 이전 모션별 torque_limit_nm/output_torque_limit_nm은 거부합니다.
+- Homing/Gravity/Magnetic/Tracking/Ball, TaskController 최종 토크와 MIT 목표, Classic/Filament 그래프가 공통 제한을 읽습니다. Homing/Damping도 제한된 토크를 실제 MIT 목표로 표현하도록 변환했습니다. 물리 MJCF/CAN의 제한, ILC 보정 자체 한도·주기별 갱신 한도는 역할이 달라 유지합니다.
+- runtime의 다른 사용자 튜닝(damping_ratio1, coulomb.95, kd.01, 추종 파라미터 등)은 유지했습니다. native 전체/Filament 빌드, 마찰 ON/OFF·공통 한도·실제 MIT 변환·오류 거부와 관련 모션 7개 시험 통과. Filament 정적 미리보기의 새 설정 로딩도 통과했습니다.
+- 가상 CAN IDFF/CTC/Impedance 3/3 통과(84.60s), 총 관련 회귀 10개 통과. 별도 공통 설정 유효성 재검증도 통과했습니다. 로그: /tmp/qhrr-shared-limits-tests.log, /tmp/qhrr-shared-limits-can.log. diff/서식 검사 통과, 변경은 refactoring 브랜치에 미커밋 상태입니다.
+
+## 가상 관성 제어 제거 — 2026-10-29
+
+- 사용자 요청으로 가상 관성 보조 토크, 외력 추정 필터, 전용 상태/피드백/측정 dt를 제거했습니다. Gravity의 입력은 측정 상태 기반 RobotModelState만 사용하며 중력/bias, 자세 강성, 마찰·감쇠 보상과 최종 토크 제한을 유지합니다.
+- 현재 사용자가 조정한 damping_ratio=[1,1,1], coulomb_ratio=[.95,.95,.95]를 보존했습니다. YAML의 virtual_inertia 섹션과 활성 문서·전용 시험은 제거했습니다. 구 설정에 해당 항목이 남아 있으면 제거 안내 오류를 내며 조용히 무시하지 않습니다.
+- 이전 가상 관성 구현 기록은 아래 이력으로만 남아 있으며 현재 기능이 아닙니다. 렌더링 재질 작업은 그대로 보존했습니다.
+- control/simulation 및 관련 시험 빌드 완료. safety_layer/control_io/motion_controller_config/qhrr05_gravity 4/4 통과(16.67s), diff 검사 통과. 실행 중 사용자 세션은 변경하지 않았으며 재시작부터 적용됩니다.
+
+## 재질 기준값·거칠기 맵 재보정 — 2026-10-29
+
+- 사용자 첨부 진단을 기준으로 실제 맵을 확인했습니다. 이전 roughness 맵 평균은 .891로, 은색 유효값은 .232였습니다. OBJ에 authored UV가 없어 texrepeat25는 0~1 UV에서 25타일이라는 의미가 아니었습니다. C++ 재질 재할당과 배경/IBL 분리는 이미 적용 중입니다.
+- 동일 GPU/카메라로 기존, 무텍스처 상수, 약한 roughness, repeat1, 사진 IBL을 비교했습니다. repeat1만의 차이는 작은 반면 사진 IBL은 넓은 반사 띠를 강화하여 기본 환경은 기존 analytic studio IBL로 유지했습니다. 비교는 `artifacts/material-calibration/`에 보관합니다.
+- 은색/몸체의 색상 브러시 무늬를 제거하고 상수 RGB .78/.80/.82와 .48/.50/.53으로 변경했습니다. 별도 4K roughness 맵에 유효값을 직접 저장(계수1), 평균 .348834/.380253, 범위 .322~.380/.357~.404입니다. texrepeat10(200mm projected tile), max anisotropy.20. 검정 하우징은 별도 무텍스처 재질(RGB.12/.13/.14, metallic.85, roughness.42)로 등방 반사합니다. 흰 커버는 도장 재질, 바닥 거칠기는 고정.90입니다. 미사용 텍스처 선언을 제거했습니다.
+- 생성 도구/메타데이터/문서를 갱신했습니다. 새 shader 빌드, 실제 RTX5090에서 MSAA1/4/8x·2xSSAA·홀수폭 캡처·잘못된 옵션 거부 시험 통과. 활성 texture 파일 로딩/해시 검증 통과, GPU 등록 texture13→9. 최종 이미지 `artifacts/material-calibration/final.png`, 비교 `before-after.png`. 물리/제어/모델 형상과 기존 배경·광량은 변경하지 않았습니다. refactoring 브랜치의 미커밋 작업입니다.
 
 ## 통합 커밋·main 병합 준비 — 2026-10-29
 
@@ -9,7 +31,7 @@
 - daemon SHM smoke는 이제 controller model counter(state_seq)가 아닌 physics counter(sample_seq)와 command_seq를 비교합니다. 신규 CAD의 지연 enable 시험은 특정 HR 축 절대값 대신 시작 관절각 대비 실제 최대 변위를 검사합니다. 두 검증 재실행 통과했습니다. Native GUI 슬라이더 시험은 물리 접촉을 잠시 고정해 자연 상태 전이를 GUI 재시작으로 오인하지 않게 했으며 이 부분은 통과했습니다.
 - **미통과 2건을 숨기지 않습니다:** Tracking XZ IDFF+ILC 개선율 약3.75%(기준10%)는 앞서 변경 전 구현에서도 재현한 기존 항목입니다. Native Ctrl-drag는 현재 모델에서 관절 이동량 약0.0105rad로 시험 기준0.03rad에 못 미칩니다. 좌표 투영/긴 드래그의 진단에서도 최대 약0.0188rad였고, 시험 기준은 낮추지 않았습니다. 해당 진단용 변경은 제외했습니다. 전체 항목 중 재검증 포함39/41 통과이며, 이 두 건은 후속 조사 대상으로 남깁니다.
 
-## Gravity 마찰 보상·선택적 가상 관성 — 2026-10-29
+## Gravity 마찰 보상·선택적 가상 관성 — 이전 구현 이력 (가상 관성은 이후 제거)
 
 - 사용자 최종 요청대로 모델 감쇠의 50%를 G 제어기에서 보상합니다. `gravity_compensation.damping_ratio=[.5,.5,.5]`는 남기는 모델 감쇠 비율이며 임계감쇠비 ζ가 아닙니다. 모델 D=2.0은 그대로, 잔여 D=1.0에 기존 motor kd=.05가 추가됩니다. 건마찰은 85%만 tanh(dq/.03)로 부드럽게 보상합니다. 조절은 control.yaml 편집 후 제어기 재시작입니다.
 - ModelBackend는 모델 damping을 제공하고 Gravity는 측정 상태의 RobotModelState를 받습니다. 물리 MJCF, SHM ABI와 다른 모션 제어식은 바꾸지 않았습니다. 모델 passive 전체를 뒤집지 않으므로 스프링까지 임의로 보상하지 않습니다.

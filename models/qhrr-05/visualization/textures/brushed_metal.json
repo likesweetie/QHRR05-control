@@ -10,10 +10,21 @@
     4096,
     4096
   ],
-  "processing": "neutral albedo; bounded roughness; original brush direction preserved",
-  "texture_tile_m": 0.08,
-  "output_sha256": {
-    "brushed_metal_color.png": "2725c9134c82bc8f0703d7c49102f988edad963cabc6a4ccf480cf6463f87228",
-    "brushed_metal_roughness.png": "b28934518c4b3a4b62aa25d6c8d73b480ad02bd777a9d233488280119b4aa9d5"
+  "processing": "roughness only; Gaussian blur 0.7px; low-contrast linear remapping; constant base color",
+  "roughness_factor": 1.0,
+  "texture_tile_m": 0.2,
+  "outputs": {
+    "brushed_metal_roughness.png": {
+      "sha256": "0bf6af90fee096acec27119c7f907c8d4b6d417734ef662b44c901383b18ca0f",
+      "roughness_min": 0.3215686274509804,
+      "roughness_max": 0.3803921568627451,
+      "roughness_mean": 0.34883447347902785
+    },
+    "graphite_metal_roughness.png": {
+      "sha256": "d00ea3a600ebbec3b97c7567deb1de37ee66a60d62c3928696a9ded48a8dcd5d",
+      "roughness_min": 0.3568627450980392,
+      "roughness_max": 0.403921568627451,
+      "roughness_mean": 0.3802532808453429
+    }
   }
 }

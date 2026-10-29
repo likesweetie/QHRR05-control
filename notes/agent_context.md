@@ -1,3 +1,21 @@
+# Friction toggle and shared torque limits (2026-10-29)
+
+- User requested friction_compensation ON/OFF and highest existing YAML torque limit promoted to top-level group. New limits.torque_nm=60.7 scalar (max runtime final output60.7), supports3axes. src/control/limits.hpp validatesrequiredpositivefinite scalar/3array and rejectsoldpermode outputlimits. Homing/Gravity/Magnetic/Tracking/Ball +Task finaloutput +Classic/Filamentplots readit. Model/CANcaps andILC correction/update budgetsunchanged.
+- New gravity_compensation.friction_compensation.enabled=true; false removesbothdry+viscouscompensation butretains gravity/bias,taskstiffness,motorkd. Storedratiosremain. Usercurrentdamping1,coulomb.95,kd.01 preserved. Bad/missingbool failsvisibly. Homing/Damping MITconversion nowrepresentclippedtorque too; fakeCANstate testchecksdirectMITalgebra inH/G/D againstlow.1Nmcap.
+- Updatedfixturescanonical sharedlimit23.7/23.7/45.43 retainingtrackingbaseline, tests,docs. Native+Filamentbuildpass; 7motion/config/IOtests pass; separatemissinglimitvalidation andactualFilamentpreviewpass. 3CANregressionsPASS84.60s in/tmp/qhrr-shared-limits-can.log (10relatedtests total). Formatting/diffchecks pass. No commits/pushes or userlive-sessioninterference.
+
+# Virtual inertia removed (2026-10-29)
+
+- User explicitly requested removal. Deleted GravityFeedback, externaltorquefilter, inertiaassist/ramp/speedgate and dedicated TaskController measurementdt. GravityCompute(state,torque,reference) is const and only evaluates bias/gravity, stiffness, friction/damping and torque limits. Othercontrollers/physicalmodel/SHM unchanged.
+- User had locally changed damping_ratio to1.0 and coulomb_ratio to.95 and enabledinertia before removal. Preserved damping/coulomb values, deletedvirtual_inertia config inruntime/fixtures and obsolete tests/docs. Oldsection inexternalYAML explicitlyfails withremoved-optionmessage instead ofsilentignore. Historical notesbelow aren'tcurrentfeaturestatus. Pendingmaterialchangespreserved; no commitrequested.
+- Built control/simulation/tests; safety_layer/control_io/motion_controller_config/qhrr05_gravity4/4passed16.67s; diffcheckclean. No activeuserprocesses changed; restartrequired.
+
+# Latest material calibration (2026-10-29)
+
+- User attached material review. On refactoring branch (main merged/pushed2f27d0e, GUI9262f55). No new commit requested. Actual oldroughness avg227.25/255=.891, silver effective.232; noauthoredOBJUV, C++ mappings correct, analyticIBL alreadyseparatefromgraybackground.
+- Compared old/constant/no texture/weakmicro/repeat1/photoIBL onactualGPU. repeat1alone tinyvariation, photoIBLstrongwidebars. KeepexistinganalyticIBL/background/intensities. Runtime silver/graphite constantalbedo and separate4Kroughness directfactor1; means.348834/.380253, minmax.322-.380/.357-.404. Toolprepare_metal_materials nowroughness-only with.7pxblur, twooutputhashes/rangesinJSON. texrepeat10=200mmtile, constantwhite16textureonlytoenablepinnedUVscaling. Blackisotropic separateconstantmaterialRGB.12/.13/.14,metallic.85,rough.42;paint rough.50;floor rough.90fixed. Shader anisotropymax.20onlymetallic>.95. Unusedtexturedeclarationsremoved;oldfilesretainedforcomparison.
+- Shaderbuild+actual5090qualitytest1/4/8xAA+2xSSAA+oddwidthreadback+invalidoptionsPASS. ActivePNGdecode/reference/hashcheckPASS, GPU textures13→9. Artifacts/material-calibration/final.png andbefore-after.png, photos/constant/repeatdiagnosticframesalso there. Phys/control/geometryunchanged; currentworkuncommitted.
+
 # GUI integration publication (2026-10-29)
 
 - User now explicitly requests commit all work, merge main, push remote, create/switch refactoring. GUI/main initially eac40f6 origin matches. Include intended source/assets/docs; local delivery qhrr-05_new.zip nowignored, runtimecachesexcluded. Added .gitattributes preserving originalCADJSON/URDF CRLFbytes.

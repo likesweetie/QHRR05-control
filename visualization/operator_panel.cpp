@@ -1,4 +1,5 @@
 #include "operator_panel.hpp"
+#include "control/limits.hpp"
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <algorithm>
@@ -57,10 +58,9 @@ OperatorPanel::OperatorPanel(const std::string& config, InputClient* input, bool
         throw std::runtime_error("invalid visualization plot history/sample rate");
     plots_ = std::make_unique<viewer::LivePlots>(history);
     maximum_force_ = settings["magnetic_touch"]["maximum_force_n"].as<double>();
-    const auto limits = settings["tracking"]["output_torque_limit_nm"].as<std::vector<double>>();
-    if (limits.size() != 3 || !std::isfinite(maximum_force_) || maximum_force_ <= 0)
+    limits_ = ReadControlTorqueLimits(settings);
+    if (!std::isfinite(maximum_force_) || maximum_force_ <= 0)
         throw std::runtime_error("invalid visualization force/torque limits");
-    std::copy(limits.begin(), limits.end(), limits_.begin());
 }
 
 void OperatorPanel::Error(const std::string& message) {

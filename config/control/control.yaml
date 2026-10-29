@@ -4,6 +4,9 @@
 robot: qhrr-05  # 사용할 로봇 모델 이름
 model_path: ../../models/qhrr-05/qhrr-05.xml  # 모든 모션 컨트롤러·작업공간 계산용 모델; 이 YAML 위치 기준
 
+limits:  # 모든 모션의 최종 출력 토크 상한; 물리 MJCF/CAN 한계는 별도
+  torque_nm: 60.7  # 스칼라 또는 HR/HP/KP 배열, 단위 N·m
+
 workspace:  # 트래킹 실행 검사와 공 추종·W 오버레이가 함께 사용하는 기준
   maximum_condition_number: 10.0  # 위치 야코비안 σ_max/σ_min 상한; 초과하는 트래킹 궤적은 시작 거부
 
@@ -20,22 +23,14 @@ homing:  # 현재 관절각에서 호밍 자세까지 보간하는 위치 PD 제
 gravity_compensation:  # 자유 움직임을 위한 동역학 보상과 선택적 자세 유지
   gravity_only: false  # true: 중력만, false: 중력+코리올리·원심력 보상
   kp_motor: [2.0, 2.0, 2.0]  # 토크를 등가 위치로 변환하는 MIT 내부 P 게인(N·m/rad)
-  kd_motor: [0.05, 0.05, 0.05]  # MIT 내부 속도 감쇠 D 게인(N·m·s/rad)
+  kd_motor: [0.01, 0.01, 0.01]  # MIT 내부 속도 감쇠 D 게인(N·m·s/rad)
   alpha: 1.0  # 선택한 중력/bias 보상 비율(0: 보상 없음, 1: 전량 보상)
   task_stiffness: [0.0, 0.0, 0.0]  # 진입 관절각을 유지하는 강성(N·m/rad); 0이면 자세 유지 없음
-  damping_ratio: [0.5, 0.5, 0.5]  # 제어기가 모델 점성 감쇠의 50%를 보상, 50% 유지(0..1). ζ가 아님; kd_motor는 별도로 더해짐
+  damping_ratio: [1.0, 1.0, 1.0]  # 모델 점성 감쇠 잔여 비율(0..1): 1은 보상 없음, 0.5는 절반 보상. kd_motor는 별도
   friction_compensation:
-    coulomb_ratio: [0.85, 0.85, 0.85]  # 건마찰 보상 비율(0..1); 나머지 15%는 유지
+    enabled: true  # false: 건마찰·점성감쇠 보상 OFF; 중력과 motor kd는 유지
+    coulomb_ratio: [0.95, 0.95, 0.95]  # 건마찰 보상 비율(0..1); 현재 95% 보상, 5% 유지
     velocity_scale_rad_s: 0.03  # tanh 전환 속도: 정지 부근의 급격한 토크 반전을 완화
-  torque_limit_nm: [53.7, 53.7, 53.7]  # 보상·보조를 합산한 최종 관절 토크 제한
-  virtual_inertia:
-    enabled: false  # 측정 외력 토크 기반 관성 축소; 명시적으로 켤 때만 동작
-    scale: 0.5  # 실제 관성 대비 목표 비율(0.25..1); 1은 추가 보조 없음
-    observer_hz: 8.0  # 외력 토크 추정 저역통과 대역폭
-    external_torque_deadband_nm: 0.15  # 노이즈에 의한 보조를 억제하는 연속 deadband
-    ramp_sec: 0.3  # G 모드 재진입 시 보조 토크 서서히 증가
-    assist_limit_nm: [3.0, 3.0, 3.0]  # 관성 보조만의 토크 제한
-    maximum_velocity_rad_s: 2.0  # 절반부터 가속 보조를 줄이고 이 속도에서 0; 강제 속도 제한은 아님
 
 magnetic_touch:  # 외력 감지 후 일정한 힘으로 물체를 누르며 따라가는 제어
   gravity_only: false  # true: 중력만, false: 전체 bias 보상; 물리 마찰·감쇠는 유지
@@ -58,7 +53,6 @@ magnetic_touch:  # 외력 감지 후 일정한 힘으로 물체를 누르며 따
   maximum_displacement_m: 0.15  # 접촉 시작점 기준 목표 변위·실제 발끝 이동 거리 한계(m)
   joint_margin_rad: 0.025  # 관절 한계에 가까워지면 힘 추종을 해제하는 여유각(rad)
   joint_damping_nm_s_rad: [0.1, 0.1, 0.1]  # 제어 토크에 직접 적용하는 관절 속도 감쇠(N·m·s/rad)
-  torque_limit_nm: [60.7, 60.7, 60.43]  # 보상·추종·감쇠를 합한 관절 토크의 절댓값 상한(N·m)
   workspace_min_m: [-0.15, -0.15, 0.025]  # 힘 추종을 허용하는 발끝 월드 X/Y/Z 좌표의 하한(m)
   workspace_max_m: [0.7, 0.5, 0.45]  # 힘 추종을 허용하는 발끝 월드 X/Y/Z 좌표의 상한(m)
   observer:  # 관절 동역학 잔차로 외력을 추정하는 RFOB 설정
@@ -87,7 +81,6 @@ tracking:  # 월드 XY/XZ/YZ 무한대 궤적 추종; 단축키 1/2/3, 변경 �
   motor:  # MIT 위치 surrogate 출력의 공통 내부 서보 게인; HR/HP/KP
     kp_nm_rad: [10, 10, 10]  # 내부 위치 P(N·m/rad); 토크를 목표 각도로 환산
     kd_nm_s_rad: [1.25, 1.25, 1.25]  # 내부 속도 D(N·m·s/rad); 토크 환산 시 중복 감쇠 보정
-  output_torque_limit_nm: [60.7, 60.7, 60.43]  # 기본 제어+ILC 합산 후 최종 관절 토크 상한(N·m); 모터 물리 제한과 별개
   impedance:  # inverse_dynamics/impedance 모드의 작업공간 피드백; CTC에서는 사용하지 않음
     stiffness_n_m: [5000.0, 5000.0, 5000.0]  # 월드 X/Y/Z 위치 오차 복원 강성(N/m)
     damping_ns_m: [50.0, 50.0, 50.0]  # 월드 X/Y/Z 목표·현재 속도 오차 감쇠(N·s/m)
@@ -121,7 +114,6 @@ ball_following:  # 조이스틱 공 추종; GUI B, FK 격자와 관절 보간 �
   trigger_threshold: 0.3  # 트리거 눌림 판정(0..1); 둘 다 누르면 느린 속도 우선
   kp_motor: [10, 10 ,10]  # HR/HP/KP 관절 위치 P(N·m/rad)
   kd_motor: [0.25, 0.25, 0.25]  # HR/HP/KP 관절 속도 D(N·m·s/rad)
-  torque_limit_nm: [23.7, 23.7, 45.43]  # 중력+PD 합산 토크 절댓값 상한(N·m)
 
 plots:  # GUI 그래프와 시뮬레이션 계측 샘플 설정
   history_sec: 10.0  # 그래프에 보관·표시할 최근 시뮬레이션 시간(s)
