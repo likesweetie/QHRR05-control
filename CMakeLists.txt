@@ -143,6 +143,16 @@ if(BUILD_TESTING)
     set_target_properties(virtual_iq_sensor_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
     add_test(NAME virtual_iq_sensor COMMAND virtual_iq_sensor_test
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation.yaml)
+    add_executable(virtual_mit_motor_test tests/virtual_mit_motor_test.cpp)
+    target_link_libraries(virtual_mit_motor_test PRIVATE simulation_core)
+    set_target_properties(virtual_mit_motor_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME virtual_mit_motor COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+        $<TARGET_FILE:virtual_mit_motor_test>
+        ${CMAKE_CURRENT_SOURCE_DIR}/models/qhrr-05/scene.xml
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/can_hal/can_hal.yaml
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/simulation.yaml)
+    set_tests_properties(virtual_mit_motor PROPERTIES TIMEOUT 15)
     add_executable(virtual_iq_can_test tests/virtual_iq_can_test.cpp)
     target_link_libraries(virtual_iq_can_test PRIVATE simulation_core)
     set_target_properties(virtual_iq_can_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")

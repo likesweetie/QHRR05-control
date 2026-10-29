@@ -27,12 +27,17 @@ public:
     }
 
 private:
+    enum class MotorMode { Released, Enabled, MitControl };
+
     void Reply(int axis, const openrobot::Payload& bytes);
     int socket_ = -1;
     std::array<unsigned, 3> ids_{};
-    std::array<double, 3> encoder_origin_{};
-    std::array<bool, 3> enabled_{};
+    std::array<MotorMode, 3> modes_{};
     std::array<MitCommand, 3> targets_{};
+    // MIT runtime zero is separate from the physical encoder's origin.
+    std::array<double, 3> mit_origin_{}, zero_hold_remaining_{};
+    std::array<bool, 3> user_zero_set_{};
+    double motor_time_ = -1;
     std::array<VirtualIqSensor, 3> iq_sensors_;
     std::array<double, 3> actual_kt_output_{}, gear_ratio_{}, pole_pairs_{}, electrical_zero_{};
     std::array<double, 3> reported_iq_{};

@@ -19,11 +19,20 @@
 | 명령 | HAL / 가상 모터 동작 |
 | --- | --- |
 | C4 | V_MAX/T_MAX·Kt_out·감속비·Kd scale 조회·일치 확인 |
-| C1 | 프로파일 검증 후 enable 요청·확인 |
-| C0 | MIT 목표 송신, 상대각·속도·Iq·온도 응답 |
-| C2 | release. 이후 C0 송신 중단, 종료 시에도 송신 |
+| C1 | HAL은 프로파일 검증 후 enable 요청·확인. 가상 모터는 enable 대기로 진입하며 C0 수신 전 출력은 0 |
+| C0 | enable 상태에서 MIT 목표 적용, MIT 원점 기준 상대각·속도·Iq·온도 응답. 해제 상태·제로셋 보호 구간에서는 목표 적용 없이 피드백만 응답 |
+| C2 | release 및 목표 초기화. HAL은 이후 C0 송신 중단, 종료 시에도 C2 송신 |
+| C3 | 가상 모터의 MIT 런타임 원점 설정. DATA[6:7] signed int16 LE, 출력축 0.01 deg/LSB, 응답에 오프셋 에코 |
 
 ID 1/2/3은 SID 0x141/0x142/0x143에 대응합니다. 아직 검증되지 않은 C4와 미확인 C1은 100 HAL 주기마다 재요청합니다. 이는 준비 확인용 반복이며 응답 지연 감시가 아닙니다. 모터 응답이 없어도 제어 루프는 설정 주기로 계속 동작합니다.
+
+가상 모터는 축마다 `Released → Enabled → MitControl` 상태를 가집니다. C1만으로는 토크가 발생하지 않고, 다음 유효 C0부터 목표를 유지하며 PD를 계산합니다. 이미 enable된 모터에 반복한 C1은 원점·목표를 바꾸지 않습니다. C2는 즉시 출력을 0으로 만들고 이전 목표를 지우므로 재-enable 후 새 C0가 필요합니다.
+
+C3 없이 해제 상태에서 C1로 진입하면 **그 순간의 실제 출력축 위치**를 MIT 원점으로 자동 캡처합니다. C3으로 명시한 원점은 C2/C1 사이에도 보존합니다. 예를 들어 C3 offset=3000이면 현재 관절의 MIT 피드백이 +30°가 되며, MuJoCo qpos와 엔코더의 물리적 영점은 바꾸지 않습니다. C0 피드백과 PD 위치 오차는 같은 MIT 좌표를 사용합니다. MuJoCo qpos는 이미 출력축 rad이므로 감속비로 다시 나누지 않습니다.
+
+C3는 기존 목표를 지우고 **시뮬레이션 시간 20ms** 동안 수신한 C0 목표를 버립니다. 보호 구간에도 피드백은 새 원점을 반영하며, 시간이 지난 뒤 수신한 새 C0부터 제어합니다. 일시정지 중에는 보호 시간이 줄지 않고, MuJoCo 시간 리셋 시 남은 보호 시간과 런타임 원점을 유지합니다. 가상 모터 객체 재생성(전원 재시작에 해당) 시에는 런타임 원점을 초기화합니다. C3는 모터를 enable하거나 ROM을 수정하지 않습니다.
+
+현재 HAL의 자동 경로는 C4/C1/C0/C2이며 C3 송신용 SHM/CLI는 추가하지 않았습니다. C3는 외부 CAN 명령으로 가상 모터가 처리하고, HAL은 예상하지 않은 C3 응답을 기존 invalid-frame 로그에 표시합니다. 운용 중 원점을 바꾸는 호출자는 `MotorData.position_offset`의 관절 좌표 변환도 함께 관리해야 합니다. 시뮬레이터가 제로셋을 근거로 이 값을 자동 보정하지 않습니다. C5 ROM 쓰기, 물리적 엔코더 영점 명령 0x19, fault latch/clear 및 RMD 제어는 이번 MIT 상태 전이 구현 범위에 포함하지 않습니다. 지원하지 않는 명령은 기존과 같이 명시적 오류입니다.
 
 [control_types.hpp](../src/ipc/control_types.hpp)의 `MitCommand`는 position·velocity·kp·kd·tau_ff를 가집니다. enable 요청은 `MotorData.command_enabled[i]`로 분리합니다. SHM과 TaskController는 OpenRobot 코덱을 참조하지 않고, 코덱이 이 공통 타입을 참조합니다. position은 출력축 상대 좌표 rad입니다. Homing은 보간 q/dq와 자체 PD 게인을 보내며, Gravity/Magnetic/Tracking/Ball은 계산한 토크를 다음 위치 목표로 환산합니다.
 

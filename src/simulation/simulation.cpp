@@ -18,9 +18,9 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
     const std::string& simulation_config_path,
     const std::array<double, 3>& encoder_origin,
     ShmData& shared)
-    : encoder_origin_(encoder_origin), iq_sensors_{VirtualIqSensor(simulation_config_path, 0),
-                                           VirtualIqSensor(simulation_config_path, 1),
-                                           VirtualIqSensor(simulation_config_path, 2)},
+    : mit_origin_(encoder_origin), iq_sensors_{VirtualIqSensor(simulation_config_path, 0),
+                                       VirtualIqSensor(simulation_config_path, 1),
+                                       VirtualIqSensor(simulation_config_path, 2)},
       shared_(shared) {
     const auto config = YAML::LoadFile(hal_config_path);
     const auto interface = config["interface"].as<std::string>();
@@ -170,6 +170,15 @@ void VirtualMotors::Reply(int axis, const openrobot::Payload& bytes) {
 }
 
 void VirtualMotors::Update(const mjModel* model, mjData* data) {
+    // Use physics time: a pause does not consume the Set Zero protection interval.
+    // Rewinding MuJoCo is a mechanical reset, not a motor power cycle.
+    const double motor_dt = motor_time_ < 0 ? 0 : std::max(0.0, data->time - motor_time_);
+
+    for (auto& remaining : zero_hold_remaining_)
+        remaining = std::max(0.0, remaining - motor_dt);
+
+    motor_time_ = data->time;
+
     if (sensor_time_ < 0 || data->time != sensor_time_) {
         const bool reset = sensor_time_ < 0 || data->time < sensor_time_;
         const double dt = reset ? model->opt.timestep : data->time - sensor_time_;
@@ -219,20 +228,42 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
         if (bytes[0] == 0xC4)
             Reply(axis, rom_parameters_);
         else if (bytes[0] == 0xC1) {
-            enabled_[axis] = true;
+            if (modes_[axis] == MotorMode::Released) {
+                if (!user_zero_set_[axis])
+                    mit_origin_[axis] = data->qpos[axis];
+
+                targets_[axis] = {};
+                modes_[axis] = MotorMode::Enabled;
+            }
+
             Reply(axis, {0xC1, std::uint8_t(kd_scale_)});
         } else if (bytes[0] == 0xC2) {
-            enabled_[axis] = false;
+            modes_[axis] = MotorMode::Released;
             targets_[axis] = {};
             Reply(axis, {0xC2});
+        } else if (bytes[0] == 0xC3) {
+            const unsigned raw = unsigned(bytes[6]) | (unsigned(bytes[7]) << 8);
+            const int offset = raw >= 0x8000 ? int(raw) - 0x10000 : int(raw);
+            const double offset_rad = offset * (3.141592653589793 / 18000.0);
+            mit_origin_[axis] = data->qpos[axis] - offset_rad;
+            user_zero_set_[axis] = true;
+            zero_hold_remaining_[axis] = 0.020;
+            targets_[axis] = {};
+
+            if (modes_[axis] != MotorMode::Released)
+                modes_[axis] = MotorMode::Enabled;
+
+            Reply(axis, {0xC3, 0, 0, 0, 0, 0, bytes[6], bytes[7]});
         } else if (bytes[0] == 0xC0) {
             const auto target = openrobot::DecodeMitCommand(bytes, velocity_max_, kd_scale_);
 
-            if (enabled_[axis])
+            if (modes_[axis] != MotorMode::Released && zero_hold_remaining_[axis] <= 1e-12) {
                 targets_[axis] = target;
+                modes_[axis] = MotorMode::MitControl;
+            }
 
             Reply(axis,
-                openrobot::EncodeFeedback({data->qpos[axis] - encoder_origin_[axis],
+                openrobot::EncodeFeedback({data->qpos[axis] - mit_origin_[axis],
                     data->qvel[axis],
                     iq_sensors_[axis].enabled() ? reported_iq_[axis]
                                                 : data->qfrc_actuator[axis] / kt_output_,
@@ -246,9 +277,10 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
     for (int i = 0; i < 3; ++i) {
         const auto& target = targets_[i];
         const double torque =
-            enabled_[i] ? target.kp * (target.position - (data->qpos[i] - encoder_origin_[i])) +
-                              target.kd * (target.velocity - data->qvel[i])
-                        : 0;
+            modes_[i] == MotorMode::MitControl
+                ? target.kp * (target.position - (data->qpos[i] - mit_origin_[i])) +
+                      target.kd * (target.velocity - data->qvel[i])
+                : 0;
         const double minimum = std::max(-torque_max_, model->actuator_ctrlrange[2 * i]);
         const double maximum = std::min(torque_max_, model->actuator_ctrlrange[2 * i + 1]);
         data->ctrl[i] = std::clamp(torque, minimum, maximum);

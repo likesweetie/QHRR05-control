@@ -1,9 +1,16 @@
-# Agent context — 2026-10-28
+# Agent context — 2026-10-29
+
+## Current work — MIT state machine and GUI branch
+- User explicitly authorized committing/pushing the MIT work to origin/main, then creating and switching to a new `GUI` branch. Publishing `GUI` with an upstream is within this request. No force push or unrelated feature implementation.
+- VirtualMotors now has per-axis Released/Enabled/MitControl, automatic origin capture at C1 from Released unless C3 user zero exists, C2 clears targets, C3 signed centidegree output offset plus 20ms physics-time hold. C0 during release/hold replies but drops target; fresh C0 required afterward. Pause/rewind preserve runtime zero/remaining hold; motor recreation clears runtime state.
+- C4 unchanged; project zero-FF policy remains. No C5/fault/C3 CLI implemented. External C3 users must manage joint position_offset mapping; HAL logs unexpected C3 response rather than changing mapping automatically. docs/can_hal.md records scope.
+- Build and eight relevant tests passed: virtual_mit_motor, virtual_iq_sensor, virtual_iq_can, can_hal_vcan, all three CAN control integration variants, can_gui. clang-format18.1.8 installed only under /tmp/qhrr05-clang-format-18 and applied to changed C++ files; diff check passed.
+- User permits direct local environment execution. Privileged test runs succeeded with existing private-vcan/Xvfb scripts. GUI next task is not specified; optional question sent about motor panel, layout/interaction, or X11 fix. Wait for scope before making GUI feature changes.
 
 ## Working rules
 - Polite Korean. No silent fallback. No subagents unless explicitly requested.
 - Update WORK_NOTE each chat with exactly three next priorities; keep it short. This private memo may be compressed freely.
-- Preserve live user tuning/model/IDE edits. Cleanup and feature commit73f44a2 merged fromdynamic_control intomain; currentbranchmain. User now authorized actual remote push after preparation. Origin is git@github.com:likesweetie/QHRR05-control.git; push main only, no force/all/tags. Preserve historical branches. Future unrelated commits/pushes need a new request.
+- Preserve live user tuning/model/IDE edits. Cleanup and feature commit73f44a2 merged fromdynamic_control intomain; currentbranchmain. Remote main push completed at08999a3. Origin is git@github.com:likesweetie/QHRR05-control.git; push main only, no force/all/tags. Preserve historical branches. Future unrelated commits/pushes need a new request.
 - Named controller inputs; blank lines between conceptual blocks. Each motion class parses its own YAML filepath. TaskController owns instances and a simple ReadInput/Control/WriteOutput/WaitNextCycle loop. No extra runtime/config wrappers or small data-contract structs.
 - Control uses independent monotonic time and never waits for fresh simulator/CAN state. No runtime response-age watchdog; logging-only observations do not change control behavior.
 - Build/test sequentially: never rebuild executable files while tests run. SHM/X11/user-net namespace tests need escalated execution. Do not alter host vcan/daemon for tests.
@@ -48,4 +55,21 @@
 
 ## Remote publication preparation
 - SSH ls-remote withBatchMode/strictknownhosts succeeded; remote main has no existing ref. Current trackedfiles AND all reachable main history contain no firstparty runtime logs/build/caches. Vendored MCAP/CSV425files are dependencyfixtures, retained. Largest main-historyblob~20.07MiB oldonnxruntime (GitHub100MiB limit notexceeded).
-- .gitignore now globally excludes *.log/*.mcap/*.mcap.json/*.csv, with explicit third_party fixture exceptions; /logs and/build stillignored. Rule checks passedfor exportsoutside logs, sourceconfigretained. Runtimecodeunchanged, prior31/31 testsvalid. Commit ignore+notes then gitpush-uoriginmain; verify remote/localHEAD equality. No history rewrite orforce needed.
+- .gitignore now globally excludes *.log/*.mcap/*.mcap.json/*.csv, with explicit third_party fixture exceptions; /logs and/build stillignored. Rule checks passedfor exportsoutside logs, sourceconfigretained. Runtimecodeunchanged, prior31/31 testsvalid. Commit08999a3 pushed-uoriginmain successfully; localHEAD=origin/main confirmed. No history rewrite orforce needed.
+
+## Demo recordings 2026-10-28
+- User requestedone10sclippercontroller. Completed6MP4sunderignoredlogs/demo_videos/2026-10-28: D/H/G/M/T(IDFFXZ)/Ball. Each1600x90030fps300frames10.000sec, fullffmpegdecodepassed. ZIP+KoreanREADME+configs+verificationJSON present.
+- ActualSocketCAN1kthroughdaemonownedHAL/virtualmotor/control inprivateuser-netnamespace+Xvfb. Explicitfixturecontrol/simulationcopied(modelpathabsolute), no liveconfig/codechanges. Iqidealfalse, T1sec4cm/2cmILCoff, M3N. Camera140/-17distance.88, UIhidden.
+- LocalcaptureC++copy addsenvironmentstimuli+CSV+cameraonly; compiledfromcurrentlibs, notcontrollerchanges. GexternalY/Zsines, Mscriptmocap+geomalpha.35; BallrealinputprocessreadsFIFOjs_eventswithR2/L2.
+- FinalMretaketimes~1.856Candidate1.876Following4.476Releasing4.576FREEreasonContactLost(6),GTpeak4.923N. TnoIKhold, Ballconnectedmoving. record.pyreplays6sessions, binary/sourcekeptlocalignored. HostCAN/daemonsuntouched. Videosnotpushed. WORK_NOTE/privatenotesupdatedafterpublication; do notcommit/pushnewdocswithoutnewrequest.
+
+## Host recapture canceled by user
+- User: videos stay local, use actual desktop instead of sandbox/Xvfb due stutter. Inspected actual X11 :1, RTX5090, left monitor120Hz, hostvcan0 UP; no existing robot processes before run. Ran capture directly onhost with actualNV GPU, no namespace/Xvfb/softwareforcing, capturewindow_id only,60fps. Restored priorfocus/cursor viaatexit. No hostdisplay/vcanconfigurationchanges.
+- Hostresultslogs/demo_videos/2026-10-28_host. D/H/G600frames10s render~119..120FPSp95~9ms. M reachedFollowingthenStrokeLimit early(no contactlossrelease), T581frames9.684s, Ballstayedmode0(probably userdesktopfocus interaction). These are NOT verifiedfinalclips; don'tclaim6successfulrecordings. Source+scripts+binarylocalignored, productioncodeunchanged.
+- User explicitly stopped work: "걍 내가 할게". Stopcheckfoundcapturealreadyexited; session34659exit0. No further recording/retakes/testing/commits. WORK_NOTEupdatedforcancellationandknownincompleteartifacts. VideosneveraddedtoGit. LeavehostvcanUPasitwas.
+
+## Latest runtime error audit 2026-10-28 KST
+- User requestedanalysisONLY; nofix/runtimeinteractionperformed. Latestnormalrunlogs/run-1793174205663-126352; sessionlogs/telemetry/2026-10-28_075647_experiment_126418_16545632545444. Logsimulationlines37..41XErrorBadWindow,opcode18X_ChangeProperty,resource0x5e00130,serial53334/53335; logfilemtime17:05:39.618726KST.
+- Parsedfault_10.mcap(7sec500Hz), triggerCAN_TIMEOUT17:05:39.792KST andSHM_STALEsamedate/time. Lastchangedmodelseq17:05:39.6175,simseq39.6155,receivedseqHR39.6195 (~172..176msbeforetrigger). Model/sim/virtualCANrepliesallstop; controlseqstilladvances+500Hz. RootrecordederrorGUI/X11; timeoutsecondarytofreeze. NOclaimwhichwindow/processdestroyedwithoutstack; resourcecouldbeexternalclipboardrequestor,notnecessarilyMuJoCoownwindow.
+- ActiveTrackingXZmode3, ik_failedFalse, finiteallfloatvaluesfaultwindow. LastGTq[-.09828,1.64263,-2.11193],tau[.14384,-32.3276,30.0552],withinphysicalrange. ILCskippedtorquesaturationmanycycles,state4butnotprovenXcause. Atfinalsessionquality model/simage~34.85sec; control/HALmetadatafresh; capturecontinueduntil17:06:14.472sessioninterrupted. simulation_finishedFalse/no '[simulate]stopped'/no caughtERROR => normalcleanupnotconfirmed, don'tassertexactprocessdeathorexitstatus.
+- LocalGLFWadapterSetWindowTitlelines167..168 onlycalledLoadOnRenderThreadsimulate.cc2420(startuponly); SetClipboardString150..151 invokedCopyKey/CopyCamera. NativeGLFWX11opaque, noactualXChangePropertycallerstack. RenderLoopPollEventsunderSimulatemtX(simulate.cc~2813), physicsrequiresmtx. glfw_adapter.cc35registersatexitglfwTerminate; fatalXlibdefaultpathmaybypassnormalphysics.join, butcleanupdeadlockisunproven. Daemonactuallyforks/waitpidappdirectly(separateterminalviewer),don'tinventwrapperPIDissue. ProposeXerrorstack+window/eventdiagnosticsandcontrolledthreadcleanup; noignoreBadWindowsilently,noruntimeagewatchdog. WORK_NOTEupdatedw3nextpriorities.
