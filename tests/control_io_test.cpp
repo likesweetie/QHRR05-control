@@ -334,60 +334,46 @@ int main(int argc, char** argv) {
             std::cout << "observed 100 Hz cycles in 150ms=" << cycles << '\n';
         }
 
-        // Exercise optional inertia through the actual control process. The fake
-        // encoder holds a pose; measured motor effort is gravity minus 1 Nm, so
-        // the observer should infer +1 Nm external torque without a GT force input.
-        config["gravity_compensation"]["gravity_only"] = false;
-        config["gravity_compensation"]["virtual_inertia"]["enabled"] = true;
+        // Exercise the actual MIT target path without opening a CAN device.
+        // Fake measured feedback stays in this test-owned SHM mapping only.
+        const auto normal_limits = YAML::Clone(config["limits"]);
+        config["limits"]["torque_nm"] = .1;
         save();
         {
-            const auto name = prefix + "-inertia";
+            const auto name = prefix + "-limited-mit";
             shm_utils::Mapping mapping(name, true);
             auto& shm = *mapping.get();
-            qhrr05::ResetSimulation(initial, model.get(), data.get());
-            mj_forward(model.get(), data.get());
-            std::uint64_t sample_sequence = 10;
-            std::array<double, 3> reference;
-            const auto publish = [&] {
-                qhrr05::UpdateControlIO(shm,
-                    model.get(),
-                    data.get(),
-                    gravity.get(),
-                    reference,
-                    sample_sequence,
-                    nullptr,
-                    false);
-                shm_utils::Lock lock(shm);
-                auto& motor = shm.motors[shm.motor_sequence % kShmBufferCount];
-                std::copy_n(data->qfrc_bias, 3, motor.motor_torque.begin());
-                motor.motor_torque[0] -= 1;
-            };
-            publish();
-            launch(name);
-            WaitCommand(shm, [](const ControlData& cmd) {
-                return cmd.input_model_sequence != 0;
-            });
-            const auto request = Request(shm, 1);
-            WaitCommand(shm, [&](const ControlData& cmd) {
-                return cmd.active_motion_sequence == request && cmd.mode == 1;
-            });
-            for (int i = 0; i < 70; ++i) {
-                sample_sequence += 10;
-                data->time += .01;
-                publish();
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            shm.can_enabled = true;
+            auto& feedback = shm.motors[0];
+            feedback.running = true;
+            feedback.received_sequence.fill(1);
+            feedback.received_ns.fill(shm_utils::MonotonicNs());
+            feedback.profile_verified.fill(true);
+            for (int i = 0; i < 3; ++i) {
+                feedback.feedback[i].position = initial[i];
+                feedback.feedback[i].velocity = 2 + i;
             }
-            WaitCommand(shm, [&](const ControlData&) {
-                return std::abs(Motors(shm).debug_torque[0] - data->qfrc_bias[0] - .85) < .01;
-            });
-            shm_utils::Stop(shm);
-            WaitExit(worker, 0);
-            worker = -1;
-            std::cout
-                << "PASS: optional inertia uses measured feedback in actual control process\n";
+            qhrr05::TaskController limited(path, name);
+            for (int mode : {5, 0, 1}) {
+                Request(shm, mode);
+                Require(limited.ReadInput(), "limited controller refused valid feedback");
+                limited.Control();
+                limited.WriteOutput();
+                const auto motors = Motors(shm);
+                for (int i = 0; i < 3; ++i) {
+                    const auto& command = motors.command[i];
+                    const double effort = command.kp * (command.position - initial[i]) +
+                                          command.kd * (command.velocity - (2 + i)) +
+                                          command.tau_ff;
+                    Require(
+                        std::abs(effort) <= .1 + 1e-10, "MIT target bypassed shared torque limit");
+                    Require(std::abs(effort - motors.debug_torque[i]) < 1e-10,
+                        "limited MIT target did not represent computed effort");
+                }
+            }
+            std::cout << "PASS: shared torque limit bounds MIT damping/homing/gravity targets\n";
         }
-        config["gravity_compensation"]["gravity_only"] = true;
-        config["gravity_compensation"]["virtual_inertia"]["enabled"] = false;
+        config["limits"] = normal_limits;
 
         // A very slow configured period must still allow ordinary process shutdown.
         config["control"]["frequency_hz"] = .1;

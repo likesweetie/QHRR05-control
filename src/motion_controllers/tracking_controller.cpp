@@ -1,4 +1,5 @@
 #include "motion_controllers/tracking_controller.hpp"
+#include "control/limits.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -47,7 +48,7 @@ TrackingController::TrackingController(const std::string& config_path, ModelBack
              "damping_ns_m"})
         if (settings[key].IsDefined())
             throw std::runtime_error(std::string("retired tracking key: ") + key +
-                                     "; use trajectory/motor/impedance/output_torque_limit_nm");
+                                     "; use trajectory/motor/impedance and limits.torque_nm");
 
     for (const char* key : {"jacobian_regularization_m",
              "maximum_jacobian_regularization_m",
@@ -122,7 +123,7 @@ TrackingController::TrackingController(const std::string& config_path, ModelBack
 
     kp_motor_ = axes(motor, "kp_nm_rad");
     kd_motor_ = axes(motor, "kd_nm_s_rad");
-    torque_limit_ = axes(settings, "output_torque_limit_nm");
+    torque_limit_ = ReadControlTorqueLimits(config);
 
     for (int i = 0; i < 3; ++i)
         if (kp_motor_[i] <= 0 || kp_motor_[i] > 500 || kd_motor_[i] > 5 || torque_limit_[i] <= 0)

@@ -645,7 +645,7 @@ int main(int argc, char** argv) {
                                         expected += current_mass[3 * i + j] * acceleration;
                                     }
 
-                                    const double limit = config["tracking"]["output_torque_limit_nm"][i].as<double>();
+                                    const double limit = config["limits"]["torque_nm"][i].as<double>();
                                     Require(std::abs(expected - tracking.ctc_torque()[i]) < 1e-9 &&
                                                 std::abs(torque[i] - std::clamp(expected + tracking.ilc().torque()[i], -limit, limit)) < 1e-9 &&
                                                 tracking.inverse_dynamics_torque()[i] == 0,
@@ -675,7 +675,7 @@ int main(int argc, char** argv) {
                                              (tracking.toe_velocity_reference()[axis] - toe_velocity));
                                 }
 
-                                const double limit = config["tracking"]["output_torque_limit_nm"][joint].as<double>();
+                                const double limit = config["limits"]["torque_nm"][joint].as<double>();
                                 Require(std::abs(torque[joint] - std::clamp(expected, -limit, limit)) < 1e-9,
                                     "impedance torque is not gravity + task feedback + ILC - motor damping");
                             }
@@ -898,7 +898,7 @@ int main(int argc, char** argv) {
                 "CTC failure did not use the same latched gravity/PD hold");
 
         auto ctc_limited_config = YAML::Clone(ctc_config);
-        ctc_limited_config["tracking"]["output_torque_limit_nm"] = YAML::Load("[.001,.001,.001]");
+        ctc_limited_config["limits"]["torque_nm"] = YAML::Load("[.001,.001,.001]");
         const auto ctc_limited_path = temporary_directory + "/ctc-limited.yaml";
         std::ofstream(ctc_limited_path) << ctc_limited_config;
         qhrr05::TrackingController ctc_limited(ctc_limited_path);

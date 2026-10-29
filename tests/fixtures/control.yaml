@@ -1,6 +1,9 @@
 robot: qhrr-05
 model_path: ../../models/qhrr-05/qhrr-05.xml  # Shared by all controller model calculations.
 
+limits:  # 모든 모션의 최종 출력 토크 상한; 물리 MJCF/CAN 한계는 별도
+  torque_nm: [23.7, 23.7, 45.43]  # 스칼라 또는 HR/HP/KP 배열, 단위 N·m
+
 workspace:  # 트래킹 실행 검사와 공 추종·W 오버레이가 함께 사용하는 기준
   maximum_condition_number: 10.0  # 위치 야코비안 σ_max/σ_min 상한; 초과하는 트래킹 궤적은 시작 거부
 
@@ -26,17 +29,9 @@ gravity_compensation:
   task_stiffness: [0.0, 0.0, 0.0]
   damping_ratio: [1.0, 1.0, 1.0]  # Baseline regressions retain the original uncompensated plant drag.
   friction_compensation:
+    enabled: true  # false: 건마찰·점성감쇠 보상 OFF; 중력과 motor kd는 유지
     coulomb_ratio: [0.0, 0.0, 0.0]
     velocity_scale_rad_s: 0.03
-  torque_limit_nm: [53.7, 53.7, 53.7]
-  virtual_inertia:
-    enabled: false
-    scale: 0.5
-    observer_hz: 8.0
-    external_torque_deadband_nm: 0.15
-    ramp_sec: 0.3
-    assist_limit_nm: [3.0, 3.0, 3.0]
-    maximum_velocity_rad_s: 2.0
 
 magnetic_touch:
   gravity_only: true  # Physical friction/damping remain in either setting.
@@ -59,7 +54,6 @@ magnetic_touch:
   maximum_displacement_m: 0.015
   joint_margin_rad: 0.025
   joint_damping_nm_s_rad: [0.2, 0.2, 0.2]
-  torque_limit_nm: [23.7, 23.7, 45.43]
   workspace_min_m: [-0.15, -0.15, 0.025]
   workspace_max_m: [0.5, 0.5, 0.45]
   observer:
@@ -89,7 +83,6 @@ tracking:  # 월드 XY/XZ/YZ 무한대 궤적 추종; 단축키 1/2/3, 변경 �
   motor:  # MIT 위치 surrogate 출력의 공통 내부 서보 게인; HR/HP/KP
     kp_nm_rad: [40.0, 40.0, 40.0]  # 내부 위치 P(N·m/rad); 토크를 목표 각도로 환산
     kd_nm_s_rad: [0.3, 0.3, 0.3]  # 내부 속도 D(N·m·s/rad); 토크 환산 시 중복 감쇠 보정
-  output_torque_limit_nm: [23.7, 23.7, 45.43]  # 기본 제어+ILC 합산 후 최종 관절 토크 상한(N·m); 모터 물리 제한과 별개
   impedance:  # inverse_dynamics/impedance 모드의 작업공간 피드백; CTC에서는 사용하지 않음
     stiffness_n_m: [1200.0, 1200.0, 1200.0]  # 월드 X/Y/Z 위치 오차 복원 강성(N/m)
     damping_ns_m: [35.0, 35.0, 35.0]  # 월드 X/Y/Z 목표·현재 속도 오차 감쇠(N·s/m)
@@ -123,7 +116,6 @@ ball_following:  # 조이스틱 공 추종; GUI B, FK 격자와 관절 보간 �
   trigger_threshold: 0.3  # 트리거 눌림 판정(0..1); 둘 다 누르면 느린 속도 우선
   kp_motor: [40.0, 40.0, 40.0]  # HR/HP/KP 관절 위치 P(N·m/rad)
   kd_motor: [1.0, 1.0, 1.0]  # HR/HP/KP 관절 속도 D(N·m·s/rad)
-  torque_limit_nm: [23.7, 23.7, 45.43]  # 중력+PD 합산 토크 절댓값 상한(N·m)
 
 plots:
   history_sec: 10.0

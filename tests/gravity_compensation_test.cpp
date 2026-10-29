@@ -27,7 +27,6 @@ qhrr05::RobotModelState State(const mjModel* model, const mjData* data, const mj
     std::copy_n(data->qfrc_passive, 3, state.passive.begin());
     std::copy_n(model->dof_damping, 3, state.damping.begin());
     std::copy_n(model->dof_frictionloss, 3, state.friction.begin());
-    mj_fullM(model, state.mass.data(), data->qM);
     return state;
 }
 
@@ -110,10 +109,8 @@ int main(int argc, char** argv) {
                 qhrr05::GravityCompensationController gravity_controller(config_path);
                 gravity_controller.Start(desired.data());
                 std::array<double, 3> torque, reference;
-                gravity_controller.Compute(State(model.get(), data.get(), rest.get()),
-                    {},
-                    torque.data(),
-                    reference.data());
+                gravity_controller.Compute(
+                    State(model.get(), data.get(), rest.get()), torque.data(), reference.data());
 
                 for (int i = 0; i < 3; ++i) {
                     const auto kd = options["gravity_compensation"]["kd_motor"];
@@ -150,8 +147,7 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 3; ++i) {
                     const double gain =
                         options["magnetic_touch"]["joint_damping_nm_s_rad"][i].as<double>();
-                    const double limit =
-                        options["magnetic_touch"]["torque_limit_nm"][i].as<double>();
+                    const double limit = options["limits"]["torque_nm"][i].as<double>();
                     const double expected =
                         std::clamp(selected[i] - gain * speed[i], -limit, limit);
                     Require(std::abs(torque[i] - expected) < 1e-10,
@@ -190,7 +186,7 @@ int main(int argc, char** argv) {
             std::copy_n(dq, 3, state.joint_velocity.begin());
             std::copy_n(g, 3, state.gravity.begin());
             state.bias = state.gravity;
-            controller.Compute(state, {}, torque, reference);
+            controller.Compute(state, torque, reference);
 
             for (int i = 0; i < 3; ++i) {
                 const auto kd = config["gravity_compensation"]["kd_motor"];
@@ -217,7 +213,7 @@ int main(int argc, char** argv) {
                 mju_zero(gravity->qvel, 3);
                 mj_forward(model.get(), gravity.get());
                 controller.Compute(
-                    State(model.get(), data.get(), gravity.get()), {}, data->ctrl, reference);
+                    State(model.get(), data.get(), gravity.get()), data->ctrl, reference);
 
                 for (int i = 0; i < 3; ++i)
                     data->ctrl[i] = std::clamp(data->ctrl[i],
@@ -265,7 +261,7 @@ int main(int argc, char** argv) {
         double torque[3];
         for (double speed : {-.5, -.000001, 0.0, .000001, .5}) {
             state.joint_velocity.fill(speed);
-            drag.Compute(state, {}, torque, reference);
+            drag.Compute(state, torque, reference);
             for (int i = 0; i < 3; ++i) {
                 const double expected = .95 * speed + .17 * std::tanh(speed / .03);
                 Require(std::abs(torque[i] - expected) < 1e-12, "wrong signed drag compensation");
@@ -275,10 +271,22 @@ int main(int argc, char** argv) {
                     Require(std::abs(torque[i]) < 1e-5, "dry compensation jumps near zero speed");
             }
         }
-        Require(drag.inertia_assist() == std::array<double, 3>{},
-            "disabled virtual inertia produced assistance");
         std::cout
             << "PASS: signed 50% damping compensation, smooth partial dry friction, zero creep\n";
+
+        node["friction_compensation"]["enabled"] = false;
+        save(assisted);
+        qhrr05::GravityCompensationController without_friction(config_path);
+        state.joint_velocity = {.5, -.5, 0};
+        state.bias = {1, -2, 3};
+        without_friction.Start(state.joint_position.data());
+        without_friction.Compute(state, torque, reference);
+        for (int i = 0; i < 3; ++i)
+            Require(std::abs(torque[i] - (state.bias[i] - .05 * state.joint_velocity[i])) < 1e-12,
+                "friction OFF changed bias support or retained viscous/dry compensation");
+        node["friction_compensation"]["enabled"] = true;
+        std::cout
+            << "PASS: friction OFF removes both compensation terms and retains bias/motor damping\n";
 
         const auto pushed_travel = [&](double damping_ratio, double coulomb_ratio) {
             node["damping_ratio"] = damping_ratio;
@@ -290,7 +298,7 @@ int main(int argc, char** argv) {
             while (data->time < .6) {
                 mj_forward(model.get(), data.get());
                 controller.Compute(
-                    State(model.get(), data.get(), gravity.get()), {}, data->ctrl, reference);
+                    State(model.get(), data.get(), gravity.get()), data->ctrl, reference);
                 data->qfrc_applied[0] = data->time < .2 ? 1.0 : 0.0;
                 mj_step(model.get(), data.get());
             }
@@ -307,143 +315,42 @@ int main(int argc, char** argv) {
         node["damping_ratio"] = .5;
         node["friction_compensation"]["coulomb_ratio"] = .85;
 
-        // Isolated measured-state plant: actual applied effort and measured
-        // acceleration reconstruct the external torque; no GT external-force input.
-        node["kd_motor"] = 0;
-        node["virtual_inertia"]["enabled"] = true;
-        node["virtual_inertia"]["external_torque_deadband_nm"] = 0;
-        node["virtual_inertia"]["maximum_velocity_rad_s"] = 20;
-        save(assisted);
-        qhrr05::GravityCompensationController inertia(config_path);
-        state = {};
-        state.mass = {1, 0, 0, 0, 2, 0, 0, 0, 3};
-        inertia.Start(state.joint_position.data());
-        qhrr05::GravityFeedback feedback;
-        feedback.dt = .001;
-        feedback.acceleration = {.5, -.25, 1.0 / 6};
-        const std::array<double, 3> external{.5, -.5, .5};
-        for (int step = 1; step <= 1000; ++step) {
-            feedback.sequence = step;
-            inertia.Compute(state, feedback, torque, reference);
-            for (int i = 0; i < 3; ++i) {
-                feedback.motor_torque[i] = torque[i];
-                feedback.acceleration[i] = (torque[i] + external[i]) / state.mass[4 * i];
-                state.joint_velocity[i] += feedback.dt * feedback.acceleration[i];
-                state.joint_position[i] += feedback.dt * state.joint_velocity[i];
-            }
-        }
-        for (int i = 0; i < 3; ++i) {
-            Require(std::abs(inertia.inertia_assist()[i] - external[i]) < 1e-8,
-                "half-inertia control did not double steady external-force acceleration");
-            Require(
-                std::abs(state.joint_velocity[i]) > 1.6 * std::abs(external[i]) / state.mass[4 * i],
-                "virtual inertia did not lighten the measured-state plant response");
-        }
-        const auto before_duplicate = inertia.inertia_assist();
-        feedback.acceleration.fill(1000);  // A duplicate must not update observer state.
-        inertia.Compute(state, feedback, torque, reference);
-        Require(inertia.inertia_assist() == before_duplicate,
-            "duplicate sample changed inertia observer");
-        inertia.Start(state.joint_position.data());
-        Require(inertia.inertia_assist() == std::array<double, 3>{},
-            "mode reentry retained inertia assist");
-        std::cout << "PASS: measured-state half inertia, duplicate filtering, mode reset\n";
-
-        // Deadband, aid limits, velocity gate, elapsed-time filtering and invalid
-        // inputs are explicit even though production defaults leave inertia OFF.
-        node["virtual_inertia"]["ramp_sec"] = .001;
-        node["virtual_inertia"]["external_torque_deadband_nm"] = .15;
-        node["virtual_inertia"]["maximum_velocity_rad_s"] = 2;
-        save(assisted);
-        qhrr05::GravityCompensationController limited(config_path);
-        state = {};
-        state.mass = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-        limited.Start(state.joint_position.data());
-        feedback = {};
-        feedback.dt = .01;
-        feedback.acceleration.fill(.1);
-        for (int step = 1; step <= 100; ++step) {
-            feedback.sequence = step;
-            limited.Compute(state, feedback, torque, reference);
-        }
-        Require(limited.inertia_assist() == std::array<double, 3>{},
-            "observer noise bypassed deadband");
-        feedback.acceleration.fill(1000);
-        for (int step = 101; step <= 120; ++step) {
-            feedback.sequence = step;
-            limited.Compute(state, feedback, torque, reference);
-        }
-        Require(
-            limited.inertia_assist()[0] == 3, "inertia assistance exceeded or missed its limit");
-        state.joint_velocity[0] = 2;
-        limited.Compute(state, feedback, torque, reference);
-        Require(
-            limited.inertia_assist()[0] == 0, "velocity gate did not remove accelerating assist");
-        state.joint_velocity[0] = -2;
-        limited.Compute(state, feedback, torque, reference);
-        Require(limited.inertia_assist()[0] == 3, "velocity gate removed braking assist");
+        // Keep output saturation and malformed configuration checks after removing the observer.
         state.bias.fill(100);
-        limited.Compute(state, feedback, torque, reference);
-        Require(torque[0] == 53.7, "gravity total effort exceeded configured torque limit");
-        state.bias.fill(0);
-        limited.Start(state.joint_position.data());
         state.joint_velocity.fill(0);
-        feedback.sequence = 1;
-        feedback.acceleration.fill(1);
-        feedback.dt = .002;
-        limited.Compute(state, feedback, torque, reference);
-        feedback.sequence += 10;
-        limited.Compute(state, feedback, torque, reference);
-        const double expected_filtered = -std::expm1(-2 * 3.141592653589793 * 8 * .004);
-        Require(std::abs(limited.inertia_assist()[0] - (expected_filtered - .15)) < 1e-12,
-            "observer multiplied elapsed dt by skipped sequence count");
-        const auto rejects = [&](auto action) {
+        drag.Compute(state, torque, reference);
+        Require(torque[0] == assisted["limits"]["torque_nm"][0].as<double>(),
+            "gravity effort exceeded configured torque limit");
+        const auto rejects = [&](const YAML::Node& bad) {
+            save(bad);
             bool rejected = false;
             try {
-                action();
+                qhrr05::GravityCompensationController invalid(config_path);
             } catch (const std::exception&) {
                 rejected = true;
             }
-            Require(rejected, "invalid gravity configuration/measurement was silently accepted");
+            Require(rejected, "invalid gravity configuration was silently accepted");
         };
-        feedback.sequence = 0;
-        rejects([&] {
-            limited.Compute(state, feedback, torque, reference);
-        });
-        feedback.sequence = 12;
-        feedback.dt = .1;
-        rejects([&] {
-            limited.Compute(state, feedback, torque, reference);
-        });
-        feedback.dt = .001;
-        feedback.acceleration[0] = std::numeric_limits<double>::quiet_NaN();
-        rejects([&] {
-            limited.Compute(state, feedback, torque, reference);
-        });
-        for (const auto* key : {"damping_ratio", "friction_compensation", "virtual_inertia"}) {
+        for (const auto* key : {"damping_ratio", "friction_compensation"}) {
             auto bad = YAML::Clone(assisted);
             bad["gravity_compensation"].remove(key);
-            save(bad);
-            rejects([&] {
-                qhrr05::GravityCompensationController invalid(config_path);
-            });
+            rejects(bad);
         }
+        auto missing_switch = YAML::Clone(assisted);
+        missing_switch["gravity_compensation"]["friction_compensation"].remove("enabled");
+        rejects(missing_switch);
+        auto invalid_switch = YAML::Clone(assisted);
+        invalid_switch["gravity_compensation"]["friction_compensation"]["enabled"] = "invalid";
+        rejects(invalid_switch);
         for (double value : {-.1, 1.1, std::numeric_limits<double>::quiet_NaN()}) {
             auto bad = YAML::Clone(assisted);
             bad["gravity_compensation"]["damping_ratio"] = value;
-            save(bad);
-            rejects([&] {
-                qhrr05::GravityCompensationController invalid(config_path);
-            });
+            rejects(bad);
         }
-        auto bad = YAML::Clone(assisted);
-        bad["gravity_compensation"]["gravity_only"] = true;
-        save(bad);
-        rejects([&] {
-            qhrr05::GravityCompensationController invalid(config_path);
-        });
-        std::cout
-            << "PASS: inertia limits, deadband, speed gate, elapsed dt, explicit invalid-input rejection\n";
+        auto obsolete = YAML::Clone(assisted);
+        obsolete["gravity_compensation"]["virtual_inertia"]["enabled"] = false;
+        rejects(obsolete);
+        std::cout << "PASS: total torque limit, invalid ratios and removed option rejection\n";
 
         config["gravity_compensation"]["alpha"] = 1.1;
         bool rejected = false;

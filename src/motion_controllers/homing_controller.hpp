@@ -31,7 +31,7 @@ public:
         double reference[3]) const;
 
 private:
-    std::array<double, 3> kp_, kd_, initial_, home_;
+    std::array<double, 3> kp_, kd_, initial_, home_, torque_limit_;
     double duration_;
     double start_time_ = 0;
 };

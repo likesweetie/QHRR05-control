@@ -3,38 +3,27 @@
     <texture name="pbr_studio_background" type="skybox" builtin="gradient" rgb1="0.29 0.30 0.31" rgb2="0.29 0.30 0.31" width="256" height="1536" />
     <texture name="pbr_floor_color" type="2d" file="textures/floor_color.png" colorspace="sRGB" />
     <texture name="pbr_floor_normal" type="2d" file="textures/floor_normal.png" colorspace="linear" />
-    <texture name="pbr_floor_roughness" type="2d" file="textures/floor_roughness.png" nchannel="1" colorspace="linear" />
     <texture name="pbr_floor_ao" type="2d" file="textures/floor_ao.png" nchannel="1" colorspace="linear" />
-    <texture name="pbr_anodize_color" type="2d" file="textures/anodize_color.png" colorspace="sRGB" />
-    <texture name="pbr_anodize_normal" type="2d" file="textures/anodize_normal.png" colorspace="linear" />
-    <texture name="pbr_anodize_roughness" type="2d" file="textures/anodize_roughness.png" nchannel="1" colorspace="linear" />
-    <material name="pbr_metal" rgba="0.98 0.98 0.98 1" metallic="1" roughness="0.26" texrepeat="25 25" texuniform="false">
-      <layer role="rgb" texture="pbr_brushed_color" />
+    <!-- Constant white enables the pinned renderer's projected UV scale without painted grain. -->
+    <texture name="pbr_neutral_color" type="2d" builtin="flat" rgb1="1 1 1" width="16" height="16" colorspace="linear" />
+    <texture name="pbr_graphite_roughness" type="2d" file="textures/graphite_metal_roughness.png" colorspace="linear" nchannel="1" />
+    <material name="pbr_metal" rgba="0.78 0.80 0.82 1" metallic="1" roughness="1" texrepeat="10 10" texuniform="false">
+      <layer role="rgb" texture="pbr_neutral_color" />
       <layer role="roughness" texture="pbr_brushed_roughness" />
     </material>
-    <material name="pbr_black" rgba="0.10 0.11 0.12 1" metallic="0.9" roughness="0.29" texrepeat="25 25" texuniform="false">
-      <layer role="rgb" texture="pbr_brushed_color" />
-      <layer role="roughness" texture="pbr_brushed_roughness" />
-    </material>
-    <material name="pbr_white" rgba="0.72 0.73 0.74 1" metallic="0" roughness="0.64" texrepeat="48 48" texuniform="true">
-      <layer role="rgb" texture="pbr_anodize_color" />
-      <layer role="normal" texture="pbr_anodize_normal" />
-      <layer role="roughness" texture="pbr_anodize_roughness" />
-    </material>
-    <material name="pbr_gray" rgba="0.40 0.43 0.46 1" metallic="0.95" roughness="0.32" texrepeat="25 25" texuniform="false">
-      <layer role="rgb" texture="pbr_brushed_color" />
-      <layer role="roughness" texture="pbr_brushed_roughness" />
+    <material name="pbr_black" rgba="0.12 0.13 0.14 1" metallic="0.85" roughness="0.42" />
+    <material name="pbr_white" rgba="0.82 0.83 0.84 1" metallic="0" roughness="0.50" />
+    <material name="pbr_gray" rgba="0.48 0.50 0.53 1" metallic="1" roughness="1" texrepeat="10 10" texuniform="false">
+      <layer role="rgb" texture="pbr_neutral_color" />
+      <layer role="roughness" texture="pbr_graphite_roughness" />
     </material>
     <material name="pbr_target" rgba="0.50 0.16 0.055 1" metallic="0" roughness="0.76" />
-    <material name="pbr_ground" metallic="0" roughness="1" texrepeat="1 1" texuniform="true">
+    <material name="pbr_ground" metallic="0" roughness="0.90" texrepeat="1 1" texuniform="true">
       <layer role="rgb" texture="pbr_floor_color" />
       <layer role="normal" texture="pbr_floor_normal" />
-      <layer role="roughness" texture="pbr_floor_roughness" />
       <layer role="occlusion" texture="pbr_floor_ao" />
     </material>
     <material name="pbr_rubber" rgba="0.035 0.038 0.043 1" metallic="0" roughness="0.88" />
-    <texture name="pbr_aluminum_roughness" type="2d" file="textures/aluminum_roughness.png" nchannel="1" colorspace="linear" />
-    <texture name="pbr_brushed_color" type="2d" file="textures/brushed_metal_color.png" colorspace="sRGB" />
     <texture name="pbr_brushed_roughness" type="2d" file="textures/brushed_metal_roughness.png" colorspace="linear" nchannel="1" />
   </asset>
 </mujocoinclude>

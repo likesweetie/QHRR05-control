@@ -1,4 +1,5 @@
 #include "motion_controllers/ball_following_controller.hpp"
+#include "control/limits.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -82,7 +83,7 @@ BallFollowingController::BallFollowingController(const std::string& config_path,
     grid_ = s["workspace_grid_points"].as<int>();
     kp_ = values("kp_motor");
     kd_ = values("kd_motor");
-    torque_limit_ = values("torque_limit_nm");
+    torque_limit_ = ReadControlTorqueLimits(config);
 
     if (grid_ < 9 || grid_ > 65 || trigger_threshold_ > 1 || slow_speed_ >= normal_speed_ ||
         normal_speed_ >= fast_speed_)

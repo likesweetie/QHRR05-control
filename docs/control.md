@@ -14,7 +14,7 @@
 
 기존 Classic GUI와 독립 Filament 창에서 아래 프로젝트 조작을 사용할 수 있습니다. Filament 패널·카메라 추가 키는 [시각화 안내](visualization.md)를 참고하십시오. 시뮬레이션 전용 데이터와 승인 조작은 `simulation_ipc`로 교환하며 하드웨어 SHM에는 넣지 않습니다.
 
-**시작·리셋의 기본 상태는 Damping**입니다. 자동 호밍하지 않습니다. 관절 `kp=0`, `kd=1`, 목표 속도·`tau_ff=0`으로 `tau=-dq`만 출력하며, CAN에는 이를 MIT 명령으로 직접 보냅니다(kp로 나누는 surrogate 변환 없음). 첫 유효 모델 상태에서 현재 관절각과 발끝 위치를 목표로 한 번 저장합니다. 이후 위치 오차에 따른 복원력이나 중력 보상은 없으므로 중력·외력에 의해 움직일 수 있습니다. 모델이 아직 없으면 제어 주기는 계속 감쇠 출력을 내고, 목표 미확정 상태를 표시한 뒤 첫 모델 샘플에서 목표를 확정합니다. D로 다시 진입할 때도 그때의 위치를 캡처하며 GUI와 `ControlData.damping_toe_reference`·`damping_reference_valid` 및 MCAP에 표시·기록합니다. 호밍하려면 H를 누릅니다.
+**시작·리셋의 기본 상태는 Damping**입니다. 자동 호밍하지 않습니다. 관절 `kp=0`, `kd=1`, 기본 목표 속도·`tau_ff=0`으로 `tau=-dq`를 계산하고 공통 `limits.torque_nm`으로 제한합니다. CAN에는 이를 MIT 명령으로 직접 보내며(kp로 나누는 surrogate 변환 없음), 제한이 걸릴 때만 동일한 제한 토크가 나오도록 목표 속도를 보정합니다. 첫 유효 모델 상태에서 현재 관절각과 발끝 위치를 목표로 한 번 저장합니다. 이후 위치 오차에 따른 복원력이나 중력 보상은 없으므로 중력·외력에 의해 움직일 수 있습니다. 모델이 아직 없으면 제어 주기는 계속 감쇠 출력을 내고, 목표 미확정 상태를 표시한 뒤 첫 모델 샘플에서 목표를 확정합니다. D로 다시 진입할 때도 그때의 위치를 캡처하며 GUI와 `ControlData.damping_toe_reference`·`damping_reference_valid` 및 MCAP에 표시·기록합니다. 호밍하려면 H를 누릅니다.
 
 | 입력 | 동작 |
 | --- | --- |
@@ -37,6 +37,15 @@ TaskController는 각 모션 클래스의 초기화 인자로 YAML **경로**를
 
 제어 입력은 TaskController의 이름 있는 상태 배열 한 벌로 보관합니다. `ReadInput()`이 같은 SHM 잠금 안에서 각 모델·관절 값을 명시적으로 읽고, 미분용 이전 샘플은 별도로 유지합니다. Magnetic의 `Start()`는 발끝 위치만 받으며 `Compute()`와 RFOB의 `Update()`는 사용하는 배열·측정 번호·주기를 각각 인자로 받습니다. 모션 제어기는 SHM 데이터 구조를 포함하거나 상속하지 않습니다.
 
+모든 모션의 최종 토크 상한은 최상위 `limits.torque_nm` 하나로 설정합니다. 현재 개별 제한 중 최대값인 **60.7 N·m**로 통일했습니다.
+
+```yaml
+limits:
+  torque_nm: 60.7  # 스칼라 또는 HR/HP/KP 순서의 3개 배열
+```
+
+Homing/Gravity/Magnetic/Tracking/Ball과 TaskController 최종 출력, Classic/Filament 그래프가 이 값을 사용합니다. 호밍과 Damping의 MIT 명령에도 제한된 토크가 실제로 표현됩니다. 개별 모션에 옛 `torque_limit_nm`/`output_torque_limit_nm`을 남기면 오류로 안내하며 자동으로 우선순위를 정하지 않습니다. 물리 MJCF 및 CAN 모터의 독립적인 제한은 유지하므로 공통 설정이 그 한계를 높이지 않습니다. ILC의 `correction_limit_nm`(보정 자체 상한)과 `update_limit_nm`(한 주기 갱신량 상한)은 학습 정책이므로 유지하며, 합산 최종 출력에 공통 한도를 적용합니다.
+
 Homing은 보간 위치·속도와 자신의 kp/kd를 MIT 목표로 보냅니다. Gravity와 Magnetic은 `q + (tau + kd_motor*dq)/kp_motor`를 보냅니다. kd 항은 이미 계산된 감쇠를 모터 PD에서 중복 적용하지 않기 위한 항입니다. 각 모드의 내부 서보 게인은 해당 `kp_motor/kd_motor`에서 설정합니다.
 
 두 모드의 동역학 보상항은 각 설정의 `gravity_only`로 따로 선택합니다. 설정 변경 후 데몬을 재시작합니다.
@@ -56,28 +65,20 @@ magnetic_touch:
 
 ```yaml
 gravity_compensation:
-  damping_ratio: [0.5, 0.5, 0.5]
+  damping_ratio: [1.0, 1.0, 1.0]
   friction_compensation:
-    coulomb_ratio: [0.85, 0.85, 0.85]
+    enabled: true  # false: 건마찰·점성감쇠 보상 OFF
+    coulomb_ratio: [0.95, 0.95, 0.95]
     velocity_scale_rad_s: 0.03
-  virtual_inertia:
-    enabled: false
-    scale: 0.5
 ```
 
-`damping_ratio`는 **모델 점성 감쇠를 남기는 비율**이며 임계감쇠비 ζ가 아닙니다. 0이면 모델 점성 감쇠 전량 보상, 0.5면 절반 보상, 1이면 점성 감쇠 보상 없음입니다. 현재 모델의 관절 감쇠 2.0에서 기본값 0.5는 1.0을 남깁니다. 별도 `kd_motor=0.05`를 포함한 총 점성 감쇠는 관절당 약 1.05 N·m·s/rad입니다. `task_stiffness=0`이므로 진입 위치로 복원하지 않습니다.
+`damping_ratio`는 **모델 점성 감쇠를 남기는 비율**이며 임계감쇠비 ζ가 아닙니다. 0이면 모델 점성 감쇠 전량 보상, 0.5면 절반 보상, 1이면 점성 감쇠 보상 없음입니다. 현재 설정 1.0은 모델 감쇠 2.0을 그대로 남깁니다. 0.5로 설정하면 1.0을 남기며, 별도 `kd_motor=0.01`를 포함한 총 점성 감쇠는 각각 약 2.01 / 1.01 N·m·s/rad입니다. `task_stiffness=0`이므로 진입 위치로 복원하지 않습니다.
 
-기본 토크는 `alpha*h + K*(q_entry-q) + (1-r)*D*dq + beta*Fc*tanh(dq/v0) - kd_motor*dq`입니다. h는 위의 중력/bias 선택, r은 damping_ratio, beta는 coulomb_ratio입니다. D/Fc는 측정 관절 상태로 갱신하는 MuJoCo 백엔드의 모델 값입니다. 전체 passive 토크를 뒤집지 않으므로 스프링 등 다른 수동항까지 임의로 상쇄하지 않습니다. 기본 건마찰 보상 85%와 tanh 전환은 정지 부근의 갑작스러운 토크 반전을 줄이며, 속도가 정확히 0이면 이 보상도 0입니다. 정지 마찰을 완전히 없애거나 아주 작은 힘만으로 반드시 움직이게 만드는 설정은 아닙니다. 실제 하드웨어에서는 모델 D/Fc의 식별 정확도에 따라 보상량이 달라집니다.
+`friction_compensation.enabled=false`이면 건마찰과 모델 점성감쇠 보상 항을 모두 끕니다. 설정된 비율은 유지하며, 중력/bias·자세 강성·모터 kd는 그대로 적용합니다. OFF 토크는 `alpha*h + K*(q_entry-q) - kd_motor*dq`입니다. 스위치 누락·잘못된 bool은 시작 오류입니다.
 
-### 선택적 가상 관성 제어 — 기본 OFF
+ON일 때 기본 토크는 `alpha*h + K*(q_entry-q) + (1-r)*D*dq + beta*Fc*tanh(dq/v0) - kd_motor*dq`입니다. h는 위의 중력/bias 선택, r은 damping_ratio, beta는 coulomb_ratio입니다. D/Fc는 측정 관절 상태로 갱신하는 MuJoCo 백엔드의 모델 값입니다. 전체 passive 토크를 뒤집지 않으므로 스프링 등 다른 수동항까지 임의로 상쇄하지 않습니다. 현재 건마찰 보상 95%와 tanh 전환은 정지 부근의 갑작스러운 토크 반전을 줄이며, 속도가 정확히 0이면 이 보상도 0입니다. 정지 마찰을 완전히 없애거나 아주 작은 힘만으로 반드시 움직이게 만드는 설정은 아닙니다. 실제 하드웨어에서는 모델 D/Fc의 식별 정확도에 따라 보상량이 달라집니다.
 
-별도 위치 추종 어드미턴스 대신, 관절 공간 외력 토크 피드백으로 유효 관성을 줄입니다. 측정 q/dq/ddq, 측정 모터 토크, 같은 상태에서 계산한 M/bias/passive/friction만 사용하며 시뮬레이션 GT 외력이나 SHM 신규 필드는 필요하지 않습니다. 이 경로에는 자코비안 역행렬도 없습니다.
-
-외력 토크는 `LPF(M*ddq + bias - passive + Fc*tanh(dq/v0) - measured_motor_torque)`로 추정합니다. deadband 뒤 `(1/scale-1)*estimated_external_torque`를 기본 토크에 더합니다. 보상 오차·필터·제한이 작고 자세가 국소적으로 일정할 때 `scale*M*ddq ≈ external + scale*(나머지 기본 제어항)`이므로, `scale=0.5`는 같은 외력에서 약 두 배 가속도를 목표로 합니다. 잔여 감쇠·강성의 유효값도 함께 scale되며, 절대적인 kg 단위 가상 질량이나 모든 자세에서 같은 발끝 관성을 지정하는 방식은 아닙니다.
-
-켤 때는 `gravity_only=false`, `alpha=1`이 필요합니다. 기본 8 Hz LPF, 0.15 N·m 연속 deadband, 0.3초 진입 ramp, 관절당 3 N·m 보조 한도를 적용합니다. `maximum_velocity_rad_s=2`의 절반부터 진행 방향 가속 보조를 줄이고 2에서 0으로 만들며, 반대 방향 보조는 유지합니다. 이는 강제 속도 제한이 아닙니다. 합산 출력은 `torque_limit_nm`으로 제한합니다. 외력 추정 노이즈·지연에 영향을 받으므로 **실기 검증 전 기본 OFF**를 유지합니다.
-
-필터는 새 측정에서만 실제 경과 dt로 갱신하고, G 재진입 시 초기화합니다. 활성화 상태에서 잘못된 측정 번호·유한하지 않은 값·50 ms 초과 측정 간격은 오류로 보고하며 다른 제어로 조용히 대체하지 않습니다. 비활성화 시에는 외력 추정·관성 보조를 계산하지 않습니다. 새 설정은 비활성 옵션의 파라미터까지 시작 시 검증합니다. G 진입 로그에 감쇠 잔여 비율·건마찰 보상률·관성 ON/OFF를 표시합니다.
+가상 관성 제어는 제거했습니다. 외력 추정 기반의 추가 보조 토크는 계산하지 않습니다. 이전 YAML의 `virtual_inertia` 항목은 삭제해야 하며, 남아 있으면 시작 오류로 안내합니다. 중력/bias 선택, 자세 강성, 마찰·감쇠 보상 및 최종 토크 제한은 유지합니다.
 
 가상 엔코더는 시작 자세에서 상대각 0으로 시작합니다. `MotorData.position_offset[i]`은 시뮬레이션 시작 자세로 초기화하고 제어기가 이를 사용합니다. **실기 영점 보정은 아니며 스토퍼 호밍은 미구현**입니다.
 
@@ -131,7 +132,7 @@ lambda^2 = lambda_min^2 + (lambda_max^2 - lambda_min^2) * (1-z^2)^2
 
 `src/motion_controllers/numerics`는 모션 컨트롤러 내부 구현입니다. MuJoCo 백엔드는 이 모듈을 참조하지 않고 `std::array`와 MuJoCo 자체 행렬 연산을 사용합니다. 이 하위 모듈에 3×3 행렬·특이값·역행렬·DLS·벡터·삼각형 거리·조화급수 계산을 모았습니다. 같은 자코비안의 분해는 재사용하여 목표 속도와 가속도를 구합니다. 조건이 좋은 영역에서는 `lambda=0`, DLS 영역에서는 설정된 감쇠를 사용하므로 경계에는 `lambda_min`에 따른 작은 차이가 있습니다. RFOB도 같은 역행렬/전치 DLS 풀이를 쓰되 기존 최소 특이값 무효 판정과 고정 정규화 계수는 유지합니다. 특이점 부근의 증폭을 줄이는 대신 DLS 영역의 작업공간 재현 오차는 커질 수 있습니다.
 
-`impedance.stiffness_n_m/damping_ns_m`은 월드 X/Y/Z 피드백 게인, `motor.kp_nm_rad/kd_nm_s_rad`는 HR/HP/KP MIT 내부 서보 게인입니다. `output_torque_limit_nm`은 기본 제어와 ILC를 합산한 최종 명령의 관절별 한계입니다. 전체 토크를 제한한 뒤 기존 MIT 위치 명령 경로로 보내며 `tau_ff=0`을 유지합니다. 설정 누락·잘못된 값은 시작 오류로 보고합니다. 설정 변경 후 재시작합니다.
+`impedance.stiffness_n_m/damping_ns_m`은 월드 X/Y/Z 피드백 게인, `motor.kp_nm_rad/kd_nm_s_rad`는 HR/HP/KP MIT 내부 서보 게인입니다. `limits.torque_nm`은 기본 제어와 ILC를 합산한 최종 명령의 관절별 한계입니다. 전체 토크를 제한한 뒤 기존 MIT 위치 명령 경로로 보내며 `tau_ff=0`을 유지합니다. 설정 누락·잘못된 값은 시작 오류로 보고합니다. 설정 변경 후 재시작합니다.
 
 제어 설정 최상위의 `model_path` 하나를 Tracking 역동역학·공 추종 FK·GUI 작업공간 계산에 공통으로 사용합니다. 상대 경로는 이 YAML 파일 위치를 기준으로 해석합니다. TaskController가 백엔드를 한 번 생성하여 Tracking과 Ball에 주입하며, 하위 항목의 예전 모델 경로로 대체하지 않습니다. 독립 뷰어의 작업공간 작업 스레드는 별도 백엔드를 소유합니다. `tracking.inverse_dynamics`에는 해당 모드 전용 보간 비율 `alpha`만 둡니다.
 
@@ -143,7 +144,6 @@ lambda^2 = lambda_min^2 + (lambda_max^2 - lambda_min^2) * (1-z^2)^2
 | `trajectory` | 시간 배분 방식·주기·진입 램프·XYZ 진폭·적분 표 |
 | `ik` | 전체 경로 사전 검사 및 IDFF/CTC/ILC 관절 목표 생성과 Adaptive DLS |
 | `motor` | MIT 내부 서보의 위치/속도 게인 |
-| `output_torque_limit_nm` | ILC까지 합산한 최종 출력 제한 |
 | `impedance` | IDFF 또는 순수 임피던스의 작업공간 피드백 |
 | `inverse_dynamics` | 목표 상태 역동역학과 현재 중력 사이의 `alpha` 보간 |
 | `ctc` | 가속도 피드백 `kp_per_s2`·`kd_per_s` |
@@ -158,7 +158,7 @@ lambda^2 = lambda_min^2 + (lambda_max^2 - lambda_min^2) * (1-z^2)^2
 ```text
 ddq_cmd = ddq_d + Kp_ctc*(q_d-q) + Kd_ctc*(dq_d-dq)
 tau_ctc = M(q)*ddq_cmd + bias(q,dq)
-tau = clip(tau_ctc, -torque_limit_nm, torque_limit_nm)
+tau = clip(tau_ctc, -limits.torque_nm, limits.torque_nm)
 q_MIT = q + (tau + kd_motor*dq)/kp_motor - encoder_origin
 ```
 
@@ -181,10 +181,10 @@ ILC를 켰을 때 설정 검증상 궤적 주기 하한은 `max(phase_bins / con
 
 ```text
 tau_ilc[k+1] = Q(retention*tau_ilc[k] + Kp_ilc*e_q[k] + Kd_ilc*e_dq[k])
-tau_cmd = clip(tau_base + tau_ilc, -tracking.output_torque_limit_nm, tracking.output_torque_limit_nm)
+tau_cmd = clip(tau_base + tau_ilc, -limits.torque_nm, limits.torque_nm)
 ```
 
-`ilc.position_gain_nm_rad/velocity_gain_nm_s_rad`는 HR/HP/KP 순서의 유효 학습 토크 게인이고 `ilc.retention`은 기존 학습값 유지율입니다. `phase_lead_bins`만큼 뒤쪽 위상의 오차를 앞쪽 보상에 반영하고, `smoothing_passes`번 순환 대칭 3점 필터(`1/4,1/2,1/4`)를 적용합니다. `ilc.update_limit_nm`은 표 한 지점의 주기별 변화, `ilc.correction_limit_nm`은 ILC 보상 자체의 토크 한계입니다. 최종 `output_torque_limit_nm`과는 별개입니다. 주기 경계에서는 `blend_sec` 동안 5차 보간으로 이전·새 보상을 연결하고 위상 표도 순환 선형 보간하므로 보상값이 경계에서 뛰지 않습니다.
+`ilc.position_gain_nm_rad/velocity_gain_nm_s_rad`는 HR/HP/KP 순서의 유효 학습 토크 게인이고 `ilc.retention`은 기존 학습값 유지율입니다. `phase_lead_bins`만큼 뒤쪽 위상의 오차를 앞쪽 보상에 반영하고, `smoothing_passes`번 순환 대칭 3점 필터(`1/4,1/2,1/4`)를 적용합니다. `ilc.update_limit_nm`은 표 한 지점의 주기별 변화, `ilc.correction_limit_nm`은 ILC 보상 자체의 토크 한계입니다. 최종 `limits.torque_nm`과는 별개입니다. 주기 경계에서는 `blend_sec` 동안 5차 보간으로 이전·새 보상을 연결하고 위상 표도 순환 선형 보간하므로 보상값이 경계에서 뛰지 않습니다.
 
 속도 램프를 마친 뒤 첫 위상 교차점과 `warmup_cycles`를 기다립니다. 구간 하나라도 샘플이 없거나 제어기 최종 토크가 포화된 주기는 학습 갱신을 건너뛰며 GUI·터미널에 이유를 표시합니다. 이 경우 기존 보상 표는 유지합니다. 포화 판정은 **제어기 토크 제한** 기준이며 가상 모터·실기 내부 포화를 모두 알아내는 것은 아닙니다. 제어기는 기존처럼 최신 관절 상태로 독립 실행하며 응답 지연 감시나 시뮬레이터 일시정지 연동은 추가하지 않았습니다.
 

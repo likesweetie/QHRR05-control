@@ -1,5 +1,6 @@
 #include <array>
 #include "motion_controllers/homing_controller.hpp"
+#include "control/limits.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,7 @@ HomingController::HomingController(const std::string& config_path) {
         throw std::runtime_error("only qhrr-05 is supported");
 
     const auto settings = config["homing"];
+    torque_limit_ = ReadControlTorqueLimits(config);
     kp_ = Joints(settings["kp"], true);
     kd_ = Joints(settings["kd"], true);
     initial_ = Joints(settings["initial_position_rad"]);
@@ -94,6 +96,7 @@ void HomingController::Compute(double time,
 
         if (!std::isfinite(torque[i]))
             throw std::runtime_error("non-finite torque command");
+        torque[i] = std::clamp(torque[i], -torque_limit_[i], torque_limit_[i]);
     }
 }
 }  // namespace qhrr05

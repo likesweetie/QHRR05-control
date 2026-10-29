@@ -41,6 +41,8 @@ int main() {
         };
         auto homing = YAML::Load(R"(
 robot: qhrr-05
+limits:
+  torque_nm: 53.7
 homing:
   kp: [10,20,30]
   kd: 2
@@ -74,6 +76,8 @@ homing:
 
         auto gravity = YAML::Load(R"(
 robot: qhrr-05
+limits:
+  torque_nm: 53.7
 gravity_compensation:
   gravity_only: true
   kp_motor: 50
@@ -82,17 +86,9 @@ gravity_compensation:
   task_stiffness: [2,4,6]
   damping_ratio: 1
   friction_compensation:
+    enabled: true
     coulomb_ratio: 0
     velocity_scale_rad_s: .03
-  torque_limit_nm: 53.7
-  virtual_inertia:
-    enabled: false
-    scale: .5
-    observer_hz: 8
-    external_torque_deadband_nm: .15
-    ramp_sec: .3
-    assist_limit_nm: 3
-    maximum_velocity_rad_s: 2
 )");
         save(gravity);  // No homing section; use independent motor gains.
         qhrr05::GravityCompensationController compensation(path);
@@ -103,12 +99,64 @@ gravity_compensation:
         std::copy_n(dq, 3, state.joint_velocity.begin());
         std::copy_n(g, 3, state.gravity.begin());
         state.bias = state.gravity;
-        compensation.Compute(state, {}, torque, reference);
+        compensation.Compute(state, torque, reference);
         const double expected_gravity[] = {.2, -.2, -1.2};
 
         for (int i = 0; i < 3; ++i)
             Require(std::abs(torque[i] - expected_gravity[i]) < 1e-10,
                 "gravity file parameters were not applied");
+
+        auto limited_gravity = YAML::Clone(gravity);
+        limited_gravity["limits"]["torque_nm"] = YAML::Load("[.05,.1,.2]");
+        save(limited_gravity);
+        qhrr05::GravityCompensationController limited(path);
+        limited.Start(desired);
+        limited.Compute(state, torque, reference);
+        const double clipped_gravity[] = {.05, -.1, -.2};
+        for (int i = 0; i < 3; ++i)
+            Require(std::abs(torque[i] - clipped_gravity[i]) < 1e-12,
+                "shared per-axis torque limits were not applied");
+
+        auto limited_homing = YAML::Load(R"(
+robot: qhrr-05
+limits: {torque_nm: .1}
+homing:
+  kp: [10,20,30]
+  kd: 2
+  initial_position_rad: [0,.3,-1]
+  position_rad: [0,.9,-1.8]
+  duration_sec: 2
+)");
+        save(limited_homing);
+        qhrr05::HomingController limited_home(path);
+        limited_home.Compute(2, q, dq, torque, reference);
+        for (double value : torque)
+            Require(std::abs(value) <= .1, "homing bypassed shared output limit");
+
+        for (const char* section :
+            {"homing", "gravity_compensation", "magnetic_touch", "tracking", "ball_following"}) {
+            auto obsolete = YAML::Clone(gravity);
+            obsolete[section][section == std::string("tracking") ? "output_torque_limit_nm"
+                                                                 : "torque_limit_nm"] = 100;
+            save(obsolete);
+            reject([&] {
+                qhrr05::GravityCompensationController invalid(path);
+            });
+        }
+        for (const auto& value : {YAML::Node(),
+                 YAML::Node(0),
+                 YAML::Node(-1),
+                 YAML::Load("[1,2]"),
+                 YAML::Load("[1,.nan,3]")}) {
+            auto bad = YAML::Clone(gravity);
+            bad["limits"]["torque_nm"] = value;
+            save(bad);
+            reject([&] {
+                qhrr05::GravityCompensationController invalid(path);
+            });
+        }
+        std::cout
+            << "PASS: shared scalar/axis limits, homing clipping and legacy/invalid limits rejection\n";
 
         gravity["gravity_compensation"]["gravity_only"] = "invalid";
         save(gravity);

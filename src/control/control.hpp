@@ -47,7 +47,6 @@ private:
     std::uint64_t model_sequence_ = 0, model_published_ns_ = 0;
     std::uint64_t measurement_sequence_ = 0, measurement_ns_ = 0;
     double measurement_dt_ = .001;
-    double gravity_measurement_dt_ = .001;  // Actual elapsed time between fresh gravity samples.
 
     // Previous samples are retained only for acceleration and fresh-sample tracking.
     std::array<std::uint64_t, 3> previous_received_sequence_{}, previous_received_ns_{};
@@ -75,6 +74,7 @@ private:
     std::unique_ptr<BallFollowingController> ball_;
 
     std::array<double, 3> torque_command_{}, position_reference_{};
+    std::array<double, 3> torque_limits_{};
     std::array<MitCommand, 3> motor_targets_{};
     bool motor_commands_enabled_ = false;
 };

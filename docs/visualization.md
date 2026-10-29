@@ -100,15 +100,25 @@ Filament 기본값은 **8x MSAA + 고정 4/3배 내부 렌더 해상도**입니�
 
 `scene_pbr.xml`은 원본 `scene.xml`과 별도 `visualization/pbr_assets.xml`을 포함합니다. 새 MJCF는 렌더러만 로드합니다. 렌더링 모델에서 metal/black/white/gray/ground를 대응 PBR 재질로 매핑하며 기존 물리 모델 XML을 수정하지 않습니다.
 
-- 로봇: 그래파이트 아노다이징 몸체, 검정 금속 힙 부품, 밝은 알루미늄 링크를 구분합니다. 금속에는 [ambientCG Metal009](https://ambientcg.com/view?id=Metal009)의 CC0 **4096×4096 Color/Roughness**를 중립 색상과 제한된 거칠기 범위로 가공해 적용합니다. 유효 Roughness는 은색 약0.21~0.26, 몸체 약0.26~0.32입니다. 기하학적 요철로 보이는 거친 Normal Map은 금속에 적용하지 않습니다. `pbr_white`/`pbr_rubber`의 비금속 성질은 유지합니다.
-- 바닥: 중간 회색 무광 스튜디오 바닥(Base Color sRGB 135/136/137). 512×512 Base Color, Normal, Roughness, Ambient Occlusion 레이어를 사용하며 눈에 띄는 얼룩·타일 무늬를 억제합니다. 배경은 중립 회색 skybox(0.29/0.30/0.31)로, 조명받은 바닥과 밝기가 비슷하도록 맞췄습니다. 물리 바닥 형상은 유지합니다.
+- 로봇: 은색 알루미늄, 검정 아노다이징 하우징, 짙은 금속 몸체를 구분합니다. Base Color는 상수이며 색상에 브러시 무늬를 그리지 않습니다. 은색과 몸체에만 [ambientCG Metal009](https://ambientcg.com/view?id=Metal009)의 CC0 **4096×4096 Roughness**를 서로 다른 좁은 범위로 가공해 적용합니다. `roughness=1`이므로 맵 값이 그대로 유효 거칠기입니다. 금속 Normal Map은 사용하지 않습니다. 코팅 하우징은 등방성, 순수 금속만 약한 이방성(최대0.20)을 사용합니다. `pbr_white`는 텍스처 없는 도장 재질입니다.
+- 바닥: 중간 회색 무광 스튜디오 바닥(Base Color sRGB 135/136/137), 고정 Roughness 0.90. 512×512 Base Color, Normal, Ambient Occlusion 레이어로 눈에 띄는 얼룩·타일 무늬를 억제합니다. 배경은 중립 회색 skybox(0.29/0.30/0.31)로, 조명받은 바닥과 밝기가 비슷하도록 맞췄습니다. 물리 바닥 형상은 유지합니다.
 - 환경: 기본값은 어두운 반사 영역과 경계가 완만한 소프트박스 조명판을 수학적으로 생성한 `product_studio_ibl.ktx`입니다. 작은 창문·패널의 고대비 반사띠를 없애고 512px GGX prefiltered cubemap/irradiance SH로 제공합니다. `python3 tools/prepare_product_studio_ibl.py`로 네트워크 없이 재생성합니다. 기존 CC0 Studio Small 09도 보관하며 `--ibl`로 명시적으로 선택할 수 있습니다.
 - 조명: 사선 soft key(22000) + 약한 차가운 fill(3000) + 중립 rim(1500) + IBL(40000). 밝은 배경에 맞췄던 주광·환경광을 낮추고 fill은 유지해 어두운 금속 부품의 디테일을 살립니다. 노출은 0 EV를 유지합니다. Fill/rim은 렌더러가 소유하는 고정 스튜디오 조명이며 시뮬레이터에는 없습니다. 2048 shadow map의 PCSS 소프트 그림자와 AO, 중립 ACES를 사용합니다. 카메라 headlight·bloom·vignette·fog·샤프닝은 끕니다. MuJoCo 3.16의 색보정 LUT가 이전 설정으로 생성되는 부분은 설정을 한 번 재적용하여 MJCF 값이 실제 출력에 적용되도록 합니다.
 - 접촉 물체: 채도를 줄인 무광 주황색 블록. 물리 접촉 형상·마찰·입력은 동일합니다.
 - 원본 CAD 버텍스·삼각형·관절/충돌 형상은 변경하지 않습니다. 기존 모따기와 곡면을 유지하고 MuJoCo의 법선·UV 투영을 이용합니다. 새로운 bevel이나 소재별 CAD 재분할 작업을 수행한 것은 아닙니다.
 - Classic 개발용 렌더러와 원본 모델은 유지합니다. PBR 채널은 Filament가 처리합니다.
 
-바닥과 금속 미세 텍스처는 이 저장소에서 생성한 자산이며 `python3 tools/generate_pbr_textures.py`로 재현할 수 있습니다. 생성 IBL 및 기존 HDRI의 출처·SHA256과 변환 방법은 [환경 자산 기록](../models/qhrr-05/visualization/environment/README.md)에 있습니다. `python3 tools/prepare_studio_ibl.py`를 명시적으로 실행할 때만 원본을 다운로드해 변환합니다. 일반 실행은 포함된 KTX를 읽으며 인터넷 연결이 필요하지 않습니다. 환경 파일이 없으면 오류로 종료합니다.
+| 재질 | Base Color RGB | Metallic | 유효 Roughness |
+| --- | --- | --- | --- |
+| 은색 링크 | 0.78 / 0.80 / 0.82 | 1.0 | 0.322~0.380, 평균0.349 |
+| 검정 하우징 | 0.12 / 0.13 / 0.14 | 0.85 | 고정0.42 |
+| 짙은 금속 몸체 | 0.48 / 0.50 / 0.53 | 1.0 | 0.357~0.404, 평균0.380 |
+| 도장 커버 | 0.82 / 0.83 / 0.84 | 0 | 고정0.50 |
+| 고무 | 0.035 / 0.038 / 0.043 | 0 | 고정0.88 |
+
+OBJ에는 authored UV가 없으므로 `texrepeat`는 0~1 UV 타일 개수가 아니라 생성된 `uv=0.5*position-0.5`의 배율입니다. 은색·몸체는 10배, 즉 200mm 투영 타일을 사용합니다. MuJoCo 3.16의 UV 배율 적용 조건 때문에 단색 흰 RGB 텍스처를 연결하지만, 실제 색상 무늬는 없습니다. Roughness는 linear, 바닥 색상은 sRGB입니다. 검정 하우징은 은색 텍스처를 공유하지 않습니다.
+
+바닥 맵은 `python3 tools/generate_pbr_textures.py`, 금속 맵은 `python3 tools/prepare_metal_materials.py`로 재현합니다. 금속 도구의 `--download`를 명시하면 고정 해시의 CC0 원본을 받습니다. 이전 색상·아노다이징·바닥 Roughness 파일은 비교용으로 보관하지만 활성 MJCF에서는 참조하지 않습니다. 생성 IBL 및 기존 HDRI의 출처·SHA256과 변환 방법은 [환경 자산 기록](../models/qhrr-05/visualization/environment/README.md)에 있습니다. `python3 tools/prepare_studio_ibl.py`를 명시적으로 실행할 때만 HDR 원본을 다운로드해 변환합니다. 일반 실행은 포함된 KTX를 읽으며 인터넷 연결이 필요하지 않습니다. 환경 파일이 없으면 오류로 종료합니다.
 
 정적 메시와 텍스처는 초기화 시 `ModelResources`에 한 번 등록합니다. 프레임마다 링크·카메라·조명과 디버그 geometry를 갱신하며 모델 메시·텍스처를 다시 업로드하지 않습니다. 시각화 프로필에서만 기존 light의 방향·색·광원 크기와 skybox 선택을 갱신하며 원본 물리 MJCF는 수정하지 않습니다.
 
