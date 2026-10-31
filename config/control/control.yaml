@@ -20,9 +20,9 @@ zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
   # stop_position_rad: [-0.872665, -2.984513, -2.722714]
   speed_rad_s: [0.12, 0.12, 0.12]  # 증분 위치 목표 속도
   contact_torque_nm: [6.0, 6.0, 3.0]  # 탐색 방향의 측정 토크가 이 값을 넘고 정지해야 접촉
-  maximum_push_nm: [8.0, 8.0, 4.5]  # 탐색/유지 노력 상한; limits.torque_nm 이하
-  kp: [120.0, 120.0, 100.0]
-  kd: [2.0, 2.0, 1.0]
+  maximum_push_nm: [8.0, 8.0, 8.0]  # 탐색/유지 노력 상한; limits.torque_nm 이하
+  kp: [10.0, 10.0, 10.0]
+  kd: [2.0, 2.0, 2.0]
   maximum_travel_rad: [1.85, 6.0, 2.4]  # 축별 시작 엔코더각 대비 이동량 상한
   timeout_sec: [30.0, 70.0, 40.0]  # 접촉 탐색과 후퇴를 포함한 축별 시간 상한
   contact_duration_sec: 0.15  # 새 피드백에서 연속 확인; 한 번의 스파이크로 보정하지 않음
@@ -32,7 +32,7 @@ zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
   feedback_timeout_sec: 0.25
 
 homing:  # 현재 관절각에서 호밍 자세까지 보간하는 위치 PD 제어
-  kp: [40.0, 40.0, 40.0]  # 관절 위치 오차에 대한 P 게인(N·m/rad)
+  kp: [10.0, 10.0, 10.0]  # 관절 위치 오차에 대한 P 게인(N·m/rad)
   kd: [1.0, 1.0, 1.0]  # 목표·현재 관절 속도 오차에 대한 D 게인(N·m·s/rad)
   initial_position_rad: [0.0, 0.3, -1.0]  # 시뮬레이터 시작·리셋 관절각(rad); 호밍 진입 시에는 현재 각도에서 출발
   position_rad: [0.0, 0.9, -1.8]  # 호밍 완료 후 유지할 목표 관절각(rad)
@@ -84,7 +84,7 @@ tracking:  # 월드 XY/XZ/YZ 무한대 궤적 추종; 단축키 1/2/3, 변경 �
   mode: inverse_dynamics  # inverse_dynamics / ctc / impedance; 기본 제어 방식은 이 항목 하나로 선택
   trajectory:  # 궤적 생성; 월드 X/Y/Z, 제어 방식과 공통
     timing: uniform_acceleration  # 가속도 크기 편차 완화; constant_speed: 기존 호 길이 정속
-    period_sec: 0.3  # 진입 이후 한 바퀴 주기(s); 두 timing 방식 모두 동일 최소 0.3s
+    period_sec: 2.3  # 진입 이후 한 바퀴 주기(s); 두 timing 방식 모두 동일 최소 0.3s
     ramp_sec: 1.0  # 진입 시 프로파일 진행 속도를 0부터 올리는 시간(s)
     amplitude_m: [0.08, 0.08, 0.08]  # 월드 X/Y/Z 반폭(m); 전체 폭은 2배
     arc_length_samples: 4096  # 경로·시간 적분 표 구간 수(정속 64..65536, 가속도 프로파일 256 이상)

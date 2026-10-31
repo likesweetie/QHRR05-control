@@ -96,13 +96,29 @@ set_target_properties(simulation PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
 add_executable(input apps/interfaces/input/main.cpp)
 target_link_libraries(input PRIVATE interfaces)
 
-execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-    OUTPUT_VARIABLE QHRR_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-execute_process(COMMAND git status --porcelain WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-    OUTPUT_VARIABLE QHRR_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+# Source archives and deployment copies may not include usable Git metadata.
+set(QHRR_GIT_COMMIT "unknown")
 set(QHRR_GIT_DIRTY 0)
-if(QHRR_GIT_STATUS)
-    set(QHRR_GIT_DIRTY 1)
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        OUTPUT_VARIABLE QHRR_GIT_HEAD OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE QHRR_GIT_HEAD_RESULT ERROR_QUIET)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        OUTPUT_VARIABLE QHRR_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE QHRR_GIT_STATUS_RESULT ERROR_QUIET)
+    if(QHRR_GIT_HEAD_RESULT STREQUAL "0" AND QHRR_GIT_STATUS_RESULT STREQUAL "0")
+        set(QHRR_GIT_COMMIT "${QHRR_GIT_HEAD}")
+        if(QHRR_GIT_STATUS)
+            set(QHRR_GIT_DIRTY 1)
+        endif()
+    endif()
+endif()
+if(QHRR_GIT_COMMIT STREQUAL "unknown")
+    message(WARNING "Git metadata unavailable; recording git_commit=unknown. "
+        "git_dirty=0 is a fallback and does not indicate a clean working tree.")
 endif()
 add_library(shm_logger_core STATIC
     src/shm_logger/shm_snapshot_reader.cpp src/shm_logger/log_schema.cpp
