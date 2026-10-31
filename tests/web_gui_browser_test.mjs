@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const { WebSocket } = createRequire(resolve(root, "apps/interfaces/web_gui/frontend/package.json"))(
-  "ws",
-);
+const { WebSocket } = createRequire(
+  resolve(root, "apps/interfaces/web_gui/frontend/package.json"),
+)("ws");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function waitFor(predicate, detail = () => "", timeout = 6000) {
   const deadline = Date.now() + timeout;
@@ -164,7 +164,7 @@ test(
       );
       await waitFor(() =>
         cdp.evaluate(
-          `document.querySelector('.summary-card strong')?.textContent.includes('Gravity') && document.querySelectorAll('.request-stages .stage-complete').length === 3`,
+          `document.querySelector('#machineControllerState')?.textContent.includes('Gravity') && document.querySelectorAll('.request-stages .stage-complete').length === 3`,
         ),
       );
       assert.match(
@@ -196,13 +196,13 @@ test(
       await press("d", "KeyD", 68);
       await waitFor(() =>
         cdp.evaluate(
-          `document.querySelector('.summary-card strong').textContent.includes('Damping') && document.querySelectorAll('.request-stages .stage-complete').length === 3`,
+          `document.querySelector('#machineControllerState').textContent.includes('Damping') && document.querySelectorAll('.request-stages .stage-complete').length === 3`,
         ),
       );
       await press("g", "KeyG", 71);
       await waitFor(() =>
         cdp.evaluate(
-          `document.querySelector('.summary-card strong').textContent.includes('Gravity')`,
+          `document.querySelector('#machineControllerState').textContent.includes('Gravity')`,
         ),
       );
 
@@ -214,7 +214,7 @@ test(
       await delay(100);
       assert.match(
         await cdp.evaluate(
-          `document.querySelector('.summary-card strong').textContent`,
+          `document.querySelector('#machineControllerState').textContent`,
         ),
         /Gravity/,
         "editing a number must not activate a motion shortcut",
@@ -362,7 +362,7 @@ test(
       );
       assert.equal(
         await cdp.evaluate(
-          `document.querySelector('.summary-card strong').textContent.includes('—')`,
+          `document.querySelector('#machineControllerState').textContent.includes('—')`,
         ),
         true,
       );
@@ -381,6 +381,173 @@ test(
         fixture.stdin.end();
         await fixture.done;
       }
+      await rm(profile, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Processes and SHM screens use the existing live supervisor",
+  { timeout: 35000 },
+  async () => {
+    const name = `/qhrr-dashboard-processes-${process.pid}`;
+    const profile = await mkdtemp(
+      resolve(tmpdir(), "qhrr-dashboard-processes-"),
+    );
+    const manifest = resolve(profile, "daemon.json");
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        runtime_mode: "hardware",
+        shm_name: name,
+        monitoring: { display_interval_sec: 2, window_sec: 10, sample_hz: 100 },
+        processes: [
+          { name: "core", exec_path: "/bin/sleep", args: ["60"] },
+          {
+            name: "worker",
+            exec_path: "/bin/sleep",
+            args: ["60"],
+            critical: false,
+          },
+        ],
+      }),
+    );
+    let daemon, server, chrome, cdp;
+    try {
+      daemon = start(resolve(root, "build/daemon"), [
+        "--config",
+        manifest,
+        "--no-terminals",
+      ]);
+      await waitFor(
+        () => daemon.logs.includes("worker started"),
+        () => daemon.logs,
+      );
+      server = start(resolve(root, "scripts/run_web_gui.sh"), [
+        "--port",
+        "0",
+        "--shm-name",
+        name,
+        "--control-config",
+        "tests/fixtures/control.yaml",
+      ]);
+      const url = await waitFor(
+        () => server.logs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0],
+        () => server.logs,
+      );
+      chrome = start(process.env.QHRR_CHROME || "/opt/google/chrome/chrome", [
+        "--headless",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profile}`,
+        "about:blank",
+      ]);
+      const debuggerUrl = await waitFor(
+        () =>
+          chrome.logs.match(
+            /ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/\S+/,
+          )?.[0],
+        () => chrome.logs,
+      );
+      const pages = await (
+        await fetch(`http://${new URL(debuggerUrl).host}/json/list`)
+      ).json();
+      cdp = await connectCdp(
+        pages.find((p) => p.type === "page").webSocketDebuggerUrl,
+      );
+      await cdp.call("Runtime.enable");
+      await cdp.call("Page.enable");
+      await cdp.call("Emulation.setDeviceMetricsOverride", {
+        width: 1440,
+        height: 1000,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await cdp.call("Page.navigate", { url: url + "/processes" });
+      await waitFor(() =>
+        cdp.evaluate(
+          `document.querySelectorAll('[data-process]').length === 2`,
+        ),
+      );
+      await cdp.evaluate(
+        `document.querySelector('[data-process="worker"] .button.danger').click()`,
+      );
+      await waitFor(() =>
+        cdp.evaluate(
+          `document.querySelector('[data-process="worker"] .badge').textContent==='STOPPED'`,
+        ),
+      );
+      await cdp.evaluate(
+        `document.querySelector('[data-process="worker"] .button.secondary').click()`,
+      );
+      await waitFor(() =>
+        cdp.evaluate(
+          `document.querySelector('[data-process="worker"] .badge').textContent==='online'`,
+        ),
+      );
+      await cdp.evaluate(
+        `document.querySelector('.stack-actions .button.danger').click()`,
+      );
+      await waitFor(() =>
+        cdp.evaluate(
+          `document.querySelector('.process-panel .panel-heading .badge').textContent==='STOPPED'`,
+        ),
+      );
+      await cdp.evaluate(
+        `document.querySelector('.stack-actions .button.primary').click()`,
+      );
+      await waitFor(() =>
+        cdp.evaluate(
+          `document.querySelector('.process-panel .panel-heading .badge').textContent==='RUNNING'`,
+        ),
+      );
+      let shot = await cdp.call("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: true,
+      });
+      await writeFile(
+        resolve(root, "build/web_gui_processes.png"),
+        Buffer.from(shot.data, "base64"),
+      );
+      await cdp.evaluate(`document.querySelector('a[href="/shm"]').click()`);
+      await waitFor(() =>
+        cdp.evaluate(`document.querySelector('h1').textContent==='SHM Data'`),
+      );
+      assert.match(await cdp.evaluate(`document.body.innerText`), /ABI 16/);
+      await cdp.evaluate(`document.querySelector('summary').click()`);
+      assert.match(
+        await cdp.evaluate(`document.querySelector('.json-view').textContent`),
+        /"command_sequence"/,
+      );
+      shot = await cdp.call("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: true,
+      });
+      await writeFile(
+        resolve(root, "build/web_gui_shm.png"),
+        Buffer.from(shot.data, "base64"),
+      );
+      await cdp.call("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 1,
+        mobile: true,
+      });
+      assert.equal(
+        await cdp.evaluate(
+          `document.documentElement.scrollWidth <= innerWidth`,
+        ),
+        true,
+      );
+      assert.deepEqual(cdp.exceptions, []);
+    } finally {
+      cdp?.close();
+      await stop(chrome);
+      await stop(server);
+      await stop(daemon);
       await rm(profile, { recursive: true, force: true });
     }
   },

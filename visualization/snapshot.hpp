@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ipc/shm_utils.hpp"
+#include "interfaces/observations.hpp"
 #include "ipc/simulation/channel.hpp"
 #include <atomic>
 #include <exception>
@@ -15,7 +16,8 @@ struct Snapshot {
     MotorData motor{};
     ModelData model{};
     ControlData control{};
-    std::uint64_t sequence = 0;
+    std::uint64_t sequence = 0, published_ns = 0;
+    bool simulation_available = false, pose_valid = false;
     bool stopping = false, failed = false, finished = false;
     std::string simulation_status;
 };
@@ -48,7 +50,7 @@ public:
 private:
     void Observe(std::stop_token stop);
     shm_utils::Mapping mapping_;
-    simulation_ipc::Client simulation_channel_;
+    std::unique_ptr<simulation_ipc::Client> simulation_channel_;
     std::mutex mailbox_mutex_;
     Snapshot latest_{};
     std::deque<Snapshot> pending_;

@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-launcher-') as directory:
     config.write_text(
         json.dumps(
             {
-                'shm_name': f'/qhrr05-launcher-{os.getpid()}',
+                'runtime_mode': 'simulation', 'shm_name': f'/qhrr05-launcher-{os.getpid()}',
                 'monitoring': {'display_interval_sec': 2.0, 'window_sec': 10.0, 'sample_hz': 100.0},
                 'processes': [spec],
                 'debug_processes': [spec],

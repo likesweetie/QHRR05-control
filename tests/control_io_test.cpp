@@ -116,6 +116,8 @@ int main(int argc, char** argv) {
         {
             shm_utils::Mapping mapping(prefix, true);
             auto& shm = *mapping.get();
+            for (auto& m : shm.motors)
+                m.coordinate_valid.fill(true);
             launch(prefix);  // No simulator, not even an initial measurement.
             auto before = WaitCommand(shm, [](const ControlData&) {
                 return true;
@@ -148,6 +150,17 @@ int main(int argc, char** argv) {
                 gravity.get(),
                 reference,
                 ++sample_sequence,
+                nullptr,
+                false);
+            qhrr05::InputInterface::RequestDrive(shm, DriveAction::Arm);
+            // Publish again to acknowledge the enabled direct-effort device.
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            qhrr05::UpdateControlIO(shm,
+                model.get(),
+                data.get(),
+                gravity.get(),
+                reference,
+                sample_sequence,
                 nullptr,
                 false);
             const auto damping = WaitCommand(shm, [](const ControlData& cmd) {
@@ -346,6 +359,11 @@ int main(int argc, char** argv) {
             shm.can_enabled = true;
             auto& feedback = shm.motors[0];
             feedback.running = true;
+            feedback.supported.fill(kCanSignals);
+            feedback.valid.fill(kCanSignals);
+            feedback.coordinate_valid.fill(true);
+            feedback.enabled.fill(true);
+            feedback.measurement_ns.fill(shm_utils::MonotonicNs());
             feedback.received_sequence.fill(1);
             feedback.received_ns.fill(shm_utils::MonotonicNs());
             feedback.profile_verified.fill(true);
@@ -354,6 +372,7 @@ int main(int argc, char** argv) {
                 feedback.feedback[i].velocity = 2 + i;
             }
             qhrr05::TaskController limited(path, name);
+            qhrr05::InputInterface::RequestDrive(shm, DriveAction::Arm);
             for (int mode : {5, 0, 1}) {
                 Request(shm, mode);
                 Require(limited.ReadInput(), "limited controller refused valid feedback");
@@ -417,6 +436,7 @@ int main(int argc, char** argv) {
                 shm_utils::Lock lock(shm);
                 shm.control[0].command_sequence = 7;
                 shm.motors[shm.motor_sequence % kShmBufferCount].debug_torque[0] = 1000;
+                shm.motors[shm.motor_sequence % kShmBufferCount].command_enabled[0] = true;
             }
 
             const auto command = qhrr05::UpdateControlIO(

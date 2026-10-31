@@ -1,13 +1,54 @@
 # 작업 요약
 
-갱신: 2026-10-31 · 제로셋 구현을 `refactoring`에서 `main`으로 통합
+갱신: 2026-10-31 · `HW_deploy` 구현과 가상 CAN 최종 검증
+
+## 웹 GUI 시작 시 포트 충돌 수정 — 2026-10-31
+
+- 수동 실행한 이전 웹 서버가 삭제된 SHM을 계속 읽으며 8080을 점유해, 데몬의 웹 GUI가 EADDRINUSE로 종료됐습니다. 웹 브리지가 SHM의 실제 객체를 확인하고 삭제·교체 시 명확한 오류로 종료하도록 수정했습니다. 스택 Stop/Start에서는 같은 SHM을 유지하므로 웹도 유지합니다.
+- 포트 충돌은 이전 서버 종료 또는 명시적 --port 지정을 안내하며 자동 포트 변경·서버 강제 종료는 하지 않습니다. 확인된 잔여 서버만 정리하고 실행 중인 데몬의 웹 프로세스를 다시 시작해 HTTP/WebSocket과 현재 세션 연결을 확인했습니다.
+- 검증: 웹 통합 4개(포트 충돌·세션 종료 시 포트 해제 포함), SHM 객체 삭제·교체 검사 통과. 빌드·포맷·diff 검사 통과. 제어·CAN·시뮬레이션 프로세스는 재시작하지 않았습니다.
+
+## 시뮬레이션 중복 제거 — 2026-10-31
+
+- HW 테스트 전용 hardware_motor_fixture 소스·빌드 타깃과 별도 물리 루프/GUI를 제거했습니다. run_hw_deploy_test.sh가 기존 simulation 실행 파일을 추가하며 GUI와 --headless가 같은 물리/가상 모터 구현을 사용합니다. 하드웨어 세션에서는 simulation IPC/GT·원점 자동 보정을 제공하지 않습니다.
+- 복제된 config/daemon/simulation.yaml과 config/can_hal/simulation.yaml을 제거했습니다. scripts/simulation_config.py가 기본 daemon/CAN 설정에서 임시 파일을 생성합니다. 원래 config/simulation/simulation.yaml은 가상 모터·센서 설정이므로 유지합니다. 제어 설정·게인은 수정하지 않았습니다.
+- 런처 종료 때 임시 설정과 하위 프로세스를 정리합니다. 원래 제어 인자·설정 파일이 변경되지 않았음을 별도로 확인했습니다. HW CAN/GUI의 전체 제로셋·호밍, 일반 시뮬레이션 원점·재시작, MIT/IPC, 제어 I/O, 자동 빌드·런처와 CAN GUI 수명 등 관련 CTest 10종이 통과했습니다. 런처 SIGTERM 후 자식·SHM 정리도 확인했습니다. 로그: /tmp/qhrr-simulation-reuse-tests.log, /tmp/qhrr-simulation-reuse-lifecycle.log, /tmp/qhrr-simulation-reuse-final-tests.log.
+
+## dashboard.zip 웹 대시보드 이식 — 2026-10-31
+
+- 압축본의 CSS·레이아웃을 기존 React 앱에 적용하고 Overview / Processes / SHM Data를 만들었습니다. Python 백엔드·직접 CAN/SHM 쓰기는 가져오지 않았습니다. 기존 모션/순차 제로셋/힘 입력을 유지하고 Raw CAN·수동 영점 오프셋·미지원 IMU 조작은 제외했습니다.
+- 추가 기능은 개별/전체 모터 Enable과 프로세스 관리입니다. Input → Safety → TaskController 경로로 개별 축은 중립 출력의 ARMED 상태에 두고, Arm으로 기존 전체 모션을 시작합니다. 활성 모션에서 한 축을 끄면 남은 축도 중립 출력으로 전환합니다. SHM ABI 16, 모션 수치 연산과 기존 게인은 유지했습니다.
+- daemon에 같은 UID 전용 관리 소켓을 추가했습니다. 등록된 이름만 관리하고, 선택 프로세스는 개별 시작/중지, 핵심 프로세스는 출력 해제 후 스택 단위 시작/중지를 합니다. 수동 중지는 자동 재시작을 억제합니다. 웹 서버가 프로세스에 직접 신호를 보내지 않습니다.
+- 기본 물리/시뮬레이션/시각화 설정에서 web_gui를 자동 실행합니다. keep_on_stack_stop 관리 프로세스는 스택 중지 중에도 유지하며 재시작 때 중복 생성하지 않습니다. 누락 웹 브리지는 daemon 런처가 빌드하며 웹 런처의 준비 정책은 유지했습니다.
+- 검증 완료: 웹 통합 3개, 실제 Chrome 2개(모드/힘/반응형/연결 끊김 및 Processes/SHM 페이지·실제 시작/중지), 제어·로깅·CAN·수명·하드웨어 통합 6개 통과. 자동 웹 실행·스택 중지 중 HTTP 유지·동일 웹 PID로 재시작, OpenGL 제로셋/호밍, 자동 빌드·소스 배치 등 최종 5개도 통과했습니다. Native/Filament 빌드 및 스냅샷/ABI 검사 통과. 로그 /tmp/qhrr-dashboard-*.log. 변경은 HW_deploy에 미커밋 상태입니다.
+
+## HW_deploy 기본 OpenGL 창 — 2026-10-31
+
+- DISARMED에서 Z는 작업만 선택하며 A가 출력 허용임을 GUI에 명시했습니다. 선택/실행 중인 모드를 분리해 표시하고 제로셋 완료 후 H 안내를 추가했습니다. 제어 정책·게인은 유지합니다.
+- GUI 검증을 탐색 시작에서 끝내지 않고 hip → thigh → calf의 COMPLETE 및 H 호밍까지 확대했습니다. 전체 경로 60.06초 통과, 로그 /tmp/qhrr-zero-gui-reproduction.log. 표시 개선 빌드도 통과했습니다.
+- `run_hw_deploy_test.sh`의 기본 동작을 호스트 vcan0 + 기존 MuJoCo OpenGL UI로 변경했습니다. 자동 검증은 `--verify`, 독립 vcan은 `--verify --isolated-vcan`으로 선택합니다. `--interactive`는 기본 동작의 별칭으로 유지합니다.
+- 가상 CAN 장치 fixture가 소유한 모델을 창에 표시하므로 미보정 상태와 제로셋 진행도 볼 수 있습니다. Arm/Release/모드/목표 힘은 InputClient로 전달하며 SHM 명령 우회나 simulation IPC는 추가하지 않았습니다. 물리·HAL·제어 설정은 유지합니다.
+- 기존 Native MuJoCo UI 소스는 공통 빌드 타깃으로 재사용하며 Filament 빌드는 필요하지 않습니다. 창을 열 수 없을 때 headless로 자동 전환하지 않습니다.
+- 검증: native UI/fixture/기존 simulation 빌드 통과. 독립 vcan + 가상 X11에서 기본 OpenGL 창 생성, Z/Arm/Release의 Input 전달, 창 종료 시 세션 정리 시험 통과(8.49초). 기존 전체 HW 자동 검증도 통과(58.53초). 로그: /tmp/qhrr-hw-opengl-final.log. 사용자 실행 세션·물리 CAN은 변경하지 않았습니다.
+
+## HW_deploy 구현 — 2026-10-31
+
+- 물리 CAN을 기본으로 변경했습니다. run_daemon.sh는 준비된 can0를 검사하고 하드웨어 daemon 프로파일을 실행하며, run_simulation.sh만 vcan/물리 시뮬레이터를 실행합니다. run_visualization.sh 기본 동작은 기존 세션 관측이고 --simulation은 새 시뮬레이션 세션입니다. GLFW/Filament 및 기존 빌드 타깃은 유지합니다.
+- SHM ABI 15: 지원/유효 신호 마스크, 좌표 보정 유효성, 관측 시계, 모델 입력 측정 번호·가속도 유효성, 구동/통신 fault를 명시했습니다. 원시 엔코더와 보정 관절각, Iq×Kt 환산 토크와 GT, FK와 실측을 구별합니다. 새 디렉터리를 만들지 않았습니다.
+- 모션 수치 계산 파일은 변경하지 않았습니다. TaskController는 공통 관측과 입력 문맥을 받고, simulation IPC/GT/자동 제로셋 요청·pause 처리는 기존 interfaces/input에 모았습니다. 실제/가상 출처는 모션 분기 조건으로 전달하지 않습니다.
+- 시작은 DISARMED입니다. 공통 Input의 arm/release/clear-fault와 웹·Classic·Filament 버튼/단축키, 터미널 input --command를 지원합니다. HAL만 명령·피드백 만료를 판정하고 SHM 읽기/발행을 trylock으로 처리합니다. 새 명령으로 fault를 자동 해제하지 않습니다.
+- run_hw_deploy_test.sh는 하드웨어 설정에서 CAN만 vcan0로 바꾸고 별도 장치 fixture를 붙입니다. 해당 fixture는 CAN 응답만 제공하며 simulation IPC/SHM 상태를 발행하지 않습니다. 제로셋·호밍·출력 해제·제어기 중단 만료/fault 복귀 검증을 포함합니다. 실제 장치는 구동하지 않았습니다.
+- 기존 사용자 제로셋 방향 [1,-1,1]과 스토퍼 [0.872665,-2.984513,-0.575959]를 보존했습니다. 추가 설정은 startup_timeout_sec이며 나머지 모션 튜닝은 유지했습니다.
+- 검증: HW_deploy 최종 시험 58.33초 통과(시뮬레이션 IPC 없음, 미보정/Arm/제로셋/호밍/Release/제어기 중단/fault 복귀). HAL 통신·수명·버스 점유율 3개도 통과했습니다. 관측·안전·런처·제어 I/O 5개, 기존 모션 수치·모델·IPC·중력/호밍 7개, 제로셋 CAN·로깅·소스 배치 3개까지 관련 CTest 19종 통과입니다. 웹 통합 2개와 시각화 스냅샷 일관성·하드웨어 관측·owner death/ABI 시험도 통과했습니다. native/Filament/React 빌드와 셸/Python 문법·diff 검사 통과입니다. 실제 모터 및 전체 테스트군 통과를 주장하지 않습니다.
+- 검증 로그: /tmp/qhrr-hw-final-can.log, /tmp/qhrr-hw-acceptance.log, /tmp/qhrr-hw-focused-tests.log, /tmp/qhrr-hw-motion-tests.log, /tmp/qhrr-hw-web-test.log, /tmp/qhrr-hw-view-test.log. 작업은 HW_deploy 브랜치에 미커밋 상태입니다.
 
 ## 하드웨어 배포 계획 — 2026-10-31
 
-- 제로셋 구현 `11e1a62`를 `main`의 `68d7df5`로 병합하고, 그 위치에서 `HW_deploy` 브랜치를 생성했습니다. 원격 반영은 이번 작업 범위에 포함하지 않았습니다.
-- `docs/HW_DEPLOY_PLAN.md`에 실제 CAN/모터 전환 계획을 기록했습니다. 명시적 실행 모드, 기존 폴더 내 하드웨어 프로파일/런처, 시뮬레이션 보조 코드의 작은 경계, MuJoCo 계산 백엔드 유지가 중심입니다.
-- 안전 정책을 중첩하지 않고 TaskController의 DISARMED/ACTIVE/FAULT와 기존 SafetyLayer, HAL 한 곳의 통신 기한 처리로 책임을 나눕니다. 자동 재-arm 및 통신 오류 후 대체 실행은 하지 않는 방향입니다.
-- 이번 HW_deploy 변경은 계획 문서뿐입니다. 사용자 요청에 따라 별도 빌드·시험·실물 CAN 송신을 수행하지 않았습니다.
+- 제로셋 구현 `11e1a62`를 `main`의 `68d7df5`로 병합하고, 그 위치에서 `HW_deploy` 브랜치를 생성했습니다. 원격 반영은 해당 작업 범위에 포함하지 않았습니다.
+- 사용자 수정 방향을 `docs/HW_DEPLOY_PLAN.md`에 반영했습니다. 기본 daemon/CAN 설정은 물리 CAN으로 하고 시뮬레이션은 별도 bash에서 vcan·물리 시뮬레이터를 실행합니다. 별도의 하드웨어 런처 계층을 덧붙이지 않습니다.
+- 제어식 변경보다 데이터 계약에 집중합니다. 실제 관측/환산/모델 추정/시뮬레이션 GT를 구분하고, 취득 가능·현재 유효·샘플 시각·영점 유효성을 인터페이스 및 필요한 SHM 필드로 표현합니다. 모션 제어기는 실제/가상 출처를 알지 못하게 합니다.
+- GLFW/시뮬레이션 빌드 타깃 조건화는 계획에서 제거했습니다. 같은 실기 컴퓨터에서 시뮬레이션을 빌드·시험할 수 있도록 유지하며, 기존 폴더와 MuJoCo 계산 백엔드를 재사용합니다.
+- 단순한 운전 상태·입력/데이터 유효성·HAL 한 곳의 통신 기한 계약을 유지하고 안전 계층을 중첩하지 않습니다. 이번 수정은 문서뿐이며 별도 빌드·시험·실물 CAN 송신은 수행하지 않았습니다. 작업 트리의 기존 `control.yaml` 변경은 보존했습니다.
 
 ## 순차 스토퍼 Zero set — 2026-10-31
 

@@ -1,6 +1,8 @@
+> `logging.runtime_mode: session`은 daemon이 선언한 시뮬레이션 기능을 따릅니다. 연결 실패로 모드를 바꾸지 않습니다. supported/valid/coordinate_valid, 모델 입력 sequence, 구동 상태와 fault도 함께 기록합니다.
+
 # 텔레메트리 기록과 분석
 
-`shm_logger`는 기본 daemon의 선택적 프로세스입니다. **500 Hz 상태·10 Hz 건전성·이벤트·세션 정보를 DataTamer 2.0.0 MCAP에 기록**하고, 기본 5초 이전/2초 이후 Flight Recorder를 함께 운영합니다. 하드웨어 상태는 SHM ABI 14, 시뮬레이션 전용 상태는 별도 simulation IPC로 받으며 기록을 위해 제어 루프에 계측을 추가하지 않습니다. `config/shm_logger/shm_logger.yaml`에서 켜기·끄기·주기·버퍼·저장 정책을 조정합니다.
+`shm_logger`는 기본 daemon의 선택적 프로세스입니다. **500 Hz 상태·10 Hz 건전성·이벤트·세션 정보를 DataTamer 2.0.0 MCAP에 기록**하고, 기본 5초 이전/2초 이후 Flight Recorder를 함께 운영합니다. 하드웨어 상태는 SHM ABI 16, 시뮬레이션 전용 상태는 별도 simulation IPC로 받으며 기록을 위해 제어 루프에 계측을 추가하지 않습니다. `config/shm_logger/shm_logger.yaml`에서 켜기·끄기·주기·버퍼·저장 정책을 조정합니다.
 
 ## 빌드와 시작
 

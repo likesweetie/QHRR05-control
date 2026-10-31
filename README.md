@@ -2,81 +2,80 @@
 
 고정 베이스 3자유도 다리(HR / HP / KP)의 호밍·중력보상·Magnetic Touch·작업공간 Tracking·조이스틱 공 추종을 검증하는 C++ 프로그램입니다. 모델은 제공된 SolidWorks CAD 기반 QHRR-05 몸통과 FL 다리를 사용합니다.
 
-기본 제어 경로는 **TaskController → SHM → CAN HAL → vcan → MuJoCo 가상 모터**입니다. 모터는 수신한 MIT 위치·속도 목표와 kp/kd로 내부 PD를 계산합니다. 관절 위치·속도·Iq는 CAN 응답으로 돌아오며 제어기는 이를 사용합니다. tau_ff는 사용하지 않습니다. 기존 SHM 토크 구동은 `--without-can` 디버깅 모드에만 남겼습니다.
+기본 제어 경로는 **TaskController → SHM → CAN HAL → 물리 CAN 모터**입니다. vcan과 MuJoCo 물리 시뮬레이터는 별도 시뮬레이션 스크립트에서 선택합니다. 실제/가상 모터 모두 같은 관측·명령 계약을 사용하며 모션 제어식은 데이터 출처를 구분하지 않습니다. MuJoCo의 측정 상태 기반 기구학·동역학 계산은 두 경로에서 유지합니다.
 
 ## 빌드와 실행
 
-Linux, CMake 3.22 이상, C++17 컴파일러(DataTamer 내부 빌드는 C++20), pkg-config, yaml-cpp, GLFW/OpenGL, OpenSSL·zstd·lz4 개발 라이브러리가 필요합니다. MuJoCo는 `third_party/mujoco`의 헤더·라이브러리를 사용합니다. GUI 실행에는 디스플레이가 필요합니다.
-
-저장소 루트에서 실행합니다.
+Linux, CMake 3.22 이상, C++17 컴파일러(DataTamer 내부는 C++20), yaml-cpp, GLFW/OpenGL, OpenSSL·zstd·lz4 개발 라이브러리와 스크립트용 Python 3/PyYAML을 사용합니다. 같은 컴퓨터에서 시뮬레이션도 할 수 있도록 기존 빌드 타깃을 유지합니다.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel 2
-./scripts/run_daemon.sh
+cmake --build build --parallel 4
+./scripts/run_daemon.sh          # 기본: 준비된 물리 can0, 시뮬레이터 실행 안 함
+# 웹 패널도 자동 시작: http://127.0.0.1:8080
 ```
 
-daemon은 [프로세스 목록](config/daemon/daemon.yaml)에 따라 **CAN HAL·시뮬레이터·TaskController·조이스틱 입력·shm_logger를 직접 자식으로 실행**하고 종료·자식 회수를 관리합니다. 각 프로그램의 출력과 기본 프로세스 통계를 별도 GNOME 터미널에 표시하며, CAN 창에는 채널 점유율 바도 표시합니다. 창에서는 동일 실행 파일의 출력 전용 함수만 실행하고, 프로세스 수명 관리는 원래 daemon 하나가 담당합니다. 핵심 프로세스의 Ctrl+C·터미널/시뮬레이터 종료 시 나머지도 정리합니다. 선택적 로거의 종료·창 닫기는 로거만 재시작하며 제어를 중단하지 않습니다.
+물리 인터페이스와 비트레이트는 [CAN 설정](config/can_hal/can_hal.yaml)을 확인하십시오. 기본 스크립트는 장치가 없거나 DOWN/비트레이트 불일치이면 명시적으로 실패하며, 네트워크 설정을 바꾸거나 가상 장치로 대체하지 않습니다. daemon은 HAL/control 및 선택적 input/logger/web_gui의 수명을 관리합니다. `--no-terminals`는 자식 출력을 현재 터미널로 모읍니다.
 
-기본 런처는 **호스트 네트워크에 vcan0를 생성하고 UP으로 올린 뒤** daemon을 실행합니다. 이미 UP인 vcan은 재사용하고, DOWN이면 활성화합니다. 같은 이름의 다른 종류 장치는 변경하지 않고 실패합니다. 최초 생성·활성화에 권한이 필요하면 해당 `ip link` 명령에만 sudo를 사용하며 daemon·GUI·제어기는 현재 사용자로 실행합니다. vcan 준비나 HAL 시작 실패를 디버깅 경로로 대체하지 않습니다.
-
-| 실행 | 구성 |
-| --- | --- |
-| `./scripts/run_daemon.sh` | 기본: 호스트 vcan0 생성·활성화 + 전체 프로그램 |
-| `./scripts/run_daemon.sh --isolated-vcan` | 디버깅 전용: 격리 네임스페이스에 vcan0 생성 |
-| `./scripts/run_daemon.sh --existing-can` | 이미 준비된 호스트 CAN 사용. 인터페이스는 HAL YAML에서 지정 |
-| `./scripts/run_daemon.sh --without-can` | 디버깅 전용: CAN 준비와 HAL을 생략하고 `debug_processes` 실행 |
-| 위 명령에 `--no-terminals` 추가 | 명시적 헤드리스 진단: 별도 터미널을 생략하고 자식 출력을 현재 스트림에 연결 |
-
-호스트 vcan0는 daemon 종료 후에도 남습니다. 일반 터미널에서 `ip -details -statistics link show vcan0`로 확인할 수 있습니다. 최초 sudo 인증은 터미널에서 진행합니다. 권한이 없으면 오류로 중단하며 호스트 인터페이스가 없는 채 실행하지 않습니다.
-
-호스트 CAN이 준비되어 있으면 `./build/daemon`을 직접 실행할 수도 있습니다. CAN 없는 디버깅은 `./build/daemon --without-can`으로도 선택합니다. 선택한 모드는 로그에 표시합니다.
-
-프로그램별 옵션은 목록의 `args`에 지정합니다. 다른 목록은 `./build/daemon --config FILE.yaml`로 선택합니다. SHM 이름은 최상위 `shm_name`에서 한 번 정하고, `args`의 `"{shm_name}"` 인자에 치환합니다. daemon이 SHM 생성·초기화·해제를 담당하고 CAN HAL은 소켓을 소유합니다.
-
-기본 MCAP 기록과 5초 이전/2초 이후 Flight Recorder는 daemon이 실행합니다. [로깅 설정·CLI·분석 안내](docs/logging.md)에서 저장 한계·기록 제어·검증 범위를 확인할 수 있습니다. 별도 CSV 진단이 필요하면 명시적으로 실행합니다. 기존 CSV는 덮어쓰지 않습니다.
+### vcan 시뮬레이션
 
 ```bash
-./build/shm_logger --csv /qhrr05 /tmp/qhrr05-new-run.csv
-./build/qhrr-logctl status
-./build/qhrr-logctl trigger
+./scripts/run_simulation.sh                     # vcan0 + MuJoCo OpenGL GUI + 웹 GUI
+./scripts/run_simulation.sh --isolated-vcan     # 독립 네임스페이스 vcan0
+./scripts/run_simulation.sh --without-can       # 직접 effort 디버그; 전류는 취득 불가
+./scripts/run_visualization.sh --simulation    # vcan + headless physics + Filament
 ```
 
-## 제어 모드 빠른 사용
+실행 목록과 CAN 설정은 기본 [daemon.yaml](config/daemon/daemon.yaml)·[can_hal.yaml](config/can_hal/can_hal.yaml)에서 런처가 임시로 생성합니다. 복제한 simulation용 daemon/HAL YAML은 두지 않습니다. [config/simulation/simulation.yaml](config/simulation/simulation.yaml)은 기존 가상 모터의 원점·Iq 센서 특성만 설정합니다. 제어 설정은 [control.yaml](config/control/control.yaml) 하나이며, 모든 경로에서 같은 `simulation` 실행 파일을 사용합니다. 호스트 vcan 준비는 시뮬레이션 스크립트만 수행하며 종료 후 호스트 vcan은 유지됩니다.
 
-시작·리셋은 **Damping**이며 자동 호밍하지 않습니다. **H로 호밍 후 T/1/2/3 또는 B**를 선택합니다. 트래킹은 전체 경로 검사 통과 후 실행하며, 거부 시 이유를 표시하고 자세를 유지합니다.
+### HW_deploy 가상 모터 시험
+
+```bash
+./scripts/run_hw_deploy_test.sh               # 기본: 호스트 vcan0 + MuJoCo OpenGL 창
+./scripts/run_hw_deploy_test.sh --verify      # 창 없이 자동 검증 후 종료
+./scripts/run_hw_deploy_test.sh --verify --isolated-vcan  # 독립 vcan 자동 검증
+```
+
+이 시험은 물리용 daemon/HAL/control 설정을 사용하고 **CAN 인터페이스만 vcan0로 바꾼 뒤 기존 `simulation` 프로세스를 시작합니다.** 같은 물리 루프·가상 모터·OpenGL GUI를 재사용합니다. 제어기는 하드웨어 세션으로 동작하므로 시뮬레이션 IPC/GT/자동 보정 정책을 사용하지 않습니다. 기본 실행은 `/qhrr05` 세션과 MuJoCo OpenGL 창을 엽니다. Z로 제로셋 선택, A로 Arm, X로 Release, H로 호밍을 요청합니다. 창의 제어 명령은 공통 Input을 거치며 창을 닫으면 시험 세션을 종료합니다. `--interactive`는 기본 동작과 같습니다. GUI를 열 수 없으면 오류로 종료합니다.
+
+`--verify`는 DISARMED 시작, 시뮬레이션 명령 거부, 명시적 Arm, 제로셋, 호밍, Release, 제어기 일시 중단에 대한 HAL 명령 만료, fault 해제를 확인하고 종료합니다. 실제 모터로 검증했다는 의미는 아닙니다.
+
+## 조작과 데이터 상태
+
+모든 세션은 **DISARMED**로 시작합니다. 모드 선택만으로 모터 출력이 켜지지 않습니다. 웹 또는 GUI에서 Arm/Release를 사용하며, 터미널에서도 같은 Input 인터페이스로 요청할 수 있습니다.
+
+```bash
+./build/input --command /qhrr05 mode 6 0      # Zero set 선택
+./build/input --command /qhrr05 arm          # 출력 허용
+./build/input --command /qhrr05 release      # 출력 해제
+./build/input --command /qhrr05 clear-fault  # 원인 해소 후 DISARMED로 복귀
+```
+
+실제 장치 세션은 엔코더를 수신했다고 보정 완료로 간주하지 않습니다. 일반 모션 전에 영점 보정이 필요합니다. 제로셋은 엔코더·속도·Iq×Kt 환산 토크를 사용하고 ROM을 쓰지 않습니다. 자세한 설정은 [제어 문서](docs/control.md)를 참고하십시오. 자동 시뮬레이션 시작 정책도 일반 작업 선택으로 전달하며 출력에는 Arm이 필요합니다.
 
 | 키 | 기능 |
 | --- | --- |
-| D / H | 감쇠 / 호밍 |
-| G / M | 중력 또는 전체 bias 보상 / Magnetic Touch |
-| T / 1 / 2 / 3 | 마지막 평면 / XY / XZ / YZ 무한대 궤적 |
-| B / W | 조이스틱 공 추종 / 조건수 기반 작업공간 표시 |
-| Space / R / Esc | 물리 일시정지 / Damping으로 리셋 / 종료 |
+| A / X | Arm / Release |
+| Z / D / H | 제로셋 / 감쇠 / 호밍 |
+| G / M | 중력 보상 / 접촉 추종 |
+| T / 1 / 2 / 3 | 궤적 / XY / XZ / YZ |
+| B / W | 공 추종 / 작업공간 표시 |
+| Space / R / Ctrl 드래그 | 시뮬레이션에서만 pause / reset / 외란 |
 
-Ctrl+오른쪽 드래그로 선택한 다리에 외력을 주거나 주황색 물체를 이동합니다. **상태 머신·IDFF/CTC/ILC·가속도 프로파일·검사 기준·조이스틱·Iq 센서**는 [제어 모드와 시뮬레이션](docs/control.md)에서 관리합니다.
-
-React/WebSocket 기반 [웹 제어 패널](docs/web_gui.md)도 사용할 수 있습니다. 웹·MuJoCo GUI·조이스틱 입력은 Input 인터페이스와 기본 안전 검사를 거쳐 TaskController에 전달합니다. daemon이 실행 중일 때 `./scripts/run_web_gui.sh`로 로컬 패널을 엽니다. 최초 준비는 `./scripts/run_web_gui.sh --setup`을 사용하며 실행·검증 상세는 링크 문서를 따릅니다.
-
-데몬 런처는 필요한 실행 파일이 없으면 `build/`를 구성하고 자동 빌드한 뒤 시작합니다. 데몬뿐 아니라 simulation/control/CAN HAL/input/logger 누락도 검사합니다. `QHRR_BUILD_JOBS=4`로 병렬 빌드 수를 지정할 수 있습니다. 빌드 실패 시 실행을 중단하며 다른 모드로 전환하지 않습니다.
+취득 가능, 미수신, 오래됨, 미보정, 유효한 0을 구분합니다. 원시 엔코더와 보정된 관절 좌표, Iq×Kt 환산 토크와 직접 토크 측정, 모델 FK와 실측/GT는 같은 의미로 표시하지 않습니다. 시뮬레이션 전용 데이터는 기존 별도 IPC에 남고 공통 SHM에는 관측·계산·제어 상태와 유효성을 저장합니다. **SHM ABI 16**이므로 참여 프로세스를 모두 다시 빌드하고 재시작해야 합니다.
 
 ## Filament PBR 시각화
 
-기존 개발용 실행은 위와 같습니다. 별도 [시각화 실행 안내](docs/visualization.md)의 런처는 기존 물리·제어 실행 파일과 독립적인 Vulkan 렌더러를 실행합니다. 물리는 기존 MuJoCo 3.3.2를 사용하고, 시각화 전용 MuJoCo는 3.16.0으로 고정합니다.
-
 ```bash
-./scripts/build_visualization.sh          # 필요하면 별도로 미리 빌드할 수 있습니다.
-./scripts/run_visualization.sh            # 새 CAN/물리/제어/시각화 세션
-./scripts/run_web_gui.sh                  # 별도 터미널: Input/안전레이어를 거치는 제어 패널
+./scripts/build_visualization.sh
+./scripts/run_visualization.sh              # 실행 중인 물리/가상 장치 세션 관측
+./scripts/run_visualization.sh --simulation # 별도 시뮬레이션 세션 시작
+./scripts/run_visualization.sh --preview    # 정적 모델 미리보기
 ```
 
-비주얼라이저 실행 파일이나 셰이더가 없으면 런처가 고정된 의존성을 준비하고 자동 빌드합니다. `build-filament/` 전체를 지운 경우 첫 실행에는 다운로드와 수 분의 빌드가 필요합니다. 동시에 실행한 런처는 빌드 잠금을 기다립니다. 웹 런처에는 이 C++ 자동 빌드를 추가하지 않았습니다.
+물리 세션에서는 CAN 관절 좌표로 렌더링 전용 데이터의 FK만 갱신합니다. 시뮬레이션 GT가 없어도 갱신되며 물리 적분은 하지 않습니다. 아직 관절 좌표가 유효하지 않으면 자세가 확정되지 않았음을 표시합니다. 기존 카메라·재질·8x MSAA·고정 내부 해상도 기능을 유지합니다. 시뮬레이션 전용 조작은 해당 기능이 제공되는 세션에서만 활성화합니다.
 
-새 창에서 모드별 그래프·작업 단축키·Ctrl 드래그 외란·물체 조작·발끝 잔상·작업공간을 제공합니다. 명령은 Input → 안전레이어 → TaskController를 거치며, SHM에 직접 쓰지 않습니다. **SHM ABI 14 변경 후에는 모든 실행 파일을 재빌드하고 세션을 다시 시작해야 합니다.**
-
-Filament의 기본 시각화는 4K 브러시드 금속 맵·이방성 반사·소프트박스 IBL·밝은 스튜디오 조명과 **8x MSAA + 고정 1.333333배 내부 해상도**를 사용합니다. 1920×1080의 3D 영역은 내부에서 약2560×1440으로 그립니다. `--msaa 4 --render-scale 1`로 비용을 줄이거나 `--render-scale 2`로 4K 내부 렌더링을 선택할 수 있습니다. 스크린샷에도 같은 품질 설정이 적용됩니다. 물리 모델과 제어 설정은 유지합니다.
-
-실행 중인 세션에 창을 붙일 때는 `./scripts/run_visualization.sh --attach`를 사용합니다. `--preview`는 물리 계산 없는 정적 모델 미리보기입니다. `--backend classic`으로 독립 뷰어의 기존 `mjr` OpenGL 구현을 선택할 수 있습니다. Filament는 RTX 5090 Vulkan 장치를 확인하며, 초기화 실패를 다른 GPU·소프트웨어·Classic으로 대체하지 않습니다.
+필요한 native 실행 파일이나 렌더링 자산이 없으면 해당 런처가 자동 빌드합니다. 소스를 수정한 뒤에는 직접 다시 빌드하십시오. 웹 런처에는 C++ 자동 빌드를 추가하지 않습니다.
 
 ## 설정과 코드 위치
 
@@ -84,7 +83,7 @@ Filament의 기본 시각화는 4K 브러시드 금속 맵·이방성 반사·�
 | --- | --- |
 | [control.yaml](config/control/control.yaml) | 제어 주파수, 각 모션의 게인·목표·한계, RFOB, 그래프 주기 |
 | [input.yaml](config/input/input.yaml) | 조이스틱 장치·축·트리거·데드밴드 |
-| [daemon.yaml](config/daemon/daemon.yaml) | SHM 이름·기본 `processes`와 명시적 CAN 없는 `debug_processes` |
+| [daemon.yaml](config/daemon/daemon.yaml) | SHM 이름·기본 물리 CAN 프로세스 |
 | [can_hal.yaml](config/can_hal/can_hal.yaml) | HAL 인터페이스·주기·CAN ID 배치·모터 설정 경로 |
 | [simulation.yaml](config/simulation/simulation.yaml) | 시뮬레이션 실제 모터 특성·가상 Iq 센서 ON/OFF·오차 파라미터 |
 | [ak10_9_v3.yaml](config/motor/ak10_9_v3.yaml) | 모터 MIT 규약: V_MAX·T_MAX·Kt·감속비·Kd scale |
@@ -108,7 +107,7 @@ Filament의 기본 시각화는 4K 브러시드 금속 맵·이방성 반사·�
 
 ## 프로세스 터미널과 SHM 통계
 
-기본 실행은 HAL·시뮬레이터·TaskController·로거마다 터미널을 하나씩 엽니다. 추가한 프로세스도 자동으로 별도 창을 받습니다. 창 상단에는 PID·상태·직전 관측 간격의 CPU 사용률·RSS·스레드 수·가동 시간을 **2초마다** 갱신합니다. CPU는 여러 코어를 사용하면 100%를 넘을 수 있습니다. CAN 창에는 기존 모터 상태와 점유율도 같은 고정 영역에 표시합니다.
+기본 실행은 HAL·TaskController·로거 등 설정된 프로세스마다 터미널을 하나씩 엽니다. 시뮬레이션 프로파일에서는 시뮬레이터 창도 추가됩니다. 창 상단에는 PID·상태·직전 관측 간격의 CPU 사용률·RSS·스레드 수·가동 시간을 **2초마다** 갱신합니다. CPU는 여러 코어를 사용하면 100%를 넘을 수 있습니다. CAN 창에는 기존 모터 상태와 점유율도 같은 고정 영역에 표시합니다.
 
 통계 갱신은 로그 영역을 스크롤하지 않습니다. 실제 stdout/stderr는 하단 로그 영역과 실행별 `logs/run-<epoch_ms>-<daemon_pid>/<process>.log`에 함께 기록합니다. 통계 패널은 이 파일에 섞지 않습니다. 시작 실패 메시지도 기록하며, 정상 종료 시 프로그램을 먼저 종료하고 릴레이가 EOF까지 읽은 뒤 창을 닫습니다. 창 크기가 아직 0이거나 너무 작으면 명시적인 대기/잘림 안내를 표시합니다. 로그는 계속 전달됩니다. 기본 실행은 아래 자동 배치로 충분한 작업 영역을 확보합니다.
 
@@ -132,7 +131,7 @@ monitoring:
   sample_hz: 100.0          # 1~1000 Hz; 제어 주기와 무관
 ```
 
-기본 `terminal_layout`은 **보조 모니터가 있으면 첫 보조 모니터**, 없으면 주 모니터를 선택하며 선택 결과를 `[layout]` 로그에 출력합니다. 운영체제 패널을 제외한 작업 영역에 2열로 배치하고, 마지막 줄에 창 하나만 남으면 그 줄의 전체 폭을 사용합니다. daemon을 일반 GNOME 터미널에서 실행하면 그 창도 포함해 기본 다섯 창을 2열로 정렬합니다. stdout을 파일로 연결하면 실제 호출 창이 없으므로 자식 터미널만 배치합니다.
+기본 `terminal_layout`은 **보조 모니터가 있으면 첫 보조 모니터**, 없으면 주 모니터를 선택하며 선택 결과를 `[layout]` 로그에 출력합니다. 운영체제 패널을 제외한 작업 영역에 2열로 배치하고, 마지막 줄에 창 하나만 남으면 그 줄의 전체 폭을 사용합니다. daemon을 일반 GNOME 터미널에서 실행하면 그 창도 배치에 포함합니다. stdout을 파일로 연결하면 실제 호출 창이 없으므로 자식 터미널만 배치합니다.
 
 `monitor`는 `auto`, `primary`, 또는 `xrandr --listmonitors`에 표시되는 이름(예: `DP-2`)입니다. `columns`는 1~8, 여백·간격은 0~200 px, 자식 터미널 `zoom`은 0.5~2.0으로 조정합니다. 기존 호출 터미널의 글꼴 설정은 유지합니다. IDE 내장 터미널처럼 독립된 호출 창을 찾을 수 없는 경우에는 `include_daemon: false`를 명시합니다. 배치는 **시작 시에만** 적용하므로 이후 사용자가 창을 자유롭게 옮길 수 있습니다.
 
@@ -168,7 +167,7 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 공유 영역은 기본 **`/qhrr05` 하나**이며 이름은 daemon 설정의 `shm_name`으로 지정합니다. CAN 사용 여부와 관계없이 daemon이 자식 실행 전에 생성·초기화하고, 모든 자식을 종료한 뒤 해제합니다. HAL·시뮬레이터·제어기·로거는 연결만 하며, 영역이 없으면 명시적으로 실패합니다. 기존 객체는 재사용·삭제하지 않습니다. daemon이 SIGKILL되면 정리할 수 없으므로 남은 객체는 다음 실행에서 충돌로 보고합니다.
 
-[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **14**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
+[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **16**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
 
 | 영역 | 데이터와 작성자 |
 | --- | --- |

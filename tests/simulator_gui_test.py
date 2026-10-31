@@ -28,9 +28,15 @@ def simulator(directory, name):
         )
     try:
 
+        armed = False
         def ready():
+            nonlocal armed
             assert process.poll() is None, log.read_text()
-            return find_window('MuJoCo simulate.*qhrr-05') if '[control] DAMPING target captured:' in log.read_text() else None
+            window = find_window('MuJoCo simulate.*qhrr-05')
+            if window and not armed:
+                event('key', '--window', window, 'a')
+                armed = True
+            return window if '[control] DAMPING target captured:' in log.read_text() else None
 
         window = wait_for(ready, log.read_text, timeout=25)
         event('windowsize', window, 1600, 900)

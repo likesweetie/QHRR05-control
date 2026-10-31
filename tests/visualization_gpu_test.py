@@ -14,6 +14,7 @@ import sys
 import tempfile
 
 import yaml
+from daemon_test_config import default_simulation_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools/analysis"))
@@ -47,7 +48,7 @@ def physics_case(directory, renderer_delay):
     logger["logging"]["flight_recorder"]["enabled"] = False
     logger_path = directory / "logger.yaml"
     logger_path.write_text(yaml.safe_dump(logger))
-    config = yaml.safe_load((ROOT / "config/daemon/visualization.yaml").read_text())
+    config = default_simulation_manifest(directory / "session", ROOT / "config/daemon/visualization.yaml")
     config["shm_name"] = shm
     config["log_directory"] = str(directory / "logs")
     config["processes"] = [p for p in config["processes"] if p["name"] != "input"]

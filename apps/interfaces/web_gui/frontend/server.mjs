@@ -6,6 +6,7 @@ import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { sendInputRequest } from "./input-client.mjs";
+import { Supervisor } from "./supervisor.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../../../..");
@@ -42,12 +43,16 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
 }
 
 const dist = resolve(here, "dist");
+const supervisor = new Supervisor(options["shm-name"]);
+supervisor.poll();
+const supervisorTimer = setInterval(() => supervisor.poll(), 1000);
 const clients = new Set();
 const pending = new Map();
 let state = null;
 let nextId = 0;
 let shuttingDown = false;
 let started = false;
+let adminBusy = false;
 const child = spawn(
   options.bridge,
   [options["shm-name"], options["control-config"]],
@@ -82,7 +87,10 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://localhost");
     const path = decodeURIComponent(url.pathname);
-    const file = resolve(dist, `.${path === "/" ? "/index.html" : path}`);
+    const file = resolve(
+      dist,
+      `.${["/", "/processes", "/shm"].includes(path) ? "/index.html" : path}`,
+    );
     const childPath = relative(dist, file);
     if (childPath.startsWith("..") || isAbsolute(childPath)) {
       response.writeHead(403).end("Invalid path");
@@ -164,10 +172,60 @@ wss.on("connection", (client) => {
       const allowed =
         request.type === "mode"
           ? ["id", "type", "mode", "plane"]
-          : ["id", "type", "value"];
+          : request.type === "force"
+            ? ["id", "type", "value"]
+            : ["motor-enable", "motor-disable"].includes(request.type)
+              ? ["id", "type", "axis"]
+              : request.type === "process"
+                ? ["id", "type", "name", "action"]
+                : request.type === "stack"
+                  ? ["id", "type", "action"]
+                  : ["id", "type"];
       if (Object.keys(request).some((key) => !allowed.includes(key)))
         throw new Error("Unexpected command fields");
-      if (request.type === "mode") {
+      if (["process", "stack"].includes(request.type)) {
+        if (!["start", "stop"].includes(request.action))
+          throw new Error("Invalid process action");
+        if (
+          request.type === "process" &&
+          (typeof request.name !== "string" ||
+            !/^[\w.-]{1,80}$/.test(request.name))
+        )
+          throw new Error("Invalid managed process name");
+        if (!supervisor.state.available)
+          throw new Error("Daemon supervisor is unavailable");
+        if (adminBusy)
+          throw new Error("A supervisor command is already pending");
+        adminBusy = true;
+        const command =
+          request.type === "stack"
+            ? `stack ${request.action}`
+            : `process ${request.name} ${request.action}`;
+        supervisor
+          .request(command)
+          .then((reply) =>
+            send(client, {
+              ...reply,
+              id: request.id,
+              stage: "supervisor_applied",
+            }),
+          )
+          .catch((error) =>
+            reject(client, request.id, error.message, error.uncertain),
+          )
+          .finally(() => {
+            adminBusy = false;
+          });
+        return;
+      }
+      if (["motor-enable", "motor-disable"].includes(request.type)) {
+        if (
+          !Number.isInteger(request.axis) ||
+          request.axis < -1 ||
+          request.axis > 2
+        )
+          throw new Error("Invalid motor axis");
+      } else if (request.type === "mode") {
         if (
           !Number.isInteger(request.mode) ||
           request.mode < 0 ||
@@ -186,7 +244,8 @@ wss.on("connection", (client) => {
           request.value > state.maximum_force
         )
           throw new Error("Target force is outside configured limits");
-      } else throw new Error("Unsupported command");
+      } else if (!["arm", "release", "clear-fault"].includes(request.type))
+        throw new Error("Unsupported command");
       if (!state?.ready) throw new Error("Control session is not ready");
       if (pending.size >= 8) throw new Error("Command queue is full");
       if (
@@ -200,7 +259,11 @@ wss.on("connection", (client) => {
       const command =
         request.type === "mode"
           ? `mode ${request.mode} ${request.plane}`
-          : `force ${request.value}`;
+          : request.type === "force"
+            ? `force ${request.value}`
+            : ["motor-enable", "motor-disable"].includes(request.type)
+              ? `${request.type} ${request.axis}`
+              : request.type;
       sendInputRequest(inputSocket, id, command)
         .then((reply) => send(client, { ...reply, id: request.id }))
         .catch((error) =>
@@ -222,6 +285,8 @@ function stop(code, message) {
   shuttingDown = true;
   if (message) console.error(`[web_gui] ${message}`);
   clearTimeout(startup);
+  clearInterval(supervisorTimer);
+  supervisor.close();
   pending.clear();
   for (const client of clients) client.terminate();
   child.stdin.end();
@@ -231,7 +296,14 @@ function stop(code, message) {
   process.exitCode = code;
 }
 
-server.on("error", (error) => stop(1, error.message));
+server.on("error", (error) =>
+  stop(
+    1,
+    error.code === "EADDRINUSE"
+      ? `Port ${port} is already in use. Stop the previous web GUI or explicitly select another port with --port. No port was changed automatically.`
+      : error.message,
+  ),
+);
 child.on("error", (error) => stop(1, `Bridge failed: ${error.message}`));
 child.stdin.on("error", (error) =>
   stop(1, `Command pipe failed: ${error.message}`),
@@ -251,8 +323,12 @@ createInterface({ input: child.stdout }).on("line", (line) => {
   try {
     const message = JSON.parse(line);
     if (message.type === "state") {
-      state = message;
-      for (const client of clients) send(client, message);
+      state = {
+        ...message,
+        session: options["shm-name"],
+        runtime: supervisor.state,
+      };
+      for (const client of clients) send(client, state);
       if (!started) {
         started = true;
         clearTimeout(startup);

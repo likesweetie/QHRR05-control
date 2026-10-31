@@ -11,7 +11,7 @@
 #include <string>
 #include "ipc/shm_utils.hpp"
 #include "interfaces/input/interface.hpp"
-#include "ipc/simulation/channel.hpp"
+#include "interfaces/observations.hpp"
 #include "safety/safety_layer.hpp"
 
 namespace qhrr05 {
@@ -33,13 +33,16 @@ private:
     shm_utils::Mapping shm_;
     InputInterface input_;
     SafetyLayer safety_;
-    simulation_ipc::Client simulation_channel_;
-    SimulationApproval simulation_approval_{};
-    std::string last_simulation_error_;
-    std::string last_input_rejection_;
-    bool without_can_ = false;
+    InputContext input_context_{};
+    JointObservation observation_{};
+    DriveState drive_state_ = DriveState::Disarmed;
+    std::uint64_t drive_request_sequence_ = 0, clear_fault_sequence_ = 0;
+    bool clearing_transport_fault_ = false;
+    double armed_at_ = 0, startup_timeout_ = 2;
+    std::string fault_reason_, last_input_rejection_;
+    void Fault(const std::string& reason);
     std::string config_path_;
-    bool zero_required_ = false, zero_policy_seen_ = false, zero_ready_ = false;
+    bool zero_required_ = false, zero_ready_ = false;
     bool zero_started_ = false;
     double zero_clock_ = 0, zero_last_control_time_ = 0;
     std::array<bool, 3> zero_applied_{};
@@ -61,6 +64,7 @@ private:
     // Previous samples are retained only for acceleration and fresh-sample tracking.
     std::array<std::uint64_t, 3> previous_received_sequence_{}, previous_received_ns_{};
     std::array<double, 3> previous_velocity_{};
+    std::array<bool, 3> acceleration_valid_{};
 
     double target_force_ = 3.0;
     int mode_ = -1, requested_mode_ = 5;
@@ -88,5 +92,6 @@ private:
     std::array<double, 3> torque_limits_{};
     std::array<MitCommand, 3> motor_targets_{};
     bool motor_commands_enabled_ = false;
+    std::array<bool, 3> enabled_axes_{};
 };
 }  // namespace qhrr05

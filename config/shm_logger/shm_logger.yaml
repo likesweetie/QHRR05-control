@@ -2,7 +2,7 @@
 logging:
   enabled: true
   auto_start: true
-  runtime_mode: simulation  # hardware omits all simulation Ground Truth fields.
+  runtime_mode: session  # Use the declared session capability; never infer from connection failures.
   session_label: experiment
   sampling_rate_hz: 500.0
   health_rate_hz: 10.0

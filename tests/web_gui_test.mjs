@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { access } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { createConnection, createServer } from "node:net";
 import { createRequire } from "node:module";
 import { get } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -10,9 +11,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const { WebSocket } = createRequire(resolve(root, "apps/interfaces/web_gui/frontend/package.json"))(
-  "ws",
-);
+const { WebSocket } = createRequire(
+  resolve(root, "apps/interfaces/web_gui/frontend/package.json"),
+)("ws");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function waitFor(predicate, detail = () => "", timeout = 5000) {
   const deadline = Date.now() + timeout;
@@ -168,7 +169,12 @@ test(
       fixture.stdin.write("gui-homing\n");
       await waitFor(() => state.mode === 0);
       fixture.stdin.write("gui-invalid\n");
-      await waitFor(() => state.requested_mode === 99);
+      await delay(75);
+      assert.equal(
+        state.requested_mode,
+        0,
+        "rejected request was retained for later execution",
+      );
       await waitFor(() =>
         controller.logs.includes("safety rejected request: invalid mode"),
       );
@@ -249,5 +255,190 @@ test(
     assert.equal(code, 1);
     assert.match(server.logs, /shm_open/);
     assert.doesNotMatch(server.logs, /http:\/\/127/);
+  },
+);
+
+test(
+  "Port collision is explicit; closing the SHM session releases the web port",
+  { timeout: 12000 },
+  async () => {
+    const name = `/qhrr05-web-lifecycle-${process.pid}`;
+    let fixture, server, duplicate;
+    try {
+      fixture = start(resolve(root, "build/web_gui_fixture"), [name]);
+      await waitFor(
+        () => fixture.logs.includes("ready"),
+        () => fixture.logs,
+      );
+      const launch = (port) =>
+        start(process.execPath, [
+          "apps/interfaces/web_gui/frontend/server.mjs",
+          "--port",
+          String(port),
+          "--shm-name",
+          name,
+          "--control-config",
+          "tests/fixtures/control.yaml",
+        ]);
+      server = launch(0);
+      const url = await waitFor(
+        () => server.logs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0],
+        () => server.logs,
+      );
+      const port = Number(new URL(url).port);
+      duplicate = launch(port);
+      await waitFor(
+        () => duplicate.exitCode !== null,
+        () => duplicate.logs,
+      );
+      assert.equal(duplicate.exitCode, 1);
+      assert.match(duplicate.logs, /already in use.*Stop the previous web GUI/);
+      assert.doesNotMatch(duplicate.logs, /http:\/\/127/);
+      assert.equal((await fetch(url)).status, 200);
+
+      fixture.stdin.end();
+      await fixture.done;
+      await waitFor(
+        () => server.exitCode !== null,
+        () => server.logs,
+      );
+      assert.equal(server.exitCode, 1);
+      assert.match(server.logs, /SHM session ended or was replaced/);
+      // No orphaned listener remains for the next daemon's automatically started UI.
+      const listener = createServer();
+      const listening = once(listener, "listening");
+      listener.listen(port, "127.0.0.1");
+      await listening;
+      await new Promise((resolve, reject) =>
+        listener.close((error) => (error ? reject(error) : resolve())),
+      );
+    } finally {
+      await stop(duplicate);
+      await stop(server);
+      if (fixture && fixture.exitCode === null) {
+        fixture.stdin.end();
+        await fixture.done;
+      }
+    }
+  },
+);
+
+test(
+  "Web supervisor manages actual registered processes and restarts a stopped stack",
+  { timeout: 25000 },
+  async () => {
+    const name = `/qhrr-web-supervisor-${process.pid}`;
+    const folder = await mkdtemp(resolve(tmpdir(), "qhrr-web-supervisor-"));
+    const manifest = resolve(folder, "daemon.json");
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        runtime_mode: "hardware",
+        shm_name: name,
+        monitoring: { display_interval_sec: 2, window_sec: 10, sample_hz: 100 },
+        processes: [
+          { name: "core", exec_path: "/bin/sleep", args: ["60"] },
+          {
+            name: "worker",
+            exec_path: "/bin/sleep",
+            args: ["60"],
+            critical: false,
+          },
+        ],
+      }),
+    );
+    let daemon, server, ws;
+    try {
+      daemon = start(resolve(root, "build/daemon"), [
+        "--config",
+        manifest,
+        "--no-terminals",
+      ]);
+      await waitFor(
+        () => daemon.logs.includes("worker started"),
+        () => daemon.logs,
+      );
+      server = start(resolve(root, "scripts/run_web_gui.sh"), [
+        "--port",
+        "0",
+        "--shm-name",
+        name,
+        "--control-config",
+        "tests/fixtures/control.yaml",
+      ]);
+      const url = await waitFor(
+        () => server.logs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0],
+        () => server.logs,
+      );
+      for (const route of ["/", "/processes", "/shm"])
+        assert.equal((await fetch(url + route)).status, 200);
+      let state;
+      const replies = new Map();
+      ws = new WebSocket(url.replace("http:", "ws:") + "/ws", { origin: url });
+      ws.on("message", (bytes) => {
+        const m = JSON.parse(bytes);
+        if (m.type === "state") state = m;
+        else replies.set(m.id, m);
+      });
+      await once(ws, "open");
+      await waitFor(() => state?.runtime?.available);
+      assert.equal(
+        state.ready,
+        false,
+        "Supervisor must remain available without a running controller",
+      );
+      let id = 0;
+      const request = async (command) => {
+        const n = ++id;
+        ws.send(JSON.stringify({ ...command, id: n }));
+        return waitFor(() => replies.get(n));
+      };
+      let reply = await request({
+        type: "process",
+        name: "worker",
+        action: "stop",
+      });
+      assert.equal(reply.stage, "supervisor_applied");
+      assert.equal(reply.type, "ack");
+      await waitFor(
+        () =>
+          state.runtime.processes.find((p) => p.name === "worker").running ===
+          false,
+      );
+      reply = await request({
+        type: "process",
+        name: "worker",
+        action: "start",
+      });
+      assert.equal(reply.type, "ack");
+      await waitFor(
+        () =>
+          state.runtime.processes.find((p) => p.name === "worker").running ===
+          true,
+      );
+      reply = await request({ type: "process", name: "core", action: "stop" });
+      assert.equal(reply.type, "error");
+      reply = await request({
+        type: "process",
+        name: "../../control",
+        action: "start",
+      });
+      assert.equal(reply.type, "error");
+      reply = await request({ type: "stack", action: "stop" });
+      assert.equal(reply.type, "ack");
+      await waitFor(() => state.runtime.state === "STOPPED");
+      reply = await request({ type: "stack", action: "start" });
+      assert.equal(reply.type, "ack");
+      await waitFor(
+        () =>
+          state.runtime.state === "RUNNING" &&
+          state.runtime.processes.every((p) => p.running),
+      );
+    } finally {
+      ws?.terminate();
+      await stop(server);
+      await stop(daemon);
+      await rm(folder, { recursive: true, force: true });
+    }
   },
 );

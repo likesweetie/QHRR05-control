@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-mode=session
+mode=attach
 setup=0
 daemon_config="$project_dir/config/daemon/visualization.yaml"
 custom_config=0
@@ -12,9 +12,9 @@ while (($#)); do
     case "$1" in
         --setup) setup=1; shift ;;
         --config) daemon_config="$(realpath -- "${2:?--config requires a path}")"; custom_config=1; shift 2 ;;
-        --attach|--preview)
-            [[ "$mode" == session ]] || { echo '--attach and --preview cannot be combined' >&2; exit 1; }
-            mode="${1#--}"; shift ;;
+        --attach|--preview|--simulation)
+            [[ "$mode" == attach ]] || { echo '--attach and --preview cannot be combined' >&2; exit 1; }
+            mode="${1#--}"; [[ "$mode" != simulation ]] || mode=session; shift ;;
         --backend) export QHRR_VISUALIZATION_BACKEND="${2:?--backend requires a value}"; shift 2 ;;
         --msaa) export QHRR_VISUALIZATION_MSAA="${2:?--msaa requires a value}"; shift 2 ;;
         --render-scale) export QHRR_VISUALIZATION_RENDER_SCALE="${2:?--render-scale requires a value}"; shift 2 ;;
@@ -27,7 +27,7 @@ while (($#)); do
         --help)
             cat <<'USAGE'
 usage: run_visualization.sh [--setup] [--backend filament|classic] [--fps 60]
-  Default: a NEW daemon session using headless physics and the separate viewer.
+  Default: observe the running session. --simulation starts an explicit simulation session.
   --isolated-vcan | --existing-can | --without-can; --no-terminals
   --config FILE.yaml: select an explicit daemon manifest for a new session
   --attach: add an operator/graph window to a RUNNING session (--shm-name /qhrr05)
@@ -66,7 +66,7 @@ source "$project_dir/scripts/ensure_build.sh"
 qhrr_ensure_visualization_build "$project_dir" "$setup"
 if [[ "$mode" == session ]]; then
     cd "$project_dir"
-    exec "$project_dir/scripts/run_daemon.sh" --config "$daemon_config" "${daemon_args[@]}"
+    exec "$project_dir/scripts/run_simulation.sh" --config "$daemon_config" "${daemon_args[@]}"
 fi
 if [[ "$mode" == preview ]]; then viewer_args+=(--preview); fi
 exec "$project_dir/scripts/visualization_process.sh" "${viewer_args[@]}"

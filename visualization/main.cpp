@@ -219,7 +219,18 @@ struct StateBinding {
             throw std::runtime_error("SHM object_position requires mocap body touch_object");
     }
 
-    void Apply(const SimulationData& snapshot, mjData* data) const {
+    void Apply(const Snapshot& state, mjData* data) const {
+        if (!state.simulation_available) {
+            for (int i = 0; i < 3; ++i) {
+                data->qpos[qpos[i]] =
+                    state.motor.position_offset[i] + state.motor.feedback[i].position;
+                data->qvel[qpos[i]] = state.motor.feedback[i].velocity;
+            }
+            data->mocap_pos[3 * mocap] = 5;  // No physical object pose sensor exists.
+            data->time = state.control.control_time;
+            return;
+        }
+        const auto& snapshot = state.simulation;
         if (!std::isfinite(snapshot.time))
             throw std::runtime_error("non-finite simulation time in snapshot");
         for (int i = 0; i < 3; ++i) {
@@ -258,7 +269,7 @@ struct Interaction {
     mjvPerturb perturb{};
     mjvScene pick_scene{};
     RenderingConfig rendering;
-    bool wrench = false;
+    bool wrench = false, simulation_controls = false;
     bool capture = false;
     double x = 0, y = 0, last_click = -1;
     int view_width = 1600, view_height = 1000;
@@ -292,12 +303,12 @@ struct Interaction {
 
     void Release() {
         perturb.active = 0;
-        if (input)
+        if (input && simulation_controls)
             input->ReleasePerturb();
     }
 
     void RefreshDrag() {
-        if (!input || !perturb.active)
+        if (!input || !simulation_controls || !perturb.active)
             return;
         const char* name = mj_id2name(model, mjOBJ_BODY, perturb.select);
         if (!name || std::strlen(name) >= PerturbTarget{}.body.size())
@@ -365,7 +376,7 @@ struct Interaction {
                     return;
                 }
                 if ((mods & GLFW_MOD_CONTROL) && ui.perturb.select > 0) {
-                    if (!ui.input) {
+                    if (!ui.input || !ui.simulation_controls) {
                         ui.panel->Error("Perturbation requires a live simulation");
                         return;
                     }
@@ -628,29 +639,30 @@ int main(int argc, char** argv) {
             glfwPollEvents();
             if (source) {
                 snapshot = source->Latest();
+                ui.simulation_controls = snapshot.simulation_available;
                 panel.Update(snapshot, source->Drain(), source->Dropped());
                 if (snapshot.failed)
-                    throw std::runtime_error("simulation session failed");
+                    throw std::runtime_error("device session failed");
                 if (snapshot.stopping || snapshot.finished)
                     break;
-                const bool stale =
-                    !snapshot.simulation.published_ns ||
-                    shm_utils::MonotonicNs() - snapshot.simulation.published_ns > 500000000;
+                const bool stale = !snapshot.pose_valid || !snapshot.published_ns ||
+                                   shm_utils::MonotonicNs() - snapshot.published_ns > 500000000;
                 if (stale && !stale_reported)
                     std::cerr
-                        << "[visualizer] STALE/WAITING: no fresh simulation snapshot; pose is held\n";
+                        << "[visualizer] STALE/WAITING: no valid current joint pose; pose is held\n";
                 if (!stale && stale_reported)
-                    std::cout << "[visualizer] fresh simulation snapshots resumed\n";
+                    std::cout << "[visualizer] valid joint observations resumed\n";
                 stale_reported = stale;
-                if (snapshot.simulation.published_ns) {
-                    binding->Apply(snapshot.simulation, data.get());
+                if (snapshot.pose_valid) {
+                    binding->Apply(snapshot, data.get());
                     UpdateVisualState(model.get(), data.get());
                 }
             }
             glfwGetFramebufferSize(window.get(), &width, &height);
             if (width > 0 && height > 0) {
-                debug_geometry = ui.wrench && source ? ContactWrench(snapshot.simulation)
-                                                     : std::vector<mjvGeom>{};
+                debug_geometry = ui.wrench && source && snapshot.simulation_available
+                                     ? ContactWrench(snapshot.simulation)
+                                     : std::vector<mjvGeom>{};
                 ui.RefreshDrag();
                 ui.UpdatePickScene();
                 ui.pick_scene.ngeom = 0;

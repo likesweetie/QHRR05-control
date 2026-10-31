@@ -98,7 +98,9 @@ int main(int argc, char** argv) {
         std::ofstream(motor_profile)
             << "mit: {velocity_max_rad_s: 45, torque_max_nm: 53, kt_output_nm_a: 1.4404, gear_ratio: 9, kd_scale: 1}\n";
         std::ofstream(config)
-            << "interface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nbus_load_bitrate: 1000000\nmotor_ids: [1, 2, 3]\nmotor_config: "
+            << "interface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nbus_load_bitrate: 1000000\n"
+               "command_timeout_sec: 1.0\nfeedback_timeout_sec: 0.25\nenable_timeout_sec: 1.0\npoll_released: false\n"
+               "motor_ids: [1, 2, 3]\nmotor_config: "
             << std::filesystem::path(motor_profile).filename().string() << "\n";
 
         owner = std::make_unique<shm_utils::Mapping>(name, true);
@@ -224,9 +226,8 @@ int main(int argc, char** argv) {
             return WEXITSTATUS(status);
         };
 
-        Require(command(0, "NaN") == 1, "CLI accepted non-finite q target");
-        Require(command(0, "0.1") == 0 && command(1, "0.2") == 0 && command(2, "0.3") == 0,
-            "position target CLI failed");
+        Require(command(0, "NaN") == 1 && command(0, "0.1") == 1,
+            "removed HAL CLI accepted a direct command bypassing Input");
 
         {
             shm_utils::Lock lock(shm);

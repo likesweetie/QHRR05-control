@@ -8,6 +8,7 @@ workspace:  # 트래킹 실행 검사와 공 추종·W 오버레이가 함께 �
   maximum_condition_number: 10.0  # 위치 야코비안 σ_max/σ_min 상한; 초과하는 트래킹 궤적은 시작 거부
 
 control:
+  startup_timeout_sec: 2.0  # Time allowed for feedback after explicit Arm.
   frequency_hz: 1000.0  # Independent monotonic wall-clock control loop.
 
 # Joint order: FL hip roll, thigh pitch, calf pitch.

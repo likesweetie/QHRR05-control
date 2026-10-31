@@ -1,4 +1,5 @@
 #include "control/control.hpp"
+#include "ipc/simulation/channel.hpp"
 #include "simulation/simulation.hpp"
 #include <chrono>
 #include <csignal>
@@ -45,6 +46,7 @@ int main(int argc, char** argv) {
         mapping = std::make_unique<shm_utils::Mapping>(name, true);
         auto& shm = *mapping->get();
         shm.can_enabled = true;
+        shm.simulation_available = true;
         hal = fork();
         Require(hal >= 0, "fork failed");
         if (hal == 0) {
@@ -85,7 +87,7 @@ int main(int argc, char** argv) {
         auto tick = std::chrono::steady_clock::now();
         const auto deadline = tick + std::chrono::seconds(argc == 7 ? 90 : 30);
         bool complete = false, external_contact_checked = false, motion_rejection_checked = false;
-        bool check_rejection = false;
+        bool check_rejection = false, arm_requested = false, retry_arm_pending = false;
         while (std::chrono::steady_clock::now() < deadline) {
             simulation.Poll();
             state.time = data->time;
@@ -105,7 +107,22 @@ int main(int argc, char** argv) {
                 feedback = shm.motors[shm.motor_sequence % kShmBufferCount];
             }
             const auto& z = control.zero_set;
-            if (z.phase == ZeroSetPhase::Fault && !external_contact_checked) {
+            if (!arm_requested &&
+                std::all_of(
+                    feedback.profile_verified.begin(), feedback.profile_verified.end(), [](bool v) {
+                        return v;
+                    })) {
+                qhrr05::InputInterface::RequestDrive(shm, DriveAction::Arm);
+                arm_requested = true;
+            }
+            if (retry_arm_pending && control.drive_state == DriveState::Disarmed) {
+                qhrr05::InputInterface::RequestMode(shm, 6, TrackingPlane::XY, 3);
+                qhrr05::InputInterface::RequestDrive(shm, DriveAction::Arm);
+                retry_arm_pending = false;
+                continue;
+            }
+            if (control.drive_state == DriveState::Fault && z.phase == ZeroSetPhase::Fault &&
+                !external_contact_checked) {
                 Require(z.failure == ZeroSetFailure::ExternalContact, "unexpected initial fault");
                 for (bool enabled : feedback.command_enabled)
                     Require(!enabled, "external contact did not release motors");
@@ -115,11 +132,12 @@ int main(int argc, char** argv) {
                 const int body = mj_name2id(model.get(), mjOBJ_BODY, "touch_object");
                 data->mocap_pos[3 * model->body_mocapid[body]] = 5;
                 mj_forward(model.get(), data.get());
-                qhrr05::InputInterface::RequestMode(shm, 6, TrackingPlane::XY, 3);
+                qhrr05::InputInterface::RequestDrive(shm, DriveAction::ClearFault);
+                retry_arm_pending = true;
                 external_contact_checked = true;
                 continue;
             }
-            if (z.phase == ZeroSetPhase::Fault)
+            if (control.drive_state == DriveState::Fault && !retry_arm_pending)
                 throw std::runtime_error(
                     std::string("zero-set fault: ") + ZeroSetFailureName(z.failure));
             if (check_rejection) {

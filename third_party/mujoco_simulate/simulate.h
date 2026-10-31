@@ -263,6 +263,7 @@ class Simulate {
   std::function<void()> user_render_callback_;
   std::function<void(mjvScene&)> user_scene_callback_;
   std::function<void(int)> user_controller_callback_;
+  std::function<void(int)> user_drive_callback_;
   std::function<void(double)> user_force_callback_;
   mjtNum user_target_force_ = 3.0;
   mjtNum user_maximum_force_ = 5.0;
@@ -303,7 +304,7 @@ class Simulate {
 
 
   // simulation section of UI
-  mjuiDef def_simulation[23] = {
+  mjuiDef def_simulation[26] = {
     {mjITEM_SECTION,   "Simulation",    mjPRESERVE, nullptr,     "AS"},
     {mjITEM_RADIO,     "",              5, &this->run,           "Pause\nRun"},
     {mjITEM_BUTTON,    "Reset",         2, nullptr,              " #259"},
@@ -326,6 +327,9 @@ class Simulate {
     {mjITEM_BUTTON,    "Ball follow [B]",2},
     {mjITEM_BUTTON,    "Damping [D]",   2},
     {mjITEM_BUTTON,    "Zero set [Z]",  2},
+    {mjITEM_BUTTON,    "Arm [A]",       2},
+    {mjITEM_BUTTON,    "Release [X]",   2},
+    {mjITEM_BUTTON,    "Clear fault",   2},
     {mjITEM_END}
   };
 

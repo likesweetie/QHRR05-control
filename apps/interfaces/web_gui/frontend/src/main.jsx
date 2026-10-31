@@ -1,1072 +1,1145 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  useSession,
+  modes,
+  modeName,
+  planes,
+  fmt,
+  age,
+  vector,
+} from "./session.jsx";
 import "./style.css";
 
-const modes = [
-  {
-    id: 6, name: "Zero set", ko: "영점 보정", key: "Z", icon: "home",
-    description: "hip → thigh → calf 순서로 스토퍼를 찾아 영점을 보정합니다.",
-  },
-  {
-    id: 5,
-    name: "Damping",
-    ko: "감쇠",
-    key: "D",
-    description: "위치 유지 없이 관절 속도를 감쇠합니다.",
-    icon: "wave",
-  },
-  {
-    id: 0,
-    name: "Homing",
-    ko: "호밍",
-    key: "H",
-    description: "설정된 기준 자세로 이동합니다.",
-    icon: "home",
-  },
-  {
-    id: 1,
-    name: "Gravity",
-    ko: "중력 보상",
-    key: "G",
-    description: "설정에 따라 중력·동역학을 보상합니다.",
-    icon: "up",
-  },
-  {
-    id: 2,
-    name: "Magnetic",
-    ko: "접촉 추종",
-    key: "M",
-    description: "접촉을 감지하고 목표 힘을 추종합니다.",
-    icon: "magnet",
-  },
-  {
-    id: 3,
-    name: "Tracking",
-    ko: "궤적 추종",
-    key: "T",
-    description: "선택한 평면의 궤적을 검사하고 추종합니다.",
-    icon: "path",
-  },
-  {
-    id: 4,
-    name: "Ball",
-    ko: "공 추종",
-    key: "B",
-    description: "조이스틱으로 공 목표를 움직입니다.",
-    icon: "ball",
-  },
-];
-const planes = ["XY", "XZ", "YZ"];
-const fmt = (value, digits = 3) =>
-  Number.isFinite(value) ? value.toFixed(digits) : "—";
-const modeName = (id) => modes.find((mode) => mode.id === id)?.name ?? "—";
-
-function Icon({ name, size = 22 }) {
-  const paths = {
-    wave: <path d="M2 12c3-12 5 12 8 0s5 12 8 0 3-4 4 0" />,
-    home: (
-      <>
-        <path d="m3 10 9-7 9 7v10H3Z" />
-        <path d="M9 20v-7h6v7" />
-      </>
-    ),
-    up: (
-      <>
-        <path d="M12 21V4m-6 6 6-6 6 6" />
-        <path d="M4 20h16" />
-      </>
-    ),
-    magnet: (
-      <>
-        <path d="M5 4v9a7 7 0 0 0 14 0V4h-5v9a2 2 0 0 1-4 0V4Z" />
-        <path d="M5 8h5m4 0h5" />
-      </>
-    ),
-    path: (
-      <>
-        <path d="M12 12C1-1-3 25 12 12s19 13 0 0Z" />
-      </>
-    ),
-    ball: (
-      <>
-        <circle cx="12" cy="12" r="8" />
-        <path d="M3 12h18M12 4c-5 4-5 12 0 16 5-4 5-12 0-16Z" />
-      </>
-    ),
-    arrow: <path d="M5 12h14m-6-6 6 6-6 6" />,
-    panel: (
-      <>
-        <rect x="3" y="3" width="18" height="18" rx="3" />
-        <path d="M9 3v18m4-12h4m-4 6h4" />
-      </>
-    ),
-    chart: (
-      <>
-        <path d="M3 3v18h18M6 15l4-5 4 3 6-8" />
-      </>
-    ),
-  };
+const axes = ["HR · hip", "HP · thigh", "KP · calf"];
+const hex = (value) =>
+  Number.isInteger(value) ? `0x${value.toString(16).toUpperCase()}` : "—";
+const statusValue = (value, status, digits = 3) =>
+  Number.isFinite(value)
+    ? fmt(value, digits)
+    : ({
+        unsupported: "취득 불가",
+        waiting: "미수신",
+        stale: "오래됨",
+        uncalibrated: "미보정",
+        invalid: "무효",
+      }[status] ?? "—");
+const tone = (value) =>
+  ["ACTIVE", "online", "RUNNING", "COMPLETE"].includes(value)
+    ? "ok"
+    : ["FAULT", "error", "stale", "disconnected"].includes(value)
+      ? "danger"
+      : ["ARMED", "DAMPING", "ZERO SET"].includes(value)
+        ? "warn"
+        : "muted";
+function Badge({ children, status, className = "" }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      {paths[name]}
-    </svg>
+    <span className={`badge ${status ?? tone(children)} ${className}`}>
+      {children}
+    </span>
   );
 }
-
-function Sparkline({ history, axis }) {
-  const values = history.map((sample) => sample[axis]);
-  const finite = values.filter(Number.isFinite);
-  if (finite.length < 2)
-    return (
-      <div className="chart-empty">새로운 측정값을 기다리고 있습니다.</div>
-    );
-  const low = Math.min(...finite),
-    high = Math.max(...finite);
-  const span = Math.max(high - low, 0.02);
-  const bottom = (high + low - span) / 2,
-    top = bottom + span;
-  let previousValid = false;
-  const path = values
-    .map((value, i) => {
-      if (!Number.isFinite(value)) {
-        previousValid = false;
-        return "";
-      }
-      const x = 8 + (i * 304) / (values.length - 1),
-        y = 82 - ((value - bottom) / span) * 66;
-      const segment = `${previousValid ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`;
-      previousValid = true;
-      return segment;
-    })
-    .join(" ");
+function Panel({ eyebrow, title, className = "", extra, children }) {
   return (
-    <div className="chart-plot">
-      <div className="chart-scale">
-        <span>{fmt(top)}</span>
-        <span>{fmt(bottom)}</span>
-      </div>
-      <svg
-        className="sparkline"
-        viewBox="0 0 320 96"
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`${["HR", "HP", "KP"][axis]} 관절 위치 추이, ${fmt(bottom)}에서 ${fmt(top)} rad`}
-      >
-        <path
-          d="M0 16H320M0 49H320M0 82H320M80 8V90M160 8V90M240 8V90"
-          className="chart-gridlines"
-        />
-        <path
-          d={path}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          vectorEffect="non-scaling-stroke"
-        />
-      </svg>
-      <div className="chart-time">
-        <span>이전</span>
-        <span>최신</span>
-      </div>
-    </div>
-  );
-}
-
-function RequestFeedback({ request }) {
-  const status = request?.status ?? "idle";
-  const description = !request
-    ? "모드나 설정을 선택하면 처리 결과가 여기에 표시됩니다."
-    : status === "unknown"
-      ? "결과 미확인 · 자동 재전송하지 않습니다. 현재 상태를 확인하세요."
-      : status === "rejected"
-        ? `요청 거부 · ${request.reason}`
-        : status === "applied"
-          ? "TaskController 모드 반영을 확인했습니다. 실제 동작 완료를 뜻하지 않습니다."
-          : status === "approved"
-            ? request.type === "force"
-              ? "목표 힘 요청이 승인되었습니다. 실제 접촉력 도달을 뜻하지 않습니다."
-              : "안전 승인 완료 · 제어기에 모드가 반영되는지 확인하고 있습니다."
-            : "요청을 전송했습니다. 안전 판정을 기다리고 있습니다.";
-  return (
-    <section
-      className={`panel request-panel request-${status}`}
-      aria-label="명령 처리 현황"
-      aria-live="polite"
-    >
-      <div className="request-overview">
-        <span className="request-symbol" aria-hidden="true">
-          {status === "applied" || status === "approved"
-            ? "✓"
-            : status === "rejected" || status === "unknown"
-              ? "!"
-              : "→"}
-        </span>
+    <section className={`panel ${className}`}>
+      <div className="panel-heading">
         <div>
-          <div className="request-caption">
-            최근 명령{" "}
-            <span className="request-id">
-              {request ? `#${String(request.id).padStart(4, "0")}` : "대기"}
-            </span>
-          </div>
-          <strong className="request-title">
-            {request?.label ?? "조작할 준비가 되셨나요?"}
-          </strong>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2>{title}</h2>
         </div>
+        {extra}
       </div>
-      <div className="request-stages">
-        {[
-          ["requested", "요청 전송"],
-          ["approved", "안전 승인"],
-          ["applied", "모드 반영"],
-        ].map(([stage, label], index) => {
-          const completed =
-            request &&
-            ["requested", "approved", "applied"].indexOf(status) >= index;
-          return (
-            <span
-              key={stage}
-              className={`${completed ? "stage-complete" : ""} ${request?.type === "force" && stage === "applied" ? "stage-na" : ""}`}
-            >
-              <b>{completed ? "✓" : index + 1}</b>
-              {request?.type === "force" && stage === "applied"
-                ? "모드 전용"
-                : label}
-            </span>
-          );
-        })}
-      </div>
-      <p role="status">{description}</p>
+      {children}
     </section>
   );
 }
-
-function App() {
-  const [state, setState] = useState(null);
-  const [connection, setConnection] = useState("connecting");
-  const [connectionKey, setConnectionKey] = useState(0);
-  const [notice, setNotice] = useState(null);
-  const [pending, setPending] = useState(false);
-  const [plane, setPlane] = useState(0);
-  const [force, setForce] = useState("");
-  const [history, setHistory] = useState([]);
-  const [latestRequest, setLatestRequest] = useState(null);
-  const [events, setEvents] = useState([]);
-  const socketRef = useRef(null);
-  const nextId = useRef(0);
-  const requestRef = useRef(null);
-  const forceEdited = useRef(false);
-  const planeEdited = useRef(false);
-  const latestRef = useRef(null);
-  const record = (title, status) =>
-    setEvents((previous) =>
-      [
-        {
-          title,
-          status,
-          time: new Date().toLocaleTimeString("en-GB", {
-            hour12: false,
-            timeZone: "Asia/Seoul",
-          }),
-        },
-        ...previous,
-      ].slice(0, 12),
-    );
-  const updateRequest = (value) => {
-    latestRef.current = value;
-    setLatestRequest(value);
-  };
-
+function Metrics({ entries, className = "metric-grid compact" }) {
+  return (
+    <div className={className}>
+      {entries.map(([label, value]) => (
+        <div key={label}>
+          <span>{label}</span>
+          <strong title={typeof value === "string" ? value : undefined}>
+            {value ?? "—"}
+          </strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+function RequestStatus({ session }) {
+  const req = session.latest;
+  const steps = ["요청 전송", "안전 승인", "TaskController 반영"];
+  const count = !req
+    ? 0
+    : req.status === "applied"
+      ? 3
+      : req.status === "approved"
+        ? 2
+        : 1;
+  return (
+    <div
+      className={`request-panel request-${req?.status ?? "idle"}`}
+      aria-live="polite"
+    >
+      <div className="request-caption">
+        {req ? `#${req.id} ${req.label}` : "명령 대기"}
+      </div>
+      <div className="request-stages">
+        {steps.map((step, i) => (
+          <span key={step} className={count > i ? "stage-complete" : ""}>
+            {i + 1}.{" "}
+            {req && ["stack", "process"].includes(req.type)
+              ? ["요청 전송", "Daemon 판정", "프로세스 반영"][i]
+              : step}
+          </span>
+        ))}
+      </div>
+      <p>
+        {req?.status === "rejected"
+          ? `요청 거부 · ${req.message}`
+          : req?.status === "unknown"
+            ? "결과 미확인 · 자동 재전송하지 않습니다."
+            : req?.status === "applied"
+              ? ["stack", "process"].includes(req.type)
+                ? "Daemon 프로세스 관리 반영 완료"
+                : "TaskController 모드 반영을 확인했습니다. 동작 완료와는 구분합니다."
+              : req?.status === "approved"
+                ? req.type === "force"
+                  ? "목표 힘 요청이 승인되었습니다."
+                  : "안전 승인 완료 · 제어기 반영 대기"
+                : req
+                  ? "명령의 판정 결과를 기다립니다."
+                  : "모드 선택 → Arm(A). 개별 Enable은 중립 출력으로 대기합니다."}
+      </p>
+    </div>
+  );
+}
+function StateMachine({ session, plane }) {
+  const { state: s, available, send } = session;
+  const drive = s?.drive_state;
+  const current =
+    drive !== "ACTIVE"
+      ? drive
+      : s.mode === 5
+        ? "DAMPING"
+        : s.mode === 6
+          ? "ZERO SET"
+          : "ACTIVE";
+  const stages = [
+    "DISARMED",
+    "ARMED",
+    "ACTIVE",
+    "DAMPING",
+    "ZERO SET",
+    "FAULT",
+  ];
+  const reason =
+    drive === "DISARMED"
+      ? `출력 해제 상태입니다. ${modeName(s?.requested_mode)} 선택 후 Arm(A)으로 시작합니다.`
+      : drive === "ARMED"
+        ? "개별 모터가 중립 출력으로 Enable되어 있습니다. Arm / Run으로 전체 모션을 시작합니다."
+        : drive === "FAULT"
+          ? s?.drive_fault
+          : s?.mode === 6
+            ? `${s.zero_set.axis} · ${s.zero_set.phase} · ${fmt(s.zero_set.travel_rad)} rad / ${fmt(s.zero_set.elapsed_sec, 1)} s`
+            : s?.holding
+              ? "설정 자세를 유지하고 있습니다."
+              : "현재 모션이 실행 중입니다.";
+  return (
+    <Panel
+      eyebrow="Safety"
+      title="State Machine"
+      className="machine-panel"
+      extra={<Badge>{current ?? "waiting"}</Badge>}
+    >
+      <div className="state-machine" aria-label="구동 상태">
+        {stages.map((item) => (
+          <div
+            key={item}
+            className={`state-block ${item === current ? `active ${tone(item)}` : "idle"}`}
+            data-state={item}
+          >
+            <span />
+            <strong>{item}</strong>
+          </div>
+        ))}
+      </div>
+      <Metrics
+        className="machine-detail-grid"
+        entries={[
+          [
+            "Controller",
+            <span id="machineControllerState">{modeName(s?.mode)}</span>,
+          ],
+          ["Selected", modeName(s?.requested_mode)],
+          ["Fault", s?.transport_fault ?? "—"],
+          ["Age", age(s?.controller_age_ms)],
+        ]}
+      />
+      <p className="machine-reason" title={reason}>
+        {s ? reason : "제어 서버 연결 대기"}
+      </p>
+      <div className="operator-actions">
+        <button
+          id="armButton"
+          className="button primary"
+          disabled={!available || ["ACTIVE", "FAULT"].includes(drive)}
+          onClick={() => send({ type: "arm" }, "Arm · 전체 모션 시작")}
+        >
+          Arm
+        </button>
+        <button
+          id="runButton"
+          className="button primary"
+          disabled={!available || !["ARMED", "ACTIVE"].includes(drive)}
+          onClick={() =>
+            drive === "ARMED"
+              ? send({ type: "arm" }, "Run · 전체 모션 시작")
+              : send(
+                  { type: "mode", mode: s.requested_mode, plane },
+                  `Run ${modeName(s.requested_mode)}`,
+                )
+          }
+        >
+          Run
+        </button>
+        <button
+          id="dampingButton"
+          className="button secondary"
+          disabled={!available}
+          onClick={() => send({ type: "mode", mode: 5, plane }, "Damping")}
+        >
+          Damping
+        </button>
+        <button
+          id="faultClearButton"
+          className="button secondary"
+          disabled={!available || drive !== "FAULT"}
+          onClick={() => send({ type: "clear-fault" }, "Fault Clear")}
+        >
+          Fault Clear
+        </button>
+        <button
+          id="releaseButton"
+          className="button danger"
+          disabled={!available}
+          onClick={() => send({ type: "release" }, "Release · 전체 출력 해제")}
+        >
+          Release / Stop
+        </button>
+      </div>
+      <RequestStatus session={session} />
+    </Panel>
+  );
+}
+function ModeControl({ session, plane, setPlane }) {
+  const { state: s, available, send } = session;
+  const [force, setForce] = useState(""),
+    [edited, setEdited] = useState(false);
   useEffect(() => {
-    setConnection("connecting");
-    setState(null);
-    setHistory([]);
-    forceEdited.current = false;
-    planeEdited.current = false;
-    setForce("");
-    setPlane(0);
-    const ws = new WebSocket(
-      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
-    );
-    socketRef.current = ws;
-    let disposed = false;
-    ws.onopen = () => {
-      if (!disposed) {
-        setConnection("connected");
-        record("제어 서버 연결", "CONNECTED");
-      }
-    };
-    ws.onmessage = (event) => {
-      if (disposed) return;
-      try {
-        const message = JSON.parse(event.data);
-        if (message.type === "state") {
-          setState(message);
-          setHistory((previous) => [
-            ...previous.slice(-99),
-            message.motors.map((m) => m.position),
-          ]);
-          if (!forceEdited.current)
-            setForce(String(message.target_force ?? ""));
-          if (!planeEdited.current) setPlane(message.requested_tracking_plane);
-          const latest = latestRef.current;
-          if (
-            latest?.status === "approved" &&
-            latest.type === "mode" &&
-            latest.motion_sequence === message.active_motion_sequence &&
-            latest.mode === message.mode &&
-            (latest.mode !== 3 || latest.plane === message.tracking_plane)
-          ) {
-            updateRequest({ ...latest, status: "applied" });
-            record(`${latest.label} · TaskController 반영 확인`, "APPLIED");
-          }
-        } else if (message.id === requestRef.current || message.id === null) {
-          setPending(false);
-          requestRef.current = null;
-          const latest = latestRef.current;
-          if (latest) {
-            const status =
-              message.type === "ack"
-                ? "approved"
-                : message.uncertain
-                  ? "unknown"
-                  : "rejected";
-            updateRequest({
-              ...latest,
-              status,
-              motion_sequence: message.motion_sequence,
-              reason: message.message,
-            });
-            record(
-              `${latest.label} · ${message.type === "ack" ? "안전레이어 승인" : message.message}`,
-              status.toUpperCase(),
-            );
-          }
-          setNotice(
-            message.type === "ack"
-              ? null
-              : {
-                  kind: "error",
-                  text: `${message.uncertain ? "결과 미확인" : "요청 거부"}: ${message.message}`,
-                },
-          );
-        }
-      } catch {
-        setNotice({ kind: "error", text: "서버 응답을 읽지 못했습니다." });
-        ws.close();
-      }
-    };
-    ws.onerror = () => {
-      if (!disposed)
-        setNotice({
-          kind: "error",
-          text: "제어 서버에 연결할 수 없습니다. 서버 실행 상태를 확인하세요.",
-        });
-    };
-    ws.onclose = () => {
-      if (disposed) return;
-      setConnection("disconnected");
-      setState(null);
-      setPending(false);
-      setHistory([]);
+    if (!edited) setForce(s ? String(s.target_force) : "");
+  }, [s?.target_force, !!s, edited]);
+  useEffect(() => {
+    if (!s) {
+      setEdited(false);
       setForce("");
-      setPlane(0);
-      forceEdited.current = false;
-      planeEdited.current = false;
-      record("제어 서버 연결 끊김", "DISCONNECTED");
-      const latest = latestRef.current;
-      if (latest && ["requested", "approved"].includes(latest.status))
-        updateRequest({ ...latest, status: "unknown" });
-      if (requestRef.current !== null)
-        setNotice({
-          kind: "error",
-          text: "연결이 끊겨 요청 결과를 확인하지 못했습니다. 재연결 후 상태를 확인하세요.",
-        });
-      requestRef.current = null;
-    };
-    return () => {
-      disposed = true;
-      ws.close();
-    };
-  }, [connectionKey]);
-
-  const available = connection === "connected" && state?.ready && !pending;
-  const activeMode = modes.find((mode) => mode.id === state?.mode);
-  const request = (command) => {
-    if (
-      !available ||
-      socketRef.current?.readyState !== WebSocket.OPEN ||
-      requestRef.current !== null
-    )
-      return;
-    const id = ++nextId.current;
-    requestRef.current = id;
-    const label =
-      command.type === "mode"
-        ? `${modeName(command.mode)}${command.mode === 3 ? ` · ${planes[command.plane]}` : ""}`
-        : `목표 힘 ${command.value} N`;
-    updateRequest({ ...command, id, label, status: "requested" });
-    record(`${label} · 요청 전송`, "REQUESTED");
-    setPending(true);
-    setNotice(null);
-    socketRef.current.send(JSON.stringify({ ...command, id }));
-  };
-  const forceValid =
+    }
+  }, [!!s]);
+  const valid =
     force.trim() !== "" &&
     Number.isFinite(Number(force)) &&
     Number(force) >= 0 &&
-    Number(force) <= state?.maximum_force;
-  const changeMode = (mode) => request({ type: "mode", mode, plane });
-  const applied =
-    state && state.motion_sequence === state.active_motion_sequence;
-
-  const changeForce = (value) => {
-    forceEdited.current = true;
-    setForce(String(value));
-  };
-  const forceDirty = forceValid && Number(force) !== state?.target_force;
-  const forceInvalid =
-    connection === "connected" &&
-    state?.ready &&
-    forceEdited.current &&
-    !forceValid;
-
+    Number(force) <= s?.maximum_force;
+  const dirty = edited && Number(force) !== s?.target_force;
+  return (
+    <Panel
+      eyebrow="Control"
+      title="Motion & Force"
+      className="command-panel"
+      extra={<Badge>{modeName(s?.requested_mode)}</Badge>}
+    >
+      <div className="mode-grid">
+        {modes.map((m) => (
+          <button
+            key={m.id}
+            className={`button mode-card ${s?.requested_mode === m.id ? "selected" : "secondary"}`}
+            disabled={!available}
+            onClick={() => send({ type: "mode", mode: m.id, plane }, m.name)}
+          >
+            <span>{m.name}</span>
+            <kbd>{m.key}</kbd>
+          </button>
+        ))}
+      </div>
+      <div className="plane-control">
+        <label>Tracking plane</label>
+        <div className="segmented">
+          {planes.map((p, i) => (
+            <button
+              key={p}
+              className={`button ${plane === i ? "selected" : "secondary"}`}
+              disabled={!available}
+              onClick={() => setPlane(i)}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="transmit-subhead">
+        <strong>Target force</strong>
+        <span className="current-force">
+          <strong>{fmt(s?.target_force, 1)} N</strong>
+        </span>
+        {dirty && (
+          <Badge status="warn" className="draft-badge">
+            미적용
+          </Badge>
+        )}
+      </div>
+      <form
+        className="force-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid) {
+            send({ type: "force", value: Number(force) }, `목표 힘 ${force} N`);
+            setEdited(false);
+          }
+        }}
+      >
+        <label htmlFor="target-force">
+          Force [N]
+          <input
+            id="target-force"
+            type="number"
+            min="0"
+            max={s?.maximum_force ?? 0}
+            step="0.5"
+            value={force}
+            disabled={!available}
+            aria-invalid={edited && !valid}
+            onChange={(e) => {
+              setEdited(true);
+              setForce(e.target.value);
+            }}
+          />
+        </label>
+        <button
+          className="button counter"
+          type="button"
+          disabled={!available}
+          aria-label="목표 접촉력 0.5 N 줄이기"
+          onClick={() => {
+            setEdited(true);
+            setForce(String(Math.max(0, Number(force || 0) - 0.5)));
+          }}
+        >
+          −
+        </button>
+        <button
+          className="button counter"
+          type="button"
+          disabled={!available}
+          aria-label="목표 접촉력 0.5 N 늘리기"
+          onClick={() => {
+            setEdited(true);
+            setForce(
+              String(Math.min(s.maximum_force, Number(force || 0) + 0.5)),
+            );
+          }}
+        >
+          +
+        </button>
+        <button
+          className="button primary apply-button"
+          disabled={!available || !valid}
+        >
+          목표 힘 적용
+        </button>
+      </form>
+      {edited && !valid && (
+        <p className="error-line">
+          0–{s?.maximum_force} N 범위의 유한한 값을 입력하세요.
+        </p>
+      )}
+      <p className="message-line">
+        Zero set: hip → thigh → calf. 모드 선택만으로 출력이 켜지지 않습니다.
+      </p>
+    </Panel>
+  );
+}
+function traffic(history, axis) {
+  const first = history[0],
+    last = history.at(-1);
+  if (!first || !last || last.observed_ns <= first.observed_ns) return null;
+  const dt = (last.observed_ns - first.observed_ns) / 1e9;
+  const read = (state, key) =>
+    axis == null
+      ? state.motors.reduce((sum, m) => sum + m[key], 0)
+      : state.motors[axis]?.[key];
+  const rx = (read(last, "rx_frames") - read(first, "rx_frames")) / dt;
+  const tx = (read(last, "tx_frames") - read(first, "tx_frames")) / dt;
+  return Number.isFinite(rx) && Number.isFinite(tx) && rx >= 0 && tx >= 0
+    ? { rx, tx }
+    : null;
+}
+function CanLoad({ session }) {
+  const s = session.state,
+    rate = traffic(session.history),
+    bitrate = s?.runtime?.bitrate;
+  const load =
+    rate && bitrate ? (100 * 135 * (rate.rx + rate.tx)) / bitrate : null;
+  return (
+    <Panel eyebrow="Bus" title="CAN Load" className="bus-panel">
+      <div className="can-channel-grid">
+        <article className="can-channel-card">
+          <header>
+            <div>
+              <strong>Motor CAN</strong>
+              <code>{s?.runtime?.interface || "인터페이스 정보 대기"}</code>
+            </div>
+            <Badge>{s?.transport_running ? "online" : "waiting"}</Badge>
+          </header>
+          <div className="can-channel-load">
+            <strong>{fmt(load, 1)}%</strong>
+            <div className="progress" aria-label="설정된 CAN ID의 추정 점유율">
+              <div
+                className={`progress-fill ${load >= 75 ? "danger" : load >= 45 ? "warn" : ""}`}
+                style={{ width: `${Math.min(100, load ?? 0)}%` }}
+              />
+            </div>
+          </div>
+          <Metrics
+            className="can-channel-metrics"
+            entries={[
+              ["RX", `${fmt(rate?.rx, 1)} fps`],
+              ["TX", `${fmt(rate?.tx, 1)} fps`],
+              ["Bitrate", bitrate ? `${bitrate / 1000} kbps` : "—"],
+              [
+                "Total RX / TX",
+                s
+                  ? `${s.motors.reduce((v, m) => v + (m.rx_frames ?? 0), 0)} / ${s.motors.reduce((v, m) => v + (m.tx_frames ?? 0), 0)}`
+                  : "—",
+              ],
+            ]}
+          />
+        </article>
+      </div>
+      <p className="message-line">
+        설정된 모터 ID의 송수신 카운터와 Classic CAN 최대 스터핑 기준
+        추정치입니다. 다른 노드·오류·재전송은 포함하지 않습니다.
+      </p>
+    </Panel>
+  );
+}
+function Commands({ session }) {
+  const s = session.state;
+  return (
+    <Panel
+      eyebrow="Actuator Output"
+      title="Applied MIT Command"
+      className="policy-command-panel"
+      extra={<Badge>{s?.command_sequence ? "published" : "waiting"}</Badge>}
+    >
+      <Metrics
+        entries={[
+          ["Source", "TaskController → CAN HAL"],
+          ["Targets", s?.motors.filter((m) => m.command_enabled).length],
+          ["Age", age(s?.command_age_ms)],
+          [
+            "Sequence / HAL",
+            s ? `${s.command_sequence} / ${s.consumed_command_sequence}` : "—",
+          ],
+        ]}
+      />
+      <div className="table-wrap compact-table">
+        <table>
+          <thead>
+            <tr>
+              {[
+                "Actuator / CAN",
+                "P target [rad]",
+                "V target [rad/s]",
+                "KP",
+                "KD",
+                "Tau target [Nm]",
+                "Output",
+              ].map((x) => (
+                <th key={x}>{x}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(s?.motors ?? []).map((m, i) => (
+              <tr key={i}>
+                <td>
+                  {axes[i]} <code>{hex(s.runtime?.motor_ids?.[i])}</code>
+                </td>
+                {["position", "velocity", "kp", "kd", "tau_ff"].map((k) => (
+                  <td key={k}>
+                    {s.command_sequence ? fmt(m.command?.[k], 3) : "—"}
+                  </td>
+                ))}
+                <td>
+                  <Badge>{m.command_enabled ? "ACTIVE" : "OFF"}</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="message-line">
+        HAL 소비 번호는 명령 전달 상태이며, 모터의 실제 적용 완료 ACK를 뜻하지
+        않습니다.
+      </p>
+    </Panel>
+  );
+}
+function Robot({ session }) {
+  const s = session.state;
+  return (
+    <Panel
+      eyebrow="Joint Encoders & Model"
+      title="Robot State"
+      className="robot-panel"
+      extra={
+        <div className="panel-badges">
+          <Badge>{s?.drive_state ?? "waiting"}</Badge>
+          <Badge status={s?.model?.valid ? "ok" : "muted"}>
+            FK {s?.model?.valid ? "valid" : "unavailable"}
+          </Badge>
+        </div>
+      }
+    >
+      <div className="enabled-motors">
+        {axes.map((name, i) => {
+          const m = s?.motors[i],
+            q = m?.position;
+          return (
+            <article
+              className={`enabled-motor-card ${m?.enabled ? "" : "inactive"}`}
+              key={name}
+            >
+              <div className="enabled-motor-copy">
+                <Badge status={m?.enabled ? "ok" : "muted"}>
+                  {hex(s?.runtime?.motor_ids?.[i])}
+                </Badge>
+                <strong>{name}</strong>
+                <span>{m?.enabled ? "ENABLED" : "RELEASED"}</span>
+              </div>
+              <div
+                className={`angle-dial ${Number.isFinite(q) ? "" : "muted"}`}
+                style={{ "--angle": `${((q ?? 0) * 180) / Math.PI - 90}deg` }}
+              >
+                {Number.isFinite(q) && <span className="dial-arrow" />}
+                <span className="dial-center" />
+              </div>
+              <Metrics
+                className="enabled-motor-metrics"
+                entries={[
+                  ["Angle", statusValue(q, m?.position_status)],
+                  [
+                    "Deg",
+                    Number.isFinite(q)
+                      ? `${fmt((q * 180) / Math.PI, 1)}°`
+                      : "미보정",
+                  ],
+                  [
+                    "Speed [rad/s]",
+                    statusValue(m?.velocity, m?.velocity_status),
+                  ],
+                  [
+                    "Current [A]",
+                    statusValue(m?.current, m?.current_status, 2),
+                  ],
+                ]}
+              />
+            </article>
+          );
+        })}
+      </div>
+      <Metrics
+        className="vector-grid"
+        entries={[
+          ["Toe FK [m]", vector(s?.toe_position)],
+          ["Zero set", s ? `${s.zero_set.axis} · ${s.zero_set.phase}` : "—"],
+          [
+            "Coordinate / source",
+            s
+              ? `${s.motors.filter((m) => m.coordinate_valid).length}/3 · ${s.observation_origin}`
+              : "—",
+          ],
+        ]}
+      />
+    </Panel>
+  );
+}
+function Actuators({ session }) {
+  const { state: s, available, send } = session;
+  const any = s?.motors.some((m) => m.enabled || m.command_enabled);
+  return (
+    <Panel
+      eyebrow="Actuators"
+      title="MIT"
+      className="motor-panel"
+      extra={
+        <button
+          id="allActuatorToggle"
+          className={`button ${any ? "danger" : "secondary"}`}
+          disabled={!available || (!any && s?.drive_state === "FAULT")}
+          onClick={() =>
+            send(
+              any ? { type: "release" } : { type: "motor-enable", axis: -1 },
+              any ? "Disable All" : "Enable All · 중립 출력",
+            )
+          }
+        >
+          {any ? "Disable All" : "Enable All"}
+        </button>
+      }
+    >
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {[
+                "Actuator",
+                "CAN",
+                "State",
+                "Age",
+                "Temp [°C]",
+                "Current [A]",
+                "Speed [rad/s]",
+                "Pos [rad]",
+                "Encoder [rad]",
+                "Actions",
+              ].map((x) => (
+                <th key={x}>{x}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {axes.map((name, i) => {
+              const m = s?.motors[i];
+              return (
+                <tr key={name}>
+                  <td>{name}</td>
+                  <td>
+                    <code>{hex(s?.runtime?.motor_ids?.[i])}</code>
+                  </td>
+                  <td>
+                    <span
+                      className={`status-dot ${m?.enabled ? "online" : m?.position_status === "stale" ? "stale" : ""}`}
+                    >
+                      {m?.enabled ? "ENABLED" : "RELEASED"}
+                    </span>
+                  </td>
+                  <td>{age(m?.age_ms)}</td>
+                  <td>
+                    {statusValue(m?.temperature, m?.temperature_status, 0)}
+                  </td>
+                  <td>{statusValue(m?.current, m?.current_status, 2)}</td>
+                  <td>{statusValue(m?.velocity, m?.velocity_status)}</td>
+                  <td>{statusValue(m?.position, m?.position_status)}</td>
+                  <td>{fmt(m?.encoder_position, 3)}</td>
+                  <td>
+                    <button
+                      className={`button compact ${m?.enabled || m?.command_enabled ? "danger" : "secondary"}`}
+                      disabled={
+                        !available ||
+                        (!["DISARMED", "ARMED"].includes(s?.drive_state) &&
+                          !m?.enabled)
+                      }
+                      onClick={() =>
+                        send(
+                          {
+                            type:
+                              m.enabled || m.command_enabled
+                                ? "motor-disable"
+                                : "motor-enable",
+                            axis: i,
+                          },
+                          `${name} ${m.enabled || m.command_enabled ? "Disable" : "Enable"}`,
+                        )
+                      }
+                    >
+                      {m?.enabled || m?.command_enabled ? "Disable" : "Enable"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="message-line">
+        개별 Enable은 토크 0으로 대기합니다. 실행 중 한 축을 Disable하면 모션이
+        멈추고 나머지 축도 중립 출력으로 전환됩니다.
+      </p>
+    </Panel>
+  );
+}
+function Nodes({ session }) {
+  const s = session.state;
+  return (
+    <Panel eyebrow="Nodes" title="Feedback" className="node-panel">
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {[
+                "Name",
+                "CAN",
+                "Role",
+                "Hz",
+                "Last Seen",
+                "RX / Invalid",
+                "Status",
+              ].map((x) => (
+                <th key={x}>{x}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {axes.map((name, i) => {
+              const m = s?.motors[i];
+              return (
+                <tr key={name}>
+                  <td>{name}</td>
+                  <td>{hex(s?.runtime?.motor_ids?.[i])}</td>
+                  <td>MIT actuator</td>
+                  <td>{fmt(traffic(session.history, i)?.rx, 1)}</td>
+                  <td>{age(m?.age_ms)}</td>
+                  <td>{m ? `${m.rx_frames} / ${m.invalid_frames}` : "—"}</td>
+                  <td>
+                    <Badge>
+                      {m?.profile_verified
+                        ? m.age_ms < 250
+                          ? "online"
+                          : "stale"
+                        : "waiting"}
+                    </Badge>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+function Events({ session }) {
+  return (
+    <Panel eyebrow="Activity" title="Recent Commands" className="frames-panel">
+      <div className="frames-list event-list">
+        {session.events.length ? (
+          session.events.slice(0, 12).map((e, i) => (
+            <article className="frame-item" key={i}>
+              <strong>
+                <span>{e.status}</span>
+                <code>{e.time}</code>
+              </strong>
+              <p title={e.text}>{e.text}</p>
+            </article>
+          ))
+        ) : (
+          <p className="message-line">아직 요청한 명령이 없습니다.</p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+function Processes({ session }) {
+  const { state: s, send } = session,
+    runtime = s?.runtime,
+    stopped = runtime?.state === "STOPPED";
+  const outputs = s?.motors.some((m) => m.enabled || m.command_enabled);
+  const available = session.connection === "connected" && runtime?.available;
+  return (
+    <main className="dashboard process-grid">
+      <Panel
+        eyebrow="Runtime"
+        title="Process Status"
+        className="process-panel"
+        extra={<Badge>{runtime?.state ?? "unavailable"}</Badge>}
+      >
+        <div className="stack-actions">
+          <button
+            className="button primary"
+            disabled={!available || !stopped}
+            onClick={() =>
+              send({ type: "stack", action: "start" }, "Start control stack")
+            }
+          >
+            Start control stack
+          </button>
+          <button
+            className="button danger"
+            disabled={!available || stopped || outputs}
+            title={outputs ? "먼저 Release로 모터 출력을 해제하세요." : ""}
+            onClick={() =>
+              send({ type: "stack", action: "stop" }, "Stop control stack")
+            }
+          >
+            Stop control stack
+          </button>
+          <p className="message-line">
+            핵심 프로세스는 묶음으로 시작·중지합니다. 중지 전에 Release가
+            필요하며, 시작 상태는 DISARMED입니다.
+          </p>
+        </div>
+        {!runtime?.available && (
+          <p className="error-line">
+            {runtime?.error ?? "현재 세션의 Daemon 관리 연결을 기다립니다."}
+          </p>
+        )}
+        <div id="processTiles" className="process-tiles">
+          {runtime?.processes?.map((p) => (
+            <article
+              className="process-tile"
+              key={p.name}
+              data-process={p.name}
+            >
+              <header>
+                <h3>{p.name}</h3>
+                <Badge>{p.running ? "online" : "STOPPED"}</Badge>
+              </header>
+              <Metrics
+                className="process-meta"
+                entries={[
+                  ["Managed PID", p.pid > 0 ? p.pid : "—"],
+                  [
+                    "Return / signal",
+                    `${p.exit_code ?? "—"} / ${p.signal ?? "—"}`,
+                  ],
+                  [
+                    "CPU",
+                    Number.isFinite(p.cpu_percent)
+                      ? `${fmt(p.cpu_percent, 1)}%`
+                      : "—",
+                  ],
+                  [
+                    "Memory",
+                    Number.isFinite(p.rss_mib)
+                      ? `${fmt(p.rss_mib, 1)} MiB`
+                      : "—",
+                  ],
+                  [
+                    "Uptime",
+                    Number.isFinite(p.uptime_sec)
+                      ? `${fmt(p.uptime_sec, 1)} s`
+                      : "—",
+                  ],
+                  ["Threads", p.threads],
+                  ["Start order", p.order],
+                  [
+                    "Policy",
+                    p.keep_on_stack_stop
+                      ? "management UI"
+                      : p.critical
+                        ? "control stack"
+                        : "independent",
+                  ],
+                ]}
+              />
+              <p
+                className="command-line"
+                title={[p.command, ...p.args].join(" ")}
+              >
+                {[p.command, ...p.args].join(" ")}
+              </p>
+              <p className="command-line" title={p.cwd || p.working_directory}>
+                cwd: {p.cwd || p.working_directory || "Inherited"}
+              </p>
+              <div className="process-actions">
+                <button
+                  className="button secondary"
+                  disabled={
+                    !available || (p.critical ? !stopped : p.running || stopped)
+                  }
+                  onClick={() =>
+                    send(
+                      p.critical
+                        ? { type: "stack", action: "start" }
+                        : { type: "process", name: p.name, action: "start" },
+                      `Start ${p.critical ? "stack" : p.name}`,
+                    )
+                  }
+                >
+                  {p.critical ? "Start stack" : "Start"}
+                </button>
+                <button
+                  className="button danger"
+                  disabled={
+                    !available ||
+                    (p.critical ? stopped || outputs : !p.running || stopped)
+                  }
+                  onClick={() =>
+                    send(
+                      p.critical
+                        ? { type: "stack", action: "stop" }
+                        : { type: "process", name: p.name, action: "stop" },
+                      `Stop ${p.critical ? "stack" : p.name}`,
+                    )
+                  }
+                >
+                  {p.critical ? "Stop stack" : "Stop"}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+        <RequestStatus session={session} />
+      </Panel>
+    </main>
+  );
+}
+function SharedMemory({ session }) {
+  const s = session.state;
+  return (
+    <main className="dashboard shm-grid">
+      <Panel
+        eyebrow="Shared Memory"
+        title="Control State SHM"
+        className="shm-panel"
+        extra={<Badge>{s?.ready ? "online" : "waiting"}</Badge>}
+      >
+        <Metrics
+          className="metric-grid shm-summary-grid"
+          entries={[
+            ["Name", s?.session],
+            ["Age", age(s?.controller_age_ms)],
+            ["Controller", s?.drive_state],
+            [
+              "Schema",
+              s?.shm ? `ABI ${s.shm.abi} · ${s.shm.bytes} bytes` : "—",
+            ],
+          ]}
+        />
+        <div className="shm-sections">
+          <article className="shm-section">
+            <h3>CAN / transport</h3>
+            <Metrics
+              className="key-value-grid"
+              entries={[
+                ["Interface", s?.runtime?.interface],
+                ["Command sequence", s?.command_sequence],
+                ["HAL consumed", s?.consumed_command_sequence],
+                ["Fault", s?.transport_fault],
+                ["Motor sequence", s?.shm?.motor_sequence],
+                ["Control sequence", s?.shm?.control_sequence],
+              ]}
+            />
+          </article>
+          <article className="shm-section">
+            <h3>Model / calculated state</h3>
+            <Metrics
+              className="key-value-grid"
+              entries={[
+                ["Valid", s?.model?.valid ? "true" : "false"],
+                ["Input sample", s?.model?.input_measurement_sequence],
+                ["Toe FK [m]", vector(s?.toe_position)],
+                [
+                  "Acceleration valid",
+                  s?.model?.acceleration_valid ? "true" : "false",
+                ],
+                [
+                  "Gravity [Nm]",
+                  s?.model?.valid ? vector(s.model.gravity) : "취득 불가",
+                ],
+                [
+                  "Acceleration [rad/s²]",
+                  s?.model?.acceleration_valid
+                    ? vector(s.model.acceleration)
+                    : "취득 불가",
+                ],
+              ]}
+            />
+          </article>
+        </div>
+        <h3 className="section-title">Actuators</h3>
+        <div className="shm-actuators">
+          {(s?.motors ?? []).map((m, i) => (
+            <article className="shm-actuator-card" key={i}>
+              <header>
+                <strong>{axes[i]}</strong>
+                <Badge>{m.enabled ? "ACTIVE" : "OFF"}</Badge>
+              </header>
+              <Metrics
+                className="key-value-grid"
+                entries={[
+                  ["CAN", hex(s.runtime?.motor_ids?.[i])],
+                  ["Calibrated", String(m.coordinate_valid)],
+                  [
+                    "Position [rad]",
+                    statusValue(m.position, m.position_status),
+                  ],
+                  ["Encoder [rad]", fmt(m.encoder_position, 3)],
+                  ["Offset [rad]", fmt(m.position_offset, 3)],
+                  [
+                    "Velocity [rad/s]",
+                    statusValue(m.velocity, m.velocity_status),
+                  ],
+                  ["Torque [Nm]", statusValue(m.torque, m.torque_status)],
+                  ["Current [A]", statusValue(m.current, m.current_status)],
+                  ["supported / valid", `${m.supported} / ${m.valid}`],
+                  ["Sample", m.received_sequence],
+                ]}
+              />
+            </article>
+          ))}
+        </div>
+        <details className="json-details">
+          <summary>Raw JSON</summary>
+          <pre className="json-view">{JSON.stringify(s, null, 2)}</pre>
+        </details>
+      </Panel>
+    </main>
+  );
+}
+function App() {
+  const session = useSession(),
+    s = session.state;
+  const [page, setPage] = useState(location.pathname),
+    [plane, setPlane] = useState(0);
   useEffect(() => {
-    const onKey = (event) => {
+    const fn = () => setPage(location.pathname);
+    addEventListener("popstate", fn);
+    return () => removeEventListener("popstate", fn);
+  }, []);
+  useEffect(() => {
+    if (s) setPlane(s.requested_tracking_plane);
+  }, [s?.requested_tracking_plane]);
+  useEffect(() => {
+    const key = (e) => {
       if (
-        event.repeat ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.target.closest?.(
-          'input, textarea, select, [contenteditable="true"]',
-        )
+        e.repeat ||
+        e.ctrlKey ||
+        e.altKey ||
+        e.metaKey ||
+        e.target.closest?.('input,textarea,select,[contenteditable="true"]')
       )
         return;
-      const mode = modes.find((item) => item.key === event.key.toUpperCase());
-      const selectedPlane = ["1", "2", "3"].indexOf(event.key);
-      if (!mode && selectedPlane < 0) return;
-      event.preventDefault();
-      if (selectedPlane >= 0) {
-        planeEdited.current = true;
-        setPlane(selectedPlane);
-        request({ type: "mode", mode: 3, plane: selectedPlane });
-      } else changeMode(mode.id);
+      const mode = modes.find((m) => m.key === e.key.toUpperCase());
+      if (mode) {
+        e.preventDefault();
+        session.send({ type: "mode", mode: mode.id, plane }, mode.name);
+      } else if (e.key.toUpperCase() === "A")
+        session.send({ type: "arm" }, "Arm");
+      else if (e.key.toUpperCase() === "X")
+        session.send({ type: "release" }, "Release");
+      else if (["1", "2", "3"].includes(e.key)) {
+        const p = Number(e.key) - 1;
+        setPlane(p);
+        session.send(
+          { type: "mode", mode: 3, plane: p },
+          `Tracking ${planes[p]}`,
+        );
+      }
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
   });
-
+  const navigate = (e, path) => {
+    if (e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    history.pushState({}, "", path);
+    setPage(path);
+    window.scrollTo(0, 0);
+  };
+  const title =
+    page === "/processes"
+      ? "Processes"
+      : page === "/shm"
+        ? "SHM Data"
+        : "Robot State";
+  useEffect(() => {
+    document.title = `QHRR-05 · ${title}`;
+  }, [title]);
   return (
-    <div className="app-shell">
-      <a className="skip-link" href="#control">
-        제어 패널로 바로가기
+    <>
+      <a className="skip-link" href="#dashboard">
+        Skip to dashboard
       </a>
       <header className="topbar">
-        <a className="brand" href="#" aria-label="QHRR 05 홈">
-          <span className="brand-mark" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-            <b>Q</b>
-          </span>
-          <span>
-            QHRR<span className="brand-model">05</span>
-            <small>ROBOT OPERATIONS</small>
-          </span>
-        </a>
-        <nav aria-label="주 메뉴">
-          <a href="#control">
-            <Icon name="panel" size={18} />
-            제어
-          </a>
-          <a href="#telemetry">
-            <Icon name="chart" size={18} />
-            실시간 상태
-          </a>
-          <a href="#events">이벤트</a>
-        </nav>
-        <div className="connection-box">
-          <span className={`connection ${connection}`} role="status">
-            <i />
-            {connection === "connected"
+        <div>
+          <p className="eyebrow">QHRR Control</p>
+          <h1>{title}</h1>
+        </div>
+        <div className="status-strip">
+          <Badge>{s?.runtime?.interface || "CAN"}</Badge>
+          <Badge
+            status={session.connection === "connected" ? "ok" : "danger"}
+            className="connection"
+          >
+            {session.connection === "connected"
               ? "서버 연결됨"
-              : connection === "connecting"
+              : session.connection === "connecting"
                 ? "연결 중"
                 : "연결 끊김"}
-          </span>
-          {connection === "disconnected" && (
-            <button
-              className="reconnect-button"
-              onClick={() => {
-                setNotice(null);
-                setConnectionKey((key) => key + 1);
-              }}
-            >
+          </Badge>
+          <Badge status={s?.drive_state === "ACTIVE" ? "warn" : "muted"}>
+            {s?.drive_state ?? "DISCONNECTED"}
+          </Badge>
+          {session.connection === "disconnected" && (
+            <button className="button light-button" onClick={session.reconnect}>
               다시 연결
             </button>
           )}
         </div>
       </header>
-
-      <main>
-        <header className="page-header">
-          <div>
-            <div className="eyebrow">
-              QHRR-05 <span>/</span> CONTROL WORKSPACE
-            </div>
-            <h1>로봇 제어</h1>
-            <p>제어 모드와 목표 힘을 설정하고, 실시간 상태를 확인하세요.</p>
-          </div>
-          <span className="session-tag">
-            <i />3 DOF <span>HR · HP · KP</span>
-          </span>
-        </header>
-
-        {notice?.kind === "error" && (
-          <div
-            role={notice.kind === "error" ? "alert" : "status"}
-            className={`notice ${notice.kind}`}
+      <nav className="menubar" aria-label="Dashboard views">
+        {[
+          ["/", "Overview"],
+          ["/processes", "Processes"],
+          ["/shm", "SHM Data"],
+        ].map(([path, label]) => (
+          <a
+            key={path}
+            className={`menu-link ${page === path ? "active" : ""}`}
+            href={path}
+            onClick={(e) => navigate(e, path)}
           >
-            <span className="notice-symbol" aria-hidden="true">
-              {notice.kind === "error"
-                ? "!"
-                : notice.kind === "success"
-                  ? "✓"
-                  : "i"}
-            </span>
-            <span>{notice.text}</span>
-            <button aria-label="알림 닫기" onClick={() => setNotice(null)}>
+            {label}
+          </a>
+        ))}
+      </nav>
+      {session.error && (
+        <div className="notice-wrap">
+          <div className="notice danger" role="alert">
+            {session.error}
+            <button aria-label="알림 닫기" onClick={() => session.setError("")}>
               ×
             </button>
           </div>
-        )}
-        {connection !== "connected" && (
-          <div className="notice warning" role="status">
-            <span className="notice-symbol" aria-hidden="true">
-              !
-            </span>
-            <span>
-              {connection === "connecting"
-                ? "서버에 연결하고 있습니다. 상태를 받은 뒤 조작할 수 있습니다."
-                : "연결이 끊겼습니다. 다시 연결해 상태를 확인하세요. 모든 제어 버튼이 비활성화되었습니다."}
-            </span>
-          </div>
-        )}
-        {connection === "connected" && !state?.ready && (
-          <div role="status" className="notice warning">
-            <span className="notice-symbol" aria-hidden="true">
-              !
-            </span>
-            <span>
-              {state?.failed
-                ? "제어 세션에 오류가 있습니다."
-                : state?.stopping
-                  ? "제어 세션이 종료 중입니다."
-                  : "제어기와 모델의 첫 상태를 기다리고 있습니다."}
-            </span>
-          </div>
-        )}
-
-        <section className="summary-grid" aria-label="세션 요약">
-          <div className="summary-card current-mode">
-            <div className="summary-label">
-              <span>현재 제어 모드</span>
-              <span className="live-label">
-                <i />
-                {state?.ready ? "LIVE" : "대기"}
-              </span>
-            </div>
-            <strong>{activeMode?.name ?? "—"}</strong>
-            <small>
-              {state
-                ? applied
-                  ? activeMode?.ko
-                  : `${modeName(state.requested_mode)} 적용 대기`
-                : "세션 연결 대기"}
-            </small>
-            <div className="summary-icon" aria-hidden="true">
-              <Icon name={activeMode?.icon ?? "panel"} size={64} />
-            </div>
-          </div>
-          <div className="summary-card">
-            <span className="summary-label">모터 연결</span>
-            <strong>
-              {state
-                ? state.can_enabled
-                  ? `${state.motors.filter((m) => m.enabled).length} / 3`
-                  : "DEBUG"
-                : "—"}
-            </strong>
-            <small>
-              {state
-                ? state.can_enabled
-                  ? "CAN · Enabled 모터"
-                  : "직접 토크 모드"
-                : "측정 대기"}
-            </small>
-          </div>
-          <div
-            className={`summary-card ${state?.contact ? "has-contact" : ""}`}
-          >
-            <span className="summary-label">발끝 접촉</span>
-            <strong>
-              {state?.contact == null
-                ? "—"
-                : state.contact
-                  ? "접촉 중"
-                  : "비접촉"}
-            </strong>
-            <small>
-              {state?.mode === 2
-                ? state.magnetic_phase
-                : state?.contact == null
-                  ? "시뮬레이션 데이터 없음"
-                  : "시뮬레이션 실제 접촉"}
-            </small>
-          </div>
-          <div className="summary-card">
-            <span className="summary-label">시뮬레이션 시간</span>
-            <strong className="mono">
-              {fmt(state?.time, 2)}
-              <em>s</em>
-            </strong>
-            <small>
-              {Number.isFinite(state?.time)
-                ? "시뮬레이션 시계 기준"
-                : "시뮬레이션 데이터 없음"}
-            </small>
-          </div>
-        </section>
-
-        <RequestFeedback request={latestRequest} />
-
-        <div className="control-grid" id="control">
-          <section className="panel mode-panel" aria-labelledby="mode-title">
-            <div className="section-heading">
-              <div>
-                <span className="section-number">01</span>
-                <h2 id="mode-title">어떻게 움직일까요?</h2>
-              </div>
-              <span className="section-meta">제어 모드</span>
-            </div>
-            <p className="section-description">
-              선택하면 해당 모드로 전환을 요청합니다.
-            </p>
-            <div className="mode-grid">
-              {modes.map((mode) => {
-                const selected = state?.mode === mode.id;
-                const waiting =
-                  latestRequest?.type === "mode" &&
-                  latestRequest.mode === mode.id &&
-                  ["requested", "approved"].includes(latestRequest.status);
-                return (
-                  <button
-                    key={mode.id}
-                    className={`mode-card ${selected ? "selected" : ""} ${waiting ? "waiting" : ""}`}
-                    disabled={!available}
-                    onClick={() => changeMode(mode.id)}
-                    aria-pressed={selected}
-                    aria-keyshortcuts={mode.key}
-                  >
-                    <span className="mode-card-top">
-                      <span className="mode-icon">
-                        <Icon name={mode.icon} size={25} />
-                      </span>
-                      <span
-                        className={
-                          selected
-                            ? "active-label"
-                            : waiting
-                              ? "pending-label"
-                              : "mode-code"
-                        }
-                      >
-                        {waiting
-                          ? "반영 대기"
-                          : selected
-                            ? "현재 모드"
-                            : mode.key}
-                      </span>
-                    </span>
-                    <strong>
-                      {mode.name}
-                      <span>{mode.ko}</span>
-                    </strong>
-                    <p>{mode.description}</p>
-                    <span className="mode-action">
-                      {selected ? "다시 요청" : "선택하기"}
-                      <Icon name="arrow" size={17} />
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {state?.zero_set && (state.zero_set.required || state.mode === 6) && (
-              <div className="inline-warning" role={state.zero_set.phase === "FAULT" ? "alert" : "status"}>
-                영점 보정: {state.zero_set.axis} / {state.zero_set.phase}
-                {state.zero_set.phase === "FAULT" && ` — ${state.zero_set.failure} (모터 출력 해제)`}
-                <br />Z: 처음부터 재시도 · D: 중단. 보정 완료 전에는 일반 모션이 차단됩니다.
-              </div>
-            )}
-            {state?.tracking_checking && (
-              <div className="tracking-progress" role="status">
-                <span>
-                  궤적 검사 중{" "}
-                  <b>{fmt(state.tracking_check_progress * 100, 0)}%</b>
-                </span>
-                <progress max="1" value={state.tracking_check_progress} />
-              </div>
-            )}
-            {state?.tracking_ik_failed && (
-              <div role="alert" className="inline-warning">
-                궤적 검사 또는 IK 한계로 자세를 유지하고 있습니다. 상태를 확인해
-                주세요.
-              </div>
-            )}
-            {state?.tracking_torque_saturated && (
-              <div className="inline-warning">
-                Tracking 토크 포화가 감지되었습니다.
-              </div>
-            )}
-            <div className="keyboard-hint">
-              <span>단축키</span>
-              {modes.map((mode) => (
-                <kbd key={mode.key}>{mode.key}</kbd>
-              ))}
-              <small>입력란 편집 중에는 비활성</small>
-            </div>
-            <div className="mode-footnote">
-              영점 설정이 필요하면 Zero set으로 시작하며, 아니면 Damping으로 시작합니다.
-              영점 보정 후 기준 자세 이동은 Homing을 선택하세요.
-            </div>
-          </section>
-
-          <section
-            className="panel settings-panel"
-            aria-labelledby="settings-title"
-          >
-            <div className="section-heading">
-              <div>
-                <span className="section-number">02</span>
-                <h2 id="settings-title">세부 설정</h2>
-              </div>
-            </div>
-            <div className="setting-block plane-setting">
-              <div className="setting-title">
-                <label id="plane-label">추종 평면</label>
-                <span className="setting-tag">Tracking</span>
-              </div>
-              <div
-                className="segmented"
-                role="group"
-                aria-labelledby="plane-label"
-              >
-                {planes.map((name, i) => (
-                  <button
-                    key={name}
-                    aria-pressed={plane === i}
-                    className={plane === i ? "chosen" : ""}
-                    disabled={!available}
-                    onClick={() => {
-                      planeEdited.current = true;
-                      setPlane(i);
-                    }}
-                  >
-                    <span>{name}</span>
-                    <kbd>{i + 1}</kbd>
-                  </button>
-                ))}
-              </div>
-              <div className="setting-caption">
-                현재 추종 평면{" "}
-                <strong>
-                  {state?.mode === 3 ? planes[state.tracking_plane] : "—"}
-                </strong>
-              </div>
-              <button
-                className="apply-button secondary"
-                disabled={!available}
-                onClick={() => changeMode(3)}
-              >
-                Tracking 시작 · {planes[plane]}
-                <Icon name="arrow" size={18} />
-              </button>
-            </div>
-            <div className="setting-block force-setting">
-              <div className="setting-title">
-                <label htmlFor="target-force">목표 접촉력</label>
-                <span className="setting-tag">Magnetic</span>
-              </div>
-              <p>값을 조절한 뒤 적용 버튼을 눌러주세요.</p>
-              <div className="force-control">
-                <button
-                  className="counter minus"
-                  aria-label="목표 접촉력 0.5 N 줄이기"
-                  disabled={!available || !forceValid || Number(force) <= 0}
-                  onClick={() =>
-                    changeForce(Math.max(0, +(Number(force) - 0.5).toFixed(1)))
-                  }
-                >
-                  −
-                </button>
-                <div className="force-input">
-                  <input
-                    id="target-force"
-                    type="number"
-                    inputMode="decimal"
-                    min="0"
-                    max={state?.maximum_force ?? 0}
-                    step="0.1"
-                    value={force}
-                    disabled={!available}
-                    aria-invalid={Boolean(forceInvalid)}
-                    aria-describedby="force-help"
-                    onChange={(event) => changeForce(event.target.value)}
-                  />
-                  <span>N</span>
-                </div>
-                <button
-                  className="counter plus"
-                  aria-label="목표 접촉력 0.5 N 늘리기"
-                  disabled={
-                    !available ||
-                    !forceValid ||
-                    Number(force) >= state?.maximum_force
-                  }
-                  onClick={() =>
-                    changeForce(
-                      Math.min(
-                        state.maximum_force,
-                        +(Number(force) + 0.5).toFixed(1),
-                      ),
-                    )
-                  }
-                >
-                  +
-                </button>
-              </div>
-              <input
-                className="force-range"
-                type="range"
-                aria-label="목표 접촉력 슬라이더"
-                min="0"
-                max={state?.maximum_force ?? 0}
-                step="0.1"
-                value={forceValid ? force : 0}
-                disabled={!available}
-                onChange={(event) => changeForce(event.target.value)}
-              />
-              <div className="range-labels">
-                <span>0 N</span>
-                <span>{fmt(state?.maximum_force, 1)} N</span>
-              </div>
-              <div
-                id="force-help"
-                className={forceInvalid ? "field-error" : "force-help"}
-              >
-                {forceInvalid
-                  ? `0~${fmt(state?.maximum_force, 1)} N 범위의 숫자를 입력하세요.`
-                  : forceDirty
-                    ? "변경한 값이 아직 적용되지 않았습니다."
-                    : "설정 범위 안에서 0.1 N 단위로 조절합니다."}
-              </div>
-              <button
-                className="apply-button primary"
-                disabled={!available || !forceValid}
-                onClick={() => request({ type: "force", value: Number(force) })}
-              >
-                목표 힘 적용
-                <Icon name="arrow" size={18} />
-              </button>
-              <div className="current-force">
-                적용 요청값 <strong>{fmt(state?.target_force, 1)} N</strong>
-                {forceDirty && <span className="draft-badge">미적용 변경</span>}
-              </div>
-            </div>
-          </section>
         </div>
-
-        <section
-          className="panel telemetry-panel"
-          id="telemetry"
-          aria-labelledby="telemetry-title"
-        >
-          <div className="section-heading">
-            <div>
-              <span className="section-number">03</span>
-              <h2 id="telemetry-title">로봇은 지금</h2>
-            </div>
-            <span className="section-meta">
-              <i
-                className={`live-dot ${connection === "connected" && state?.ready ? "live" : ""}`}
-              />
-              20 Hz 상태 조회
-            </span>
-          </div>
-          <div className="telemetry-intro">
-            <p>관절별 측정값과 최근 위치 변화를 확인하세요.</p>
-            <div className="toe-position">
-              <span>
-                발끝 <small>m</small>
-              </span>
-              {["X", "Y", "Z"].map((axis, i) => (
-                <span key={axis}>
-                  <b>{axis}</b>
-                  <strong>{fmt(state?.toe_position[i])}</strong>
-                </span>
-              ))}
-            </div>
-          </div>
-          <div className="table-scroll">
-            <table>
-              <caption className="sr-only">
-                HR, HP, KP 관절의 측정값과 CAN 상태
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">관절</th>
-                  <th scope="col">
-                    위치 <span>rad</span>
-                  </th>
-                  <th scope="col">
-                    속도 <span>rad/s</span>
-                  </th>
-                  <th scope="col">
-                    전류 <span>A</span>
-                  </th>
-                  <th scope="col">
-                    토크 <span>N·m</span>
-                  </th>
-                  <th scope="col">
-                    온도 <span>°C</span>
-                  </th>
-                  <th scope="col">CAN 상태</th>
-                </tr>
-              </thead>
-              <tbody>
-                {["HR", "HP", "KP"].map((axis, i) => {
-                  const motor = state?.motors[i];
-                  return (
-                    <tr key={axis}>
-                      <th scope="row">
-                        <span className={`axis-dot axis-${i}`} />
-                        <strong>{axis}</strong>
-                        <small>
-                          {["Hip roll", "Hip pitch", "Knee pitch"][i]}
-                        </small>
-                      </th>
-                      <td data-label="위치 · rad">{fmt(motor?.position)}</td>
-                      <td data-label="속도 · rad/s">{fmt(motor?.velocity)}</td>
-                      <td data-label="전류 · A">{fmt(motor?.current, 2)}</td>
-                      <td data-label="토크 · N·m">{fmt(motor?.torque, 2)}</td>
-                      <td data-label="온도 · °C">
-                        {fmt(motor?.temperature, 0)}
-                      </td>
-                      <td data-label="CAN 상태">
-                        <span
-                          className={`motor-status ${state?.can_enabled && motor?.enabled ? "enabled" : ""}`}
-                        >
-                          {!state
-                            ? "미연결"
-                            : !state.can_enabled
-                              ? "DEBUG"
-                              : !motor.profile_verified
-                                ? "프로파일 대기"
-                                : motor.enabled
-                                  ? "Enabled"
-                                  : "Released"}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="chart-grid">
-            {["HR", "HP", "KP"].map((axis, i) => (
-              <div className={`chart-card chart-${i}`} key={axis}>
-                <div className="chart-title">
-                  <span>
-                    <i className={`axis-dot axis-${i}`} />
-                    <b>{axis}</b> 위치
-                  </span>
-                  <strong>
-                    {fmt(state?.motors[i].position)}
-                    <em>rad</em>
-                  </strong>
-                </div>
-                <Sparkline
-                  history={connection === "connected" ? history : []}
-                  axis={i}
-                />
-              </div>
-            ))}
-          </div>
-          <p className="chart-note">
-            최근 최대 100개 수신 표본 · 각 그래프의 세로축 범위는 별도로
-            표시합니다.
-          </p>
-        </section>
-
-        <section
-          className="panel event-panel"
-          id="events"
-          aria-labelledby="event-title"
-        >
-          <div className="section-heading">
-            <div>
-              <span className="section-number">04</span>
-              <h2 id="event-title">작업 기록</h2>
-            </div>
-            <span className="section-meta">최근 12건 · KST</span>
-          </div>
-          <ol className="event-list">
-            {events.map((event, i) => (
-              <li key={`${event.time}-${i}`} data-status={event.status}>
-                <time>{event.time}</time>
-                <span>{event.title}</span>
-                <small>
-                  {{
-                    CONNECTED: "연결",
-                    DISCONNECTED: "연결 끊김",
-                    REQUESTED: "요청 전송",
-                    APPROVED: "안전 승인",
-                    APPLIED: "모드 반영",
-                    REJECTED: "거부",
-                    UNKNOWN: "미확인",
-                  }[event.status] ?? event.status}
-                </small>
-              </li>
-            ))}
-          </ol>
-          {!events.length && (
-            <p className="event-empty">
-              연결과 명령 처리 기록이 여기에 표시됩니다.
-            </p>
-          )}
-        </section>
-        <footer>
-          <span>
-            <i className="footer-dot" />
-            QHRR-05 OPERATIONS
-          </span>
-          <span>
-            측정값과 명령 결과는 현재 연결된 제어 세션을 기준으로 표시합니다.
-          </span>
-        </footer>
-      </main>
-    </div>
+      )}
+      <div id="dashboard">
+        {page === "/processes" ? (
+          <Processes session={session} />
+        ) : page === "/shm" ? (
+          <SharedMemory session={session} />
+        ) : (
+          <main className="dashboard overview-grid">
+            <StateMachine session={session} plane={plane} />
+            <Commands session={session} />
+            <CanLoad session={session} />
+            <ModeControl session={session} plane={plane} setPlane={setPlane} />
+            <Robot session={session} />
+            <Actuators session={session} />
+            <Nodes session={session} />
+            <Events session={session} />
+          </main>
+        )}
+      </div>
+      <footer className="footer-note">
+        QHRR-05 · {s?.session ?? "session pending"} · Input → Safety →
+        TaskController ·{" "}
+        {s?.simulation_available ? "Simulation session" : "Hardware session"}
+      </footer>
+    </>
   );
 }
 

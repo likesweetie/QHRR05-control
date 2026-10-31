@@ -28,11 +28,18 @@ with tempfile.TemporaryDirectory(prefix="qhrr-launcher-build-") as folder:
     scripts.mkdir()
     for name in (
         "ensure_build.sh",
-        "run_daemon.sh",
+        "run_simulation.sh",
+        "simulation_config.py",
         "run_visualization.sh",
         "visualization_process.sh",
     ):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    (root / "config/daemon").mkdir(parents=True)
+    (root / "config/daemon/daemon.yaml").write_text(
+        'runtime_mode: hardware\nshm_name: /launcher_test\nprocesses:\n'
+        '  - name: control\n    exec_path: control\n    working_directory: ../..\n    args: [control.yaml, "{shm_name}"]\n')
+    (root / "config/can_hal").mkdir()
+    (root / "config/can_hal/can_hal.yaml").write_text('interface: can0\nmotor_config: motor.yaml\n')
     (root / "main.cpp").write_text(
         '#include <iostream>\nint main() {std::cout << "NATIVE_LAUNCHED\\n";}\n'
     )
@@ -40,14 +47,14 @@ with tempfile.TemporaryDirectory(prefix="qhrr-launcher-build-") as folder:
     cmake.write_text(
         '''cmake_minimum_required(VERSION 3.22)
 project(LauncherRecovery CXX)
-foreach(name daemon simulation control can_hal input shm_logger qhrr_logctl)
+foreach(name daemon simulation control can_hal input shm_logger qhrr_logctl web_gui_bridge)
   add_executable(${name} main.cpp)
 endforeach()
 set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
 '''
     )
     args = ("--without-can", "--no-terminals")
-    first = run(root, "run_daemon.sh", *args)
+    first = run(root, "run_simulation.sh", *args)
     assert "automatically building" in first and "NATIVE_LAUNCHED" in first
     for name in (
         "daemon",
@@ -57,18 +64,19 @@ set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
         "input",
         "shm_logger",
         "qhrr-logctl",
+        "web_gui_bridge",
     ):
         assert os.access(root / "build" / name, os.X_OK), name
-    ready = run(root, "run_daemon.sh", *args)
+    ready = run(root, "run_simulation.sh", *args)
     assert "automatically building" not in ready and "NATIVE_LAUNCHED" in ready
     (root / "build" / "simulation").unlink()
-    assert "automatically building" in run(root, "run_daemon.sh", *args)
+    assert "automatically building" in run(root, "run_simulation.sh", *args)
     print("PASS: daemon builds missing children, reuses complete builds, runs from another cwd")
 
     shutil.rmtree(root / "build")
     children = [
         subprocess.Popen(
-            [str(scripts / "run_daemon.sh"), *args],
+            [str(scripts / "run_simulation.sh"), *args],
             cwd="/tmp",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -86,9 +94,9 @@ set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
     cmake.write_text(
         'cmake_minimum_required(VERSION 3.22)\nmessage(FATAL_ERROR "intentional build rejection")\n'
     )
-    failed = run(root, "run_daemon.sh", *args, expected=1)
+    failed = run(root, "run_simulation.sh", *args, expected=1)
     assert "intentional build rejection" in failed and "NATIVE_LAUNCHED" not in failed
-    bad_jobs = run(root, "run_daemon.sh", *args, expected=1, env={"QHRR_BUILD_JOBS": "invalid"})
+    bad_jobs = run(root, "run_simulation.sh", *args, expected=1, env={"QHRR_BUILD_JOBS": "invalid"})
     assert "positive integer" in bad_jobs and "NATIVE_LAUNCHED" not in bad_jobs
     print("PASS: build errors and invalid jobs fail visibly before any process launch")
 

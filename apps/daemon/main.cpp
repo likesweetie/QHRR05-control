@@ -1,6 +1,7 @@
 #include "daemon/daemon.hpp"
 #include "ipc/shm_utils.hpp"
 #include "daemon/statistics.hpp"
+#include "daemon/admin.hpp"
 
 #include <chrono>
 #include <cerrno>
@@ -62,6 +63,11 @@ std::vector<ProcessSpec> LoadProcesses(
         spec.name = process["name"].as<std::string>();
         if (process["critical"])
             spec.critical = process["critical"].as<bool>();
+        if (process["keep_on_stack_stop"])
+            spec.keep_on_stack_stop = process["keep_on_stack_stop"].as<bool>();
+        if (spec.keep_on_stack_stop && spec.critical)
+            throw std::runtime_error(
+                "persistent management process must be noncritical: " + spec.name);
         spec.exec_path =
             fs::absolute(ExecutableDirectory() / process["exec_path"].as<std::string>()).string();
         spec.args = process["args"].as<std::vector<std::string>>();
@@ -144,6 +150,7 @@ std::vector<ProcessSpec> LoadProcesses(
 
 // The application remains a direct child. The terminal only displays its PTY output.
 struct ProcessTerminal {
+    std::string name;
     int master{-1};
     int slave{-1};
 
@@ -270,7 +277,8 @@ bool StopChildren(Daemon& daemon, const std::vector<ProcessSpec>& specs) {
     }
 
     forced |= AnyRunning(daemon, specs);
-    daemon.TerminateAll(SIGKILL);
+    for (const auto& spec : specs)
+        daemon.Signal(spec.name, SIGKILL);
 
     while (AnyRunning(daemon, specs)) {
         daemon.Reap();
@@ -321,6 +329,11 @@ int main(int argc, char** argv) {
         daemon.BeginTerminalScreen();
         config_path = fs::absolute(config_path);
         const auto config = YAML::LoadFile(config_path.string());
+        const auto runtime = config["runtime_mode"].as<std::string>();
+        if (runtime != "hardware" && runtime != "simulation")
+            throw std::runtime_error("runtime_mode must be hardware or simulation");
+        if (without_can && runtime != "simulation")
+            throw std::runtime_error("--without-can is only available in simulation manifests");
         auto specs = LoadProcesses(config_path, config, without_can, no_terminals);
         const auto shm_name = config["shm_name"].as<std::string>();
         const auto monitoring = config["monitoring"];
@@ -362,6 +375,11 @@ int main(int argc, char** argv) {
 
         shared_memory = std::make_unique<shm_utils::Mapping>(shm_name, true);
         shared_memory->get()->can_enabled = !without_can;
+        shared_memory->get()->simulation_available = runtime == "simulation";
+        shared_memory->get()->observation_origin = without_can ? ObservationOrigin::DirectDebug
+                                                   : runtime == "simulation"
+                                                       ? ObservationOrigin::EmulatedDevice
+                                                       : ObservationOrigin::Device;
         statistics.Sample(*shared_memory->get());
         daemon.DisplayStatistics(
             statistics.Report(shm_utils::MonotonicNs(), ::isatty(STDOUT_FILENO)));
@@ -380,16 +398,18 @@ int main(int argc, char** argv) {
                 "[daemon] explicit --no-terminals: child output uses this stream\n");
 
         std::map<std::string, int> restart_count;
+        std::map<std::string, int> launch_count;
         std::map<std::string, std::uint64_t> restart_at;
         const auto launch = [&](const ProcessSpec& spec) {
+            const int generation = launch_count[spec.name]++;
             if (spec.terminal_title.empty()) {
                 StartProcess(daemon, spec, children);
             } else {
                 auto terminal = std::make_unique<ProcessTerminal>();
+                terminal->name = spec.name;
                 terminal->Open();
-                const auto suffix = restart_count[spec.name]
-                                        ? ".restart-" + std::to_string(restart_count[spec.name])
-                                        : std::string{};
+                const auto suffix =
+                    generation ? ".restart-" + std::to_string(generation) : std::string{};
                 const auto log_path = log_directory / (spec.name + suffix + ".log");
                 const int log_fd =
                     ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -460,11 +480,181 @@ int main(int argc, char** argv) {
 
         int result = 0;
         bool completed = false;
+        bool manually_stopped = false;
+        std::map<std::string, bool> manual_process_stop;
+        daemon_admin::Endpoint admin(shm_name);
+        std::string can_interface;
+        std::vector<unsigned> can_ids;
+        unsigned bitrate = 0;
+        for (const auto& spec : specs) {
+            if (spec.name != "can_hal" || spec.args.empty())
+                continue;
+            const auto hal =
+                YAML::LoadFile((fs::path(spec.working_directory) / spec.args[0]).string());
+            can_interface = hal["interface"].as<std::string>();
+            can_ids = hal["motor_ids"].as<std::vector<unsigned>>();
+            bitrate = hal["bus_load_bitrate"].as<unsigned>();
+        }
+        const auto runtime_status = [&] {
+            std::ostringstream out;
+            out << "{\"available\":true,\"daemon_pid\":" << ::getpid()
+                << ",\"state\":" << daemon_admin::Json(manually_stopped ? "STOPPED" : "RUNNING")
+                << ",\"interface\":" << daemon_admin::Json(can_interface)
+                << ",\"bitrate\":" << bitrate << ",\"motor_ids\":[";
+            for (std::size_t i = 0; i < can_ids.size(); ++i)
+                out << (i ? "," : "") << (0x140 + can_ids[i]);
+            out << "],\"processes\":[";
+            for (std::size_t i = 0; i < specs.size(); ++i) {
+                const auto& spec = specs[i];
+                const auto info = daemon.Get(spec.name);
+                out << (i ? "," : "") << "{\"name\":" << daemon_admin::Json(spec.name)
+                    << ",\"pid\":" << (info ? info->pid : -1)
+                    << ",\"running\":" << (info && info->running ? "true" : "false")
+                    << ",\"critical\":" << (spec.critical ? "true" : "false")
+                    << ",\"keep_on_stack_stop\":" << (spec.keep_on_stack_stop ? "true" : "false")
+                    << ",\"exit_code\":"
+                    << (info && info->exited ? std::to_string(info->exit_code) : "null")
+                    << ",\"signal\":"
+                    << (info && info->exited ? std::to_string(info->term_signal) : "null")
+                    << ",\"order\":" << i + 1
+                    << ",\"working_directory\":" << daemon_admin::Json(spec.working_directory)
+                    << ",\"command\":" << daemon_admin::Json(spec.exec_path) << ",\"args\":[";
+                for (std::size_t j = 0; j < spec.args.size(); ++j)
+                    out << (j ? "," : "") << daemon_admin::Json(spec.args[j]);
+                out << "]}";
+            }
+            return out.str() + "]}";
+        };
+        const auto persistent = [&](std::string name) {
+            if (name.size() > 9 && name.substr(name.size() - 9) == ".terminal")
+                name.resize(name.size() - 9);
+            const auto spec =
+                std::find_if(specs.begin(), specs.end(), [&](const ProcessSpec& item) {
+                    return item.name == name;
+                });
+            return spec != specs.end() && spec->keep_on_stack_stop;
+        };
+        const auto stack_children = [&] {
+            std::vector<ProcessSpec> result;
+            for (const auto& child : children)
+                if (!persistent(child.name))
+                    result.push_back(child);
+            return result;
+        };
         auto next_sample = shm_utils::MonotonicNs();
         auto next_display = next_sample + static_cast<std::uint64_t>(display_interval * 1e9);
         const auto sample_period_ns = static_cast<std::uint64_t>(1e9 / sample_hz);
 
         while (!stop_requested && !completed) {
+            if (const auto request = admin.Poll()) {
+                try {
+                    if (request->command == "stack") {
+                        if (request->action == "stop") {
+                            auto& shm = *shared_memory->get();
+                            {
+                                shm_utils::Lock lock(shm);
+                                const auto& motors =
+                                    shm.motors[shm.motor_sequence % kShmBufferCount];
+                                if (std::any_of(motors.command_enabled.begin(),
+                                        motors.command_enabled.end(),
+                                        [](bool v) {
+                                            return v;
+                                        }) ||
+                                    std::any_of(
+                                        motors.enabled.begin(), motors.enabled.end(), [](bool v) {
+                                            return v;
+                                        }))
+                                    throw std::runtime_error(
+                                        "Release all motor outputs before stopping the control stack");
+                                shm.stopping = true;
+                            }
+                            manually_stopped = true;
+                            restart_at.clear();
+                            if (StopChildren(daemon, stack_children()))
+                                throw std::runtime_error(
+                                    "Some processes required a forced stop; inspect process status before restarting");
+                            children.erase(std::remove_if(children.begin(),
+                                               children.end(),
+                                               [&](const auto& child) {
+                                                   return !persistent(child.name);
+                                               }),
+                                children.end());
+                            terminals.erase(std::remove_if(terminals.begin(),
+                                                terminals.end(),
+                                                [&](const auto& terminal) {
+                                                    return !persistent(terminal->name);
+                                                }),
+                                terminals.end());
+                        } else if (request->action == "start") {
+                            if (!manually_stopped)
+                                throw std::runtime_error("control stack is already running");
+                            auto& shm = *shared_memory->get();
+                            {
+                                shm_utils::Lock lock(shm);
+                                shm.motors.fill(MotorData{});
+                                shm.model.fill(ModelData{});
+                                shm.control.fill(ControlData{});
+                                ++shm.motor_sequence;
+                                ++shm.model_sequence;
+                                ++shm.control_sequence;
+                                shm.stopping = shm.failed = false;
+                            }
+                            try {
+                                for (const auto& spec : specs) {
+                                    const auto info = daemon.Get(spec.name);
+                                    if (spec.keep_on_stack_stop && info && info->running)
+                                        continue;
+                                    launch(spec);
+                                }
+                                manually_stopped = false;
+                                manual_process_stop.clear();
+                                restart_count.clear();
+                            } catch (...) {
+                                {
+                                    shm_utils::Lock lock(shm);
+                                    shm.stopping = true;
+                                }
+                                StopChildren(daemon, stack_children());
+                                throw;
+                            }
+                        } else
+                            throw std::runtime_error("stack action must be start or stop");
+                    } else if (request->command == "process") {
+                        const auto spec =
+                            std::find_if(specs.begin(), specs.end(), [&](const ProcessSpec& item) {
+                                return item.name == request->name;
+                            });
+                        if (spec == specs.end())
+                            throw std::runtime_error("unknown managed process");
+                        if (spec->critical)
+                            throw std::runtime_error(
+                                "critical processes start/stop together; use the control stack action");
+                        if (manually_stopped && !spec->keep_on_stack_stop)
+                            throw std::runtime_error("start the control stack first");
+                        const auto info = daemon.Get(spec->name);
+                        if (request->action == "stop") {
+                            manual_process_stop[spec->name] = true;
+                            restart_at.erase(spec->name);
+                            if (info && info->running)
+                                daemon.Signal(spec->name, SIGTERM);
+                        } else if (request->action == "start") {
+                            const auto viewer = daemon.Get(spec->name + ".terminal");
+                            if ((info && info->running) || (viewer && viewer->running))
+                                throw std::runtime_error("process or terminal is still running");
+                            manual_process_stop[spec->name] = false;
+                            restart_count[spec->name] = 0;
+                            restart_at.erase(spec->name);
+                            launch(*spec);
+                        } else
+                            throw std::runtime_error("process action must be start or stop");
+                    } else if (request->command != "status")
+                        throw std::runtime_error("unknown supervisor command");
+                    admin.Reply(
+                        request->id, true, "supervisor request completed", runtime_status());
+                } catch (const std::exception& error) {
+                    admin.Reply(request->id, false, error.what(), runtime_status());
+                }
+            }
             for (const auto& name : daemon.Reap()) {
                 const auto info = daemon.Get(name).value();
                 if (name == "input") {
@@ -495,11 +685,13 @@ int main(int argc, char** argv) {
                                             " signal=" + std::to_string(info.term_signal) + "\n");
                     if (name != base)
                         daemon.Signal(base, SIGTERM);
-                    if (!restart_at.count(base))
+                    if (!manual_process_stop[base] && !manually_stopped && !restart_at.count(base))
                         restart_at[base] = shm_utils::MonotonicNs() +
                                            std::uint64_t(spec->restart_delay_ms) * 1000000;
                     continue;
                 }
+                if (manually_stopped)
+                    continue;
                 completed = true;
                 if (info.exit_code || info.term_signal)
                     result = info.exit_code ? info.exit_code : 128 + info.term_signal;
@@ -508,8 +700,8 @@ int main(int argc, char** argv) {
             const auto now = shm_utils::MonotonicNs();
             if (!completed && !stop_requested) {
                 for (const auto& spec : specs) {
-                    if (spec.critical || !restart_at.count(spec.name) ||
-                        now < restart_at[spec.name])
+                    if (manually_stopped || manual_process_stop[spec.name] || spec.critical ||
+                        !restart_at.count(spec.name) || now < restart_at[spec.name])
                         continue;
                     const auto app = daemon.Get(spec.name),
                                viewer = daemon.Get(spec.name + ".terminal");

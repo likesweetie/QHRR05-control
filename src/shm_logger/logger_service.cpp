@@ -41,8 +41,8 @@ LoggerService::LoggerService(
         throw std::runtime_error("logger config requires logging map");
     auto_start_ = config_["enabled"].as<bool>() && config_["auto_start"].as<bool>();
     runtime_mode_ = config_["runtime_mode"].as<std::string>();
-    if (runtime_mode_ != "simulation" && runtime_mode_ != "hardware")
-        throw std::runtime_error("logger runtime_mode must be simulation or hardware");
+    if (runtime_mode_ != "simulation" && runtime_mode_ != "hardware" && runtime_mode_ != "session")
+        throw std::runtime_error("logger runtime_mode must be session, simulation or hardware");
     label_ = config_["session_label"].as<std::string>();
     if (label_.empty() || label_.size() > 64 ||
         label_.find_first_not_of(
@@ -100,6 +100,14 @@ LoggerService::~LoggerService() {
 }
 
 void LoggerService::Attach() {
+    {
+        shm_utils::Mapping mapping(shm_name_);
+        const std::string actual = mapping.get()->simulation_available ? "simulation" : "hardware";
+        const auto configured = config_["runtime_mode"].as<std::string>();
+        if (configured != "session" && configured != actual)
+            throw std::runtime_error("logger runtime mode does not match session capabilities");
+        runtime_mode_ = actual;
+    }
     reader_ = std::make_unique<SnapshotReader>(shm_name_, runtime_mode_ == "simulation");
     health_.state = "READY";
     std::cout << "[shm_logger] attached " << shm_name_ << " ABI=" << kShmAbiVersion << '\n';
@@ -172,6 +180,10 @@ void LoggerService::Start() {
     reader_->ResetCounters();
     auxiliary_failures_ = 0;
     sources["without_can"] = !initial.can_enabled;
+    {
+        shm_utils::Mapping mapping(shm_name_);
+        sources["observation_origin"] = ObservationOriginName(mapping.get()->observation_origin);
+    }
     storage_->Begin(
         label_, config_path_, daemon_config_, runtime_mode_, shm_name_, rate_hz_, sources);
     active_file_ = storage_->Directory() / "recording.mcap";
@@ -442,23 +454,23 @@ void LoggerService::CheckTriggers(const LogFrame& f) {
     const auto now = shm_utils::MonotonicNs();
     if (now - start_ns_ > 1000000000ULL) {
         for (int i = 0; i < 4; ++i) {
-            if (i == 3 && runtime_mode_ == "hardware")
+            if ((i == 3 && runtime_mode_ == "hardware") || (i == 1 && !f.model.valid))
                 continue;
             if (!health_.source_valid[i] || health_.source_age_ms[i] > stale_sec_ * 1000)
                 present.insert("SHM_STALE");
         }
-        if (f.can_enabled) {
+        if (f.can_enabled && f.control.drive_state == DriveState::Active) {
             for (int i = 0; i < 3; ++i)
                 if (!f.motor.received_ns[i] || f.motor.received_ns[i] > now ||
                     now - f.motor.received_ns[i] > std::uint64_t(can_timeout_sec_ * 1e9))
                     present.insert("CAN_TIMEOUT");
         }
-        if (f.control.mode == 2 && !f.control.magnetic.observer_valid)
+        if (f.control.drive_state == DriveState::Active && f.control.mode == 2 && !f.control.magnetic.observer_valid)
             present.insert("RFOB_INVALID");
     }
-    if (f.failed)
+    if (f.failed || f.control.drive_state == DriveState::Fault)
         present.insert("SAFETY_STOP");
-    if (f.model.published_ns) {
+    if (f.model.valid) {
         for (int i = 0; i < 3; ++i) {
             const double q = f.motor.feedback[i].position + f.motor.position_offset[i];
             if (f.model.joint_max[i] > f.model.joint_min[i] &&

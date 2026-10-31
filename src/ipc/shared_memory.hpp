@@ -9,7 +9,7 @@
 
 // Shared-memory protocol. Increment the ABI version when layout or field semantics change.
 inline constexpr std::uint64_t kShmMagic = 0x5148525253484D31ULL;  // QHRRSHM1
-inline constexpr std::uint32_t kShmAbiVersion = 14;
+inline constexpr std::uint32_t kShmAbiVersion = 16;
 inline constexpr std::size_t kShmBufferCount = 2;
 inline constexpr unsigned kShmPermissions = 0600;
 inline constexpr clockid_t kShmClock = CLOCK_MONOTONIC;
@@ -27,6 +27,11 @@ struct MotorData {
     std::array<std::uint64_t, 3> received_ns{}, received_sequence{};
     std::array<std::uint64_t, 3> tx_frames{}, rx_frames{}, invalid_frames{};
     std::array<bool, 3> profile_verified{}, enable_requested{}, enabled{};
+    std::array<std::uint32_t, 3> supported{}, valid{};
+    std::array<std::uint64_t, 3> measurement_ns{};  // Producer sample clock, for derivatives.
+    std::array<bool, 3> coordinate_valid{};  // Controller-owned encoder -> joint calibration.
+    TransportFault transport_fault = TransportFault::None;
+    std::uint64_t clear_fault_sequence = 0;  // Explicit controller request, never automatic.
 
     // Joint angle = raw CAN encoder + controller-owned runtime calibration.
     // Simulation bootstrap initializes this once; reset/enable never clear it.
@@ -42,6 +47,10 @@ struct MotorData {
 // Controller-owned model information, evaluated by its backend at decoded joint positions.
 struct ModelData {
     std::uint64_t published_ns = 0;
+    std::uint64_t input_measurement_sequence = 0;
+    bool valid = false;
+    bool acceleration_valid = false;
+    std::array<double, 3> joint_acceleration{};
     std::array<double, 3> gravity_torque{}, bias_torque{}, passive_torque{}, friction_limit{};
     std::array<double, 9> mass{}, jacobian{};
     std::array<double, 3> toe_position{}, joint_min{}, joint_max{};
@@ -54,11 +63,17 @@ struct ControlData {
     double target_force = 3;
     TrackingPlane requested_tracking_plane = TrackingPlane::XY;
     std::uint64_t motion_sequence = 0;
+    DriveAction requested_drive_action = DriveAction::None;
+    int requested_motor_axis = -1;  // Only EnableMotor/DisableMotor use an axis.
+    std::uint64_t drive_request_sequence = 0;
     std::array<double, 3> requested_ball_position{};  // Optional explicit target jump.
     std::uint64_t ball_target_sequence = 0;
 
     int mode = 5;  // Controller owns status and observer output. Startup is damping only.
     bool holding = false;
+    DriveState drive_state = DriveState::Disarmed;
+    std::uint64_t active_drive_request_sequence = 0;
+    std::array<char, 160> drive_fault_reason{};
     ZeroSetTelemetry zero_set{};
     std::array<double, 3>
         damping_toe_reference{};  // Captured on damping entry, no position stiffness.
@@ -112,6 +127,8 @@ struct ShmData {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
     bool stopping = false, failed = false, can_enabled = false;
+    bool simulation_available = false;  // Observer/command capability, not a motion input.
+    ObservationOrigin observation_origin = ObservationOrigin::Device;
 
     // All copies/publications hold mutex. Multiwriter channels copy the CURRENT
     // published slot before updating their own fields; never publish a stale bank.

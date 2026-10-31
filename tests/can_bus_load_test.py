@@ -54,6 +54,10 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-bus-load-') as directory:
                     'frequency_hz': 10,
                     'statistics_hz': 20,
                     'bus_load_bitrate': bitrate,
+                    'command_timeout_sec': 0.10,
+                    'feedback_timeout_sec': 0.25,
+                    'enable_timeout_sec': 1.0,
+                    'poll_released': False,
                     'motor_ids': [1, 2, 3],
                     'motor_config': str(root / 'config/motor/ak10_9_v3.yaml'),
                 }
@@ -64,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-bus-load-') as directory:
         manifest.write_text(
             json.dumps(
                 {
-                    'shm_name': name,
+                    'runtime_mode': 'simulation', 'shm_name': name,
                     'monitoring': {
                         'display_interval_sec': 2.0,
                         'window_sec': 10.0,

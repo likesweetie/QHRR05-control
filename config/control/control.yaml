@@ -11,11 +11,13 @@ workspace:  # 트래킹 실행 검사와 공 추종·W 오버레이가 함께 �
   maximum_condition_number: 10.0  # 위치 야코비안 σ_max/σ_min 상한; 초과하는 트래킹 궤적은 시작 거부
 
 control:  # 제어 프로세스의 실행 주기
+  startup_timeout_sec: 2.0  # Time allowed for feedback after explicit Arm.
   frequency_hz: 500.0  # 시뮬레이터와 독립적인 실제 시간 기준 제어 주파수(Hz)
 
 zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
-  direction: [-1, -1, -1]  # 엔코더 증가/감소 방향; 반드시 실제 스토퍼 방향과 일치해야 함
-  stop_position_rad: [-0.872665, -2.984513, -2.722714]  # 스토퍼의 모델 관절각; 스토퍼 자체를 0 rad로 취급하지 않음
+  direction: [1, -1, 1]  # 엔코더 증가/감소 방향; 반드시 실제 스토퍼 방향과 일치해야 함
+  stop_position_rad: [0.872665, -2.984513, -0.575959]
+  # stop_position_rad: [-0.872665, -2.984513, -2.722714]
   speed_rad_s: [0.12, 0.12, 0.12]  # 증분 위치 목표 속도
   contact_torque_nm: [6.0, 6.0, 3.0]  # 탐색 방향의 측정 토크가 이 값을 넘고 정지해야 접촉
   maximum_push_nm: [8.0, 8.0, 4.5]  # 탐색/유지 노력 상한; limits.torque_nm 이하
@@ -31,7 +33,7 @@ zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
 
 homing:  # 현재 관절각에서 호밍 자세까지 보간하는 위치 PD 제어
   kp: [40.0, 40.0, 40.0]  # 관절 위치 오차에 대한 P 게인(N·m/rad)
-  kd: [0.3, 0.3, 0.3]  # 목표·현재 관절 속도 오차에 대한 D 게인(N·m·s/rad)
+  kd: [1.0, 1.0, 1.0]  # 목표·현재 관절 속도 오차에 대한 D 게인(N·m·s/rad)
   initial_position_rad: [0.0, 0.3, -1.0]  # 시뮬레이터 시작·리셋 관절각(rad); 호밍 진입 시에는 현재 각도에서 출발
   position_rad: [0.0, 0.9, -1.8]  # 호밍 완료 후 유지할 목표 관절각(rad)
   duration_sec: 3.0  # 호밍 자세까지 이동하는 보간 시간(s)

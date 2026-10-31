@@ -25,3 +25,10 @@ assert 'target_link_libraries(robot_model PUBLIC qhrr05_common yaml-cpp)' in cma
 assert (ROOT / 'apps/interfaces/web_gui/frontend/server.mjs').is_file()
 assert (ROOT / 'src/interfaces/CMakeLists.txt').is_file()
 print('PASS: controller-private numerics, independent model backend, interfaces grouping, IPC layout')
+
+for path in controller.glob('*.cpp'):
+    text = path.read_text()
+    assert 'SimulationData' not in text and 'ObservationOrigin' not in text, path
+control_text = (ROOT / 'src/control/control.cpp').read_text()
+assert 'simulation_ipc' not in control_text and 'position_gt' not in control_text
+print('PASS: motion/control consumes common observations without simulation IPC or GT')

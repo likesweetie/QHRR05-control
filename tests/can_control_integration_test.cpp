@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
         }
 
         auto& shm = *can->get();
+        shm.simulation_available = true;
         char error[2048]{};
         std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
             mj_loadXML(argv[2], nullptr, error, sizeof(error)), mj_deleteModel);
@@ -211,8 +212,23 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_until(next);
         };
 
-        for (int step = 0; step < 6000 && !command().damping_reference_valid; ++step)
+        bool armed = false;
+        for (int step = 0; step < 6000 && !command().damping_reference_valid; ++step) {
+            const auto ready_motors = snapshot();
+            if (!armed && std::all_of(ready_motors.profile_verified.begin(),
+                              ready_motors.profile_verified.end(),
+                              [](bool v) {
+                                  return v;
+                              })) {
+                shm_utils::Lock lock(shm);
+                auto& c = shm_utils::Next(shm.control, shm.control_sequence);
+                c.requested_drive_action = DriveAction::Arm;
+                ++c.drive_request_sequence;
+                ++shm.control_sequence;
+                armed = true;
+            }
             tick(false);
+        }
 
         Require(command().mode == 5 && !command().holding && command().damping_reference_valid,
             "CAN controller automatically homed instead of starting in damping");

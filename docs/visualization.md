@@ -1,6 +1,8 @@
+> 현재 기본 `run_visualization.sh`는 실행 중인 장치 세션에 연결합니다. 새 시뮬레이션 세션은 `--simulation`, 정적 미리보기는 `--preview`입니다. 물리 세션은 CAN 관절 좌표와 모델 FK로 갱신하며 GT/외란 조작을 제공하지 않습니다. A=Arm, X=Release이며 SHM ABI 16로 전 프로세스 재빌드가 필요합니다.
+
 # 독립 MuJoCo / Filament 시각화
 
-기존 개발용 `scripts/run_daemon.sh`와 Classic GUI를 유지합니다. 새 `qhrr_visualizer`는 별도 프로세스에서 자신의 `mjModel` / `mjData`와 GPU 자원을 소유합니다. 물리·모터·제어 계산식과 게인은 유지하며, 물리 루프에는 승인된 시뮬레이션 조작을 수신하고 실제 상태를 발행하는 IPC 어댑터를 추가했습니다.
+기본 `scripts/run_daemon.sh`는 물리 CAN 세션을, `scripts/run_simulation.sh`는 기존 Classic GUI가 있는 시뮬레이션을 실행합니다. `qhrr_visualizer`는 별도 프로세스에서 자신의 `mjModel` / `mjData`와 GPU 자원을 소유합니다. 물리·모터·제어 계산식과 게인은 유지하며, 물리 루프에는 승인된 시뮬레이션 조작을 수신하고 실제 상태를 발행하는 IPC 어댑터를 추가했습니다.
 
 ```mermaid
 flowchart LR
@@ -17,7 +19,7 @@ flowchart LR
     Renderer --> GPU[MuJoCo 3.16.0 mjrf → Filament → RTX 5090 Vulkan]
 ```
 
-SHM ABI가 **13**로 변경되었습니다. 기존 세션을 종료하고 기본 C++ 빌드와 시각화 빌드를 모두 갱신한 뒤 새 세션을 시작하십시오. 구버전 프로세스와 혼용하면 명시적 ABI 오류입니다.
+SHM ABI는 **16**입니다. 기존 세션을 종료하고 기본 C++ 빌드와 시각화 빌드를 모두 갱신한 뒤 새 세션을 시작하십시오. 구버전 프로세스와 혼용하면 명시적 ABI 오류입니다.
 
 ## 준비와 실행
 
@@ -25,17 +27,19 @@ SHM ABI가 **13**로 변경되었습니다. 기존 세션을 종료하고 기본
 
 ```bash
 ./scripts/build_visualization.sh --jobs 8
-./scripts/run_visualization.sh --existing-can
+./scripts/run_visualization.sh                # 실행 중인 세션 관측
+./scripts/run_visualization.sh --simulation   # 새 시뮬레이션 세션
 ```
 
 첫 빌드는 공식 소스와 도구를 다운로드하므로 네트워크와 수 GiB 디스크가 필요합니다. 소스·의존성·셰이더·실행 파일·로컬 Clang 18.1.8 도구는 Git 제외 대상 `build-filament/`에만 생성합니다. LLVM 패키지는 `visualization/toolchain-lock.json`의 공식 URL과 SHA256으로 검증하고 압축 해제합니다. 호스트 패키지와 시스템 컴파일러는 설치·교체하지 않습니다. 의존성이 준비된 이후 실행에는 다운로드나 자동 재설치가 없습니다. 실행 파일 또는 빌드된 셰이더가 없으면 런처가 자동으로 준비·빌드합니다. `--setup`은 준비 과정을 명시적으로 다시 실행합니다. 빌드 로그와 오류는 그대로 표시하며 다른 백엔드로 전환하지 않습니다. `QHRR_BUILD_JOBS`로 병렬 빌드 수를 지정할 수 있습니다. Python 바인딩 시험 유틸리티는 비활성화하여 시각화에 필요 없는 Eigen 다운로드를 하지 않습니다.
 
 | 명령 | 동작 |
 | --- | --- |
-| `scripts/run_visualization.sh` | 원래 런처와 같은 호스트 vcan 준비 + 새로운 시각화 세션 |
-| `scripts/run_visualization.sh --isolated-vcan --no-terminals` | 격리 CAN 네임스페이스에서 새 세션, GPU 창은 현재 X11 디스플레이 |
-| `scripts/run_visualization.sh --existing-can` | 준비된 CAN만 사용 |
-| `scripts/run_visualization.sh --without-can` | 명시적 기존 SHM 토크 디버그 모드; 기존 headless 구현처럼 실시간 제한 없이 실행 |
+| `scripts/run_visualization.sh` | 실행 중인 /qhrr05 세션에 연결 |
+| `scripts/run_visualization.sh --simulation` | 호스트 vcan 준비 + 새로운 시각화 시뮬레이션 세션 |
+| `scripts/run_visualization.sh --simulation --isolated-vcan --no-terminals` | 격리 CAN 네임스페이스에서 새 시뮬레이션, GPU 창은 현재 X11 디스플레이 |
+| `scripts/run_visualization.sh --simulation --existing-can` | 준비된 가상 CAN만 사용한 시뮬레이션 |
+| `scripts/run_visualization.sh --simulation --without-can` | 명시적 SHM 토크 디버그 시뮬레이션; 기존 headless 구현처럼 실시간 제한 없이 실행 |
 | `scripts/run_visualization.sh --attach --shm-name /qhrr05` | 실행 중인 세션에 조작 가능한 창 추가; 창만 닫으면 세션은 유지 |
 | `scripts/run_visualization.sh --preview` | 정적 모델 보기, SHM과 물리 계산 없음 |
 | 위 명령에 `--backend classic` | 별도 뷰어에서 기존 `mjv` / `mjr` OpenGL 경로 선택 |
@@ -66,7 +70,7 @@ SHM ABI가 **13**로 변경되었습니다. 기존 세션을 종료하고 기본
 ## 상태 동기화와 실행 주기
 
 - SHM에는 실물 하드웨어도 사용하는 `MotorData`, `ModelData`, `ControlData`와 공통 수명 플래그만 있습니다. `SimulationInput`, GT, 접촉 이벤트, 물체 자세, 물리 pause/finished는 SHM에 없습니다.
-- 시뮬레이션 전용 교환은 `src/ipc/simulation`의 단일 버전형 `AF_UNIX / SOCK_SEQPACKET` 모듈을 사용합니다. 세션별 경로는 `/tmp/qhrr05-simulation-<uid>/<세션 이름>.sock`이며 디렉터리는 사용자 소유 0700입니다. 프로토콜 버전은 1입니다. 길이·버전·메시지 역할 불일치는 오류로 거부합니다. 세션별 소유권 잠금을 사용하며, 연결 시 `ECONNREFUSED`로 확인된 사용자 소유의 잔여 소켓만 로그를 남기고 제거합니다. 사용 중인 소켓·일반 파일·검증할 수 없는 경로는 보존하고 오류를 냅니다.
+- 시뮬레이션 전용 교환은 `src/ipc/simulation`의 단일 버전형 `AF_UNIX / SOCK_SEQPACKET` 모듈을 사용합니다. 세션별 경로는 `/tmp/qhrr05-simulation-<uid>/<세션 이름>.sock`이며 디렉터리는 사용자 소유 0700입니다. 프로토콜 버전은 2입니다. 길이·버전·메시지 역할 불일치는 오류로 거부합니다. 세션별 소유권 잠금을 사용하며, 연결 시 `ECONNREFUSED`로 확인된 사용자 소유의 잔여 소켓만 로그를 남기고 제거합니다. 사용 중인 소켓·일반 파일·검증할 수 없는 경로는 보존하고 오류를 냅니다.
 - 물리 스레드는 승인 명령을 nonblocking으로 받고 GT를 발행합니다. 구독자가 느리면 최신 상태를 유지하면서 해당 구독자의 `transport_drops`를 증가시킵니다. 구독자의 수신이나 GPU 완료를 기다리지 않습니다.
 - 관찰 스레드는 2 ms 간격으로 simulation IPC를 읽고, 하드웨어 SHM은 `trylock`으로 Motor/Model/Control만 짧게 복사합니다. 잠금 해제 후 로컬 mailbox에 합칩니다. 두 경로의 게시 시각·시퀀스는 서로 독립적입니다.
 - 렌더러는 로컬 스냅샷으로 자기 `mjData`만 갱신합니다. GPU 작업·리소스 업로드·프레임 제출·readback·FPS 대기는 하드웨어 SHM 잠금 밖이며 별도 프로세스에서 수행합니다. 물리와 렌더러가 같은 `mjData`를 수정하지 않습니다.

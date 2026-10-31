@@ -6,6 +6,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def default_simulation_manifest(directory, template=None):
+    import runpy
+    import yaml
+    prepare = runpy.run_path(str(ROOT / 'scripts/simulation_config.py'))['prepare']
+    return yaml.safe_load(prepare(ROOT, directory, without_can=True, template=template).read_text())
+
+
 def simulation_command(directory, shm_name, csv_path=None, duration=None, control=None):
     control = Path(control) if control else ROOT / 'tests/fixtures/control.yaml'
     args = [
@@ -41,7 +48,7 @@ def simulation_command(directory, shm_name, csv_path=None, duration=None, contro
     path.write_text(
         json.dumps(
             {
-                'shm_name': shm_name,
+                'runtime_mode': 'simulation', 'shm_name': shm_name,
                 'monitoring': {'display_interval_sec': 2.0, 'window_sec': 10.0, 'sample_hz': 100.0},
                 'debug_processes': processes,
             }

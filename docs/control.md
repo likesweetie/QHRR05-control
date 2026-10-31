@@ -1,12 +1,12 @@
 # 제어 모드와 시뮬레이션
 
-빌드·기본 실행은 [README](../README.md), 패킷 규약은 [CAN HAL](can_hal.md)을 참고하십시오. 설정을 변경하면 데몬을 재시작합니다. 아래 알고리즘 설명과 예시 수치는 현재 사용자 튜닝 파일의 값을 대신하지 않습니다.
+현재 실행/Arm/Release와 데이터 상태는 [README](../README.md)를 우선 확인하십시오. 빌드·기본 실행은 [README](../README.md), 패킷 규약은 [CAN HAL](can_hal.md)을 참고하십시오. 설정을 변경하면 데몬을 재시작합니다. 아래 알고리즘 설명과 예시 수치는 현재 사용자 튜닝 파일의 값을 대신하지 않습니다.
 
 ## 시뮬레이션 엔코더 원점
 
 [simulation.yaml](../config/simulation/simulation.yaml)의 `motor.require_zero_position_setup`을 사용합니다. 기본값 `false`는 제로셋 없이 모델 관절각을 그대로 CAN 위치로 반환합니다(패킷 양자화 오차 포함). 이때 호스트 `position_offset`은 0이며 enable 전에 관절이 움직여도 좌표가 바뀌지 않습니다.
 
-`true`는 모터 생성 시 축별 초기 표시 각도를 −π~π rad에서 독립적으로 뽑습니다. 첫 시뮬레이션 IPC 상태에서 이 정책을 받은 TaskController가 **Zero set(모드 6)**을 자동 시작합니다. enable/release·일시정지·물리 리셋은 임의 원점을 다시 뽑거나 런타임 보정값을 지우지 않습니다. 세 축 보정 전에는 H/G/M/T/B 요청을 거부하며, 거부한 요청을 보정 후 뒤늦게 실행하지 않습니다. D로 중단하고 Z로 처음부터 재시도할 수 있습니다.
+`true`는 모터 생성 시 축별 초기 표시 각도를 −π~π rad에서 독립적으로 뽑습니다. 시뮬레이션 입력 인터페이스가 이 정책을 **일반 Zero set(모드 6) 요청**으로 전달합니다. 모든 세션은 DISARMED로 시작하며 Arm 이후에 탐색합니다. enable/release·일시정지·물리 리셋은 임의 원점을 다시 뽑거나 런타임 보정값을 지우지 않습니다. 세 축 보정 전에는 H/G/M/T/B 요청을 거부하며, 거부한 요청을 보정 후 뒤늦게 실행하지 않습니다. D로 중단하고 Z로 처음부터 재시도할 수 있습니다.
 
 ### 스토퍼 기반 Zero set
 
@@ -20,7 +20,7 @@
 - `maximum_push_nm`은 보정 중 접촉/유지 노력 상한으로 공통 `limits.torque_nm` 이하여야 합니다. 위치 오차도 제한하여 스토퍼에서 목표가 무한히 누적되지 않게 합니다.
 - 이동량·축별 시간 초과, 피드백 중단, 비유한 입력은 FAULT로 표시하고 모든 모터 출력을 해제합니다. 일시정지 중에는 탐색/접촉 판정 시간도 정지합니다.
 
-**저장은 실행 중 `MotorData.position_offset`에만 합니다.** CAN C3나 실제 모터 ROM/EEPROM 쓰기를 전송하지 않으며 설정 파일도 수정하지 않습니다. SHM 세션을 새로 만들면 보정값이 사라지고 다시 탐색합니다. 가상 모터의 수동 C3 구현은 그대로 유지됩니다. 직접 토크 디버그 모드 `--without-can`에는 미지의 모터 엔코더가 없으므로 Z 요청을 명시적으로 거부합니다.
+**저장은 실행 중 `MotorData.position_offset`에만 합니다.** CAN C3나 실제 모터 ROM/EEPROM 쓰기를 전송하지 않으며 설정 파일도 수정하지 않습니다. SHM 세션을 새로 만들면 보정값이 사라지고 다시 탐색합니다. 가상 모터의 수동 C3 구현은 그대로 유지됩니다. 직접 effort 디버그는 가상 관절 관측과 effort를 제공하며, 전류·온도는 취득 불가입니다. 모션은 출처 대신 필요한 관측의 유효성을 확인합니다.
 
 현재 기본 장면에서는 초기 발끝이 주황색 접촉 물체와 겹칩니다. 자동 보정에서 이 물체와의 접촉이 감지되면 `ExternalContact` 오류로 출력을 해제합니다. Ctrl 드래그/물체 이동으로 경로 밖에 놓고 Z를 눌러 재시도하십시오. 이 시뮬레이션 정보는 보정을 **거부**하는 데만 쓰며, 영점 산출에는 쓰지 않습니다.
 
@@ -30,10 +30,11 @@
 
 기존 Classic GUI와 독립 Filament 창에서 아래 프로젝트 조작을 사용할 수 있습니다. Filament 패널·카메라 추가 키는 [시각화 안내](visualization.md)를 참고하십시오. 시뮬레이션 전용 데이터와 승인 조작은 `simulation_ipc`로 교환하며 하드웨어 SHM에는 넣지 않습니다.
 
-**제로셋이 필요하지 않은 시작과 물리 리셋의 기본 상태는 Damping**입니다. `require_zero_position_setup: true`인 새 세션은 먼저 Zero set을 수행합니다. 자동 호밍하지 않습니다. 관절 `kp=0`, `kd=1`, 기본 목표 속도·`tau_ff=0`으로 `tau=-dq`를 계산하고 공통 `limits.torque_nm`으로 제한합니다. CAN에는 이를 MIT 명령으로 직접 보내며(kp로 나누는 surrogate 변환 없음), 제한이 걸릴 때만 동일한 제한 토크가 나오도록 목표 속도를 보정합니다. 첫 유효 모델 상태에서 현재 관절각과 발끝 위치를 목표로 한 번 저장합니다. 이후 위치 오차에 따른 복원력이나 중력 보상은 없으므로 중력·외력에 의해 움직일 수 있습니다. 모델이 아직 없으면 제어 주기는 계속 감쇠 출력을 내고, 목표 미확정 상태를 표시한 뒤 첫 모델 샘플에서 목표를 확정합니다. D로 다시 진입할 때도 그때의 위치를 캡처하며 GUI와 `ControlData.damping_toe_reference`·`damping_reference_valid` 및 MCAP에 표시·기록합니다. 호밍하려면 H를 누릅니다.
+**시작은 DISARMED, 선택된 기본 모션은 Damping**입니다. Arm 요청 전에는 출력하지 않습니다. `require_zero_position_setup: true`인 새 세션은 먼저 Zero set을 수행합니다. 자동 호밍하지 않습니다. 관절 `kp=0`, `kd=1`, 기본 목표 속도·`tau_ff=0`으로 `tau=-dq`를 계산하고 공통 `limits.torque_nm`으로 제한합니다. CAN에는 이를 MIT 명령으로 직접 보내며(kp로 나누는 surrogate 변환 없음), 제한이 걸릴 때만 동일한 제한 토크가 나오도록 목표 속도를 보정합니다. 첫 유효 모델 상태에서 현재 관절각과 발끝 위치를 목표로 한 번 저장합니다. 이후 위치 오차에 따른 복원력이나 중력 보상은 없으므로 중력·외력에 의해 움직일 수 있습니다. 모델이 아직 없으면 제어 주기는 계속 감쇠 출력을 내고, 목표 미확정 상태를 표시한 뒤 첫 모델 샘플에서 목표를 확정합니다. D로 다시 진입할 때도 그때의 위치를 캡처하며 GUI와 `ControlData.damping_toe_reference`·`damping_reference_valid` 및 MCAP에 표시·기록합니다. 호밍하려면 H를 누릅니다.
 
 | 입력 | 동작 |
 | --- | --- |
+| A / X | 명시적 Arm / Release. fault 해제는 별도 Clear fault 버튼 또는 Input 명령 |
 | Z | hip → thigh → calf 스토퍼 탐색·런타임 영점 보정 시작/재시도 |
 | D | 기본 Damping: kp=0, kd=1, 중력 보상 없이 관절 속도 감쇠 |
 | H | 명시적으로 5차 보간 호밍 후 순수 PD 자세 유지 |
@@ -219,7 +220,7 @@ IK는 이전 목표에서 시작하는 기존 반복 알고리즘을 유지하�
 
 3D 화면에는 최근 2초의 실제 발끝 경로를 가는 반투명 하늘색 잔상으로 표시합니다. 오래된 부분부터 옅어지고 리셋 시 지워집니다. 일시정지 중에는 잔상도 유지합니다.
 
-GUI 오른쪽에는 선택 평면의 목표/실제 경로, XYZ 위치 비교, 위치 오차 그래프를 표시하고 상단에는 오차·토크 포화·선택한 IDFF/CTC의 ON/OFF·IK 오차를 표시합니다. `ControlData.tracking_position_reference`·`tracking_velocity_reference`·`tracking_torque_saturated` 및 요청/실제 평면(`requested_tracking_plane`·`tracking_plane`, XY=0/XZ=1/YZ=2)은 MCAP에도 기록됩니다. 목표 발끝 가속도·목표 관절 속도/가속도·역동역학 토크·활성화 여부·IK 오차도 기록하며, 목표 관절각은 기존 `MotorData.reference`를 사용합니다. 선택 방식(`tracking_method`: inverse_dynamics=0, CTC=1, impedance=2)과 포화 전 CTC 토크(`tracking_ctc_torque`)도 기록합니다. SHM ABI는 **13**이므로 모든 프로세스를 함께 재빌드·재시작해야 합니다.
+GUI 오른쪽에는 선택 평면의 목표/실제 경로, XYZ 위치 비교, 위치 오차 그래프를 표시하고 상단에는 오차·토크 포화·선택한 IDFF/CTC의 ON/OFF·IK 오차를 표시합니다. `ControlData.tracking_position_reference`·`tracking_velocity_reference`·`tracking_torque_saturated` 및 요청/실제 평면(`requested_tracking_plane`·`tracking_plane`, XY=0/XZ=1/YZ=2)은 MCAP에도 기록됩니다. 목표 발끝 가속도·목표 관절 속도/가속도·역동역학 토크·활성화 여부·IK 오차도 기록하며, 목표 관절각은 기존 `MotorData.reference`를 사용합니다. 선택 방식(`tracking_method`: inverse_dynamics=0, CTC=1, impedance=2)과 포화 전 CTC 토크(`tracking_ctc_torque`)도 기록합니다. SHM ABI는 **16**이므로 모든 프로세스를 함께 재빌드·재시작해야 합니다.
 
 Tracking 화면에는 **IDFF/CTC 토크 여유**도 표시합니다. HR/HP/KP별 `limit / now / |peak| / left Nm (%)`는 유효 제한·현재 선택한 방식의 raw 토크·최근 절댓값 피크·피크 기준 잔여 토크와 비율입니다. `left = limit - |peak|`이며 초과하면 음수와 `OVER`를 표시합니다. 유효 제한은 Tracking 설정과 MuJoCo actuator 양방향 제한 중 작은 값이고, CAN 실행에서는 가상 모터의 토크 제한도 포함합니다. 현재 기본 CAN 설정에서는 **53Nm**입니다. 비대칭 제한은 양방향 중 작은 절댓값으로 보수적으로 평가합니다.
 
@@ -263,11 +264,11 @@ GUI에서 **W 키**로 작업공간 표시를 켜고 끕니다. 기본은 꺼짐
 
 공은 범위 밖으로 자유롭게 움직이고 발끝만 가까운 유효 FK 지점까지 뻗은 채 유지합니다. 공이 불연속적으로 바뀌어도 발끝 참조는 기존 짧은 연결 구간을 마친 후 새 경로로 이어져 **위치가 점프하지 않습니다**. 관절 보간의 FK 호장 기준으로 정속 이동하며, 경로 모서리에서 속도 방향까지 연속인 C1 궤적을 보장하는 방식은 아닙니다. 진입 자세가 2cm 여유 밖이면 현재 위치에서 유효 영역으로 연속 이동하고 `ENTERING SAFE WORKSPACE`로 표시합니다. 반대 운동학 분기·특이 자세에서는 H로 돌아가도록 명시적 오류를 보고합니다.
 
-기존 MIT 위치 명령·`tau_ff=0` 경로를 사용합니다. 공 위치·발끝 참조·최근접점·작업공간 제한·입력 연결/트리거 상태는 SHM/MCAP에 기록합니다. 선택적 외부 목표 점프는 `requested_ball_position`을 쓰고 `ball_target_sequence`를 증가시키며, 모드 재진입 시 이전 요청은 다시 적용하지 않습니다. SHM ABI는 **13**이므로 모든 프로그램을 함께 재빌드·재시작합니다.
+기존 MIT 위치 명령·`tau_ff=0` 경로를 사용합니다. 공 위치·발끝 참조·최근접점·작업공간 제한·입력 연결/트리거 상태는 SHM/MCAP에 기록합니다. 선택적 외부 목표 점프는 `requested_ball_position`을 쓰고 `ball_target_sequence`를 증가시키며, 모드 재진입 시 이전 요청은 다시 적용하지 않습니다. SHM ABI는 **16**이므로 모든 프로그램을 함께 재빌드·재시작합니다.
 
 ## 가상 Iq 센서
 
-[simulation.yaml](../config/simulation/simulation.yaml)의 `iq_sensor.enabled: true`로 켭니다. 현재 기본값은 `true`이며 시작 로그에 ENABLED/DISABLED를 표시합니다. 설정을 바꾼 뒤 데몬을 재시작합니다. 기본 daemon은 시뮬레이터에 `--simulation-config` 경로를 전달합니다. CAN 모드에서 이 경로는 필수이며, 직접 토크 디버깅 `--without-can`에는 적용하지 않습니다.
+[simulation.yaml](../config/simulation/simulation.yaml)의 `iq_sensor.enabled: true`로 켭니다. 현재 기본값은 `true`이며 시작 로그에 ENABLED/DISABLED를 표시합니다. 설정을 바꾼 뒤 시뮬레이션 세션을 재시작합니다. 시뮬레이션 프로파일은 시뮬레이터에 `--simulation-config` 경로를 전달합니다. 가상 CAN 모드에서 이 경로는 필수이며, 직접 토크 디버깅 `--without-can`에는 적용하지 않습니다. 물리 CAN 기본 세션은 이 가상 센서 설정을 읽지 않습니다.
 
 ```yaml
 iq_sensor:

@@ -77,7 +77,7 @@ def running(folder, suffix, config=None, duration=30, start_producer=True):
         assert rpc(sock, 'status')['state'] == 'INITIALIZING'
         if start_producer:
             producer = subprocess.Popen(
-                [str(ROOT / 'build/logging_test_producer'), name, str(duration), str(control)],
+                [str(ROOT / 'build/logging_test_producer'), *(['--hardware'] if suffix == 'hardware' else []), name, str(duration), str(control)],
                 stdout=subprocess.DEVNULL,
             )
             wait_for(

@@ -116,6 +116,7 @@ int main(int argc, char** argv) {
 
         shm_utils::Mapping mapping(options.shm_name);
         auto& shm = *mapping.get();
+        const bool publish_simulation = shm.simulation_available;
 
         char error[2048] = {};
         std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
@@ -148,12 +149,15 @@ int main(int argc, char** argv) {
             if (shm.can_enabled == options.without_can)
                 throw std::runtime_error("SHM transport does not match simulator mode");
 
-            auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
-
-            for (int i = 0; i < 3; ++i)
-                motors.position_offset[i] = options.without_can ? initial[i] : 0;
-
-            ++shm.motor_sequence;
+            if (publish_simulation || options.without_can) {
+                auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
+                for (int i = 0; i < 3; ++i) {
+                    motors.position_offset[i] = options.without_can ? initial[i] : 0;
+                    if (options.without_can)
+                        motors.coordinate_valid[i] = true;
+                }
+                ++shm.motor_sequence;
+            }
         }
 
         std::uint64_t run_id = 0;
@@ -211,10 +215,13 @@ int main(int argc, char** argv) {
 
         const int object_body = mj_name2id(model.get(), mjOBJ_BODY, "touch_object");
 
-        if (object_body < 0)
+        if (publish_simulation && object_body < 0)
             throw std::runtime_error("missing touch_object body");
 
-        const int object_mocap = model->body_mocapid[object_body];
+        const int object_mocap = object_body < 0 ? -1 : model->body_mocapid[object_body];
+        if (object_mocap < 0)
+            std::cout
+                << "[simulate] robot-only model: contact ground truth and object controls unavailable\n";
         const int toe_site = mj_name2id(model.get(), mjOBJ_SITE, "FL_foot");
 
         if (toe_site < 0)
@@ -223,7 +230,8 @@ int main(int argc, char** argv) {
         double target_force = config["magnetic_touch"]["target_force_n"].as<double>();
         const double maximum_force = config["magnetic_touch"]["maximum_force_n"].as<double>();
 
-        qhrr05::InputInterface::RequestForce(shm, target_force);
+        if (publish_simulation)
+            qhrr05::InputInterface::RequestForce(shm, target_force);
 
         ControlData applied_command = update_io();
 
@@ -233,7 +241,24 @@ int main(int argc, char** argv) {
         double next_sample = 0;
         bool holding_reported = false;
         bool physics_paused = false;
-        qhrr05::SimulationInteraction remote_interaction(options.shm_name, model.get(), data.get());
+        std::unique_ptr<qhrr05::SimulationInteraction> remote_interaction;
+        if (publish_simulation)
+            remote_interaction = std::make_unique<qhrr05::SimulationInteraction>(
+                options.shm_name, model.get(), data.get());
+        else
+            std::cout
+                << "[simulate] CAN device mode: hardware control session; no simulation IPC or calibration bootstrap\n";
+        const auto poll_interaction = [&](bool paused) {
+            if (remote_interaction)
+                return remote_interaction->Poll(paused);
+            qhrr05::SimulationInteraction::Update state;
+            state.paused = paused;
+            return state;
+        };
+        const auto contact_truth = [&] {
+            return object_mocap >= 0 ? qhrr05::ReadContactGroundTruth(model.get(), data.get())
+                                     : std::array<double, 6>{};
+        };
 
         const auto sync_requests = [&] {
             if (request_sequence != applied_command.motion_sequence)
@@ -306,8 +331,10 @@ int main(int argc, char** argv) {
             frame.run_id = run_id;
             frame.reference = reference;
 
-            std::copy_n(data->mocap_pos + 3 * object_mocap, 3, frame.object_position.begin());
-            const auto ground_truth = qhrr05::ReadContactGroundTruth(model.get(), data.get());
+            frame.ground_truth_available = object_mocap >= 0;
+            if (object_mocap >= 0)
+                std::copy_n(data->mocap_pos + 3 * object_mocap, 3, frame.object_position.begin());
+            const auto ground_truth = contact_truth();
             std::copy_n(data->site_xpos + 3 * toe_site, 3, frame.toe_position.begin());
             std::copy_n(ground_truth.begin(), 3, frame.contact_force.begin());
             std::copy_n(ground_truth.begin() + 3, 3, frame.contact_torque.begin());
@@ -345,9 +372,12 @@ int main(int argc, char** argv) {
             snapshot.contact_force = frame.contact_force;
             snapshot.contact_torque = frame.contact_torque;
             snapshot.object_position = frame.object_position;
-            std::copy_n(data->mocap_quat + 4 * object_mocap, 4, snapshot.object_quaternion.begin());
+            if (object_mocap >= 0)
+                std::copy_n(
+                    data->mocap_quat + 4 * object_mocap, 4, snapshot.object_quaternion.begin());
             std::copy_n(data->qvel, 3, snapshot.velocity_gt.begin());
-            remote_interaction.Publish(snapshot, physics_paused);
+            if (remote_interaction)
+                remote_interaction->Publish(snapshot, physics_paused);
             const bool contact = mju_norm3(frame.contact_force.data()) > 0;
 
             if (contact != snapshot.contact) {
@@ -357,7 +387,8 @@ int main(int argc, char** argv) {
 
             snapshot.contact = contact;
             snapshot.published_ns = shm_utils::MonotonicNs();
-            remote_interaction.PublishState(snapshot);
+            if (remote_interaction)
+                remote_interaction->PublishState(snapshot);
 
             plots->Push(frame);
         };
@@ -419,11 +450,12 @@ int main(int argc, char** argv) {
             auto next_tick = std::chrono::steady_clock::now();
 
             while (!stopped && !finished()) {
-                const auto interaction = remote_interaction.Poll(physics_paused);
+                const auto interaction = poll_interaction(physics_paused);
                 physics_paused = interaction.paused;
                 if (interaction.reset)
                     reset();
-                remote_interaction.Apply(physics_paused);
+                if (remote_interaction)
+                    remote_interaction->Apply(physics_paused);
                 if (!physics_paused || interaction.step) {
                     step();
                 } else {
@@ -506,6 +538,11 @@ int main(int argc, char** argv) {
                 guarded(step);
             };
 
+            sim->user_drive_callback_ = [&](int requested) {
+                guarded([&] {
+                    qhrr05::InputInterface::RequestDrive(shm, static_cast<DriveAction>(requested));
+                });
+            };
             sim->user_controller_callback_ = [&](int requested) {
                 const mujoco::MutexLock lock(sim->mtx);
 
@@ -538,6 +575,10 @@ int main(int argc, char** argv) {
                     return true;
                 }
 
+                if (key == 'A' || key == 'a' || key == 'X' || key == 'x') {
+                    sim->user_drive_callback_(key == 'A' || key == 'a' ? 1 : 2);
+                    return true;
+                }
                 if (key == 'H' || key == 'h') {
                     sim->user_controller_callback_(0);
                     return true;
@@ -620,12 +661,25 @@ int main(int argc, char** argv) {
                     applied_command.control_time,
                     max_error);
 
-                if (mode == 6) {
+                if (applied_command.drive_state != DriveState::Active) {
+                    const char* names[] = {
+                        "HOMING", "GRAVITY", "MAGNETIC", "TRACKING", "BALL", "DAMPING", "ZERO SET"};
+                    std::snprintf(status,
+                        sizeof(status),
+                        "%s | selected=%s\n%s\nA: start selected task / X: Release",
+                        DriveStateName(applied_command.drive_state),
+                        names[applied_command.requested_mode],
+                        applied_command.drive_fault_reason.data());
+                } else if (mode == 6) {
                     const auto& zero = applied_command.zero_set;
-                    std::snprintf(status, sizeof(status),
+                    std::snprintf(status,
+                        sizeof(status),
                         "ZERO SET: %s / %s\n%s\ntravel=%.3f rad elapsed=%.2f s | Z retry / D cancel",
-                        ZeroSetAxisName(zero.axis), ZeroSetPhaseName(zero.phase),
-                        ZeroSetFailureName(zero.failure), zero.travel_rad, zero.elapsed_sec);
+                        ZeroSetAxisName(zero.axis),
+                        ZeroSetPhaseName(zero.phase),
+                        ZeroSetFailureName(zero.failure),
+                        zero.travel_rad,
+                        zero.elapsed_sec);
                 } else if (mode == 5) {
                     const auto& target = applied_command.damping_toe_reference;
 
@@ -735,13 +789,18 @@ int main(int argc, char** argv) {
                     }
                 } else if (mode == 2) {
                     const auto& magnetic = applied_command.magnetic;
-                    const auto truth = qhrr05::ReadContactGroundTruth(model.get(), data.get());
+                    const auto truth = contact_truth();
                     const double moment =
                         std::sqrt(truth[3] * truth[3] + truth[4] * truth[4] + truth[5] * truth[5]);
+                    char moment_text[32];
+                    if (object_mocap >= 0)
+                        std::snprintf(moment_text, sizeof(moment_text), "%.4f", moment);
+                    else
+                        std::snprintf(moment_text, sizeof(moment_text), "unavailable");
 
                     std::snprintf(status,
                         sizeof(status),
-                        "%s%s | sim=%.2f ctrl=%.2f\nFhat=%.2f target=%.2f cmd=%.2f N\n%s | moment GT=%.4f Nm | events=%llu",
+                        "%s%s | sim=%.2f ctrl=%.2f\nFhat=%.2f target=%.2f cmd=%.2f N\n%s | moment GT=%s Nm | events=%llu",
                         MagneticPhaseName(magnetic.phase),
                         !sim->run ? " / PAUSED" : "",
                         data->time,
@@ -750,7 +809,7 @@ int main(int argc, char** argv) {
                         target_force,
                         magnetic.force_command,
                         MagneticReasonName(magnetic.reason),
-                        moment,
+                        moment_text,
                         static_cast<unsigned long long>(magnetic.event_sequence));
                 }
 
@@ -792,12 +851,13 @@ int main(int argc, char** argv) {
 
                         qhrr05::SimulationInteraction::Update interaction;
                         guarded([&] {
-                            interaction = remote_interaction.Poll(!sim->run);
+                            interaction = poll_interaction(!sim->run);
                             sim->run = !interaction.paused;
                             physics_paused = interaction.paused;
                             if (interaction.reset)
                                 reset();
-                            remote_interaction.Apply(physics_paused);
+                            if (remote_interaction)
+                                remote_interaction->Apply(physics_paused);
                         });
                         if (failed)
                             break;
@@ -861,7 +921,8 @@ int main(int argc, char** argv) {
         }
 
         sample();
-        remote_interaction.Finish();
+        if (remote_interaction)
+            remote_interaction->Finish();
 
         std::cout << "[simulate] stopped at t=" << data->time << std::endl;
 

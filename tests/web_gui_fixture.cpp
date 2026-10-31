@@ -13,8 +13,13 @@ int main(int argc, char** argv) {
         shm_utils::Mapping owner(argv[1], true);
         auto& shm = *owner.get();
         shm.can_enabled = true;
+        shm.simulation_available = true;
         auto& motors = shm.motors[0];
         motors.running = true;
+        motors.supported.fill(kCanSignals);
+        motors.valid.fill(kCanSignals);
+        motors.coordinate_valid.fill(true);
+        motors.measurement_ns.fill(shm_utils::MonotonicNs());
         motors.position_offset = {0, .3, -1};
         motors.feedback[0] = {.1, .2, 1.5, 27};
         motors.feedback[1] = {.2, -.3, -2, 28};
@@ -24,6 +29,9 @@ int main(int argc, char** argv) {
         motors.enabled.fill(true);
         motors.received_sequence.fill(10);
         motors.received_ns.fill(shm_utils::MonotonicNs());
+        shm.control[0].requested_drive_action = DriveAction::Arm;
+        shm.control[0].drive_request_sequence = 1;
+        shm.model[0].valid = true;
         shm.model[0].published_ns = shm_utils::MonotonicNs();
         shm.model[0].toe_position = {.2, -.1, .08};
         shm.model[0].joint_min.fill(-3);

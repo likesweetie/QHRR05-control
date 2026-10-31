@@ -101,7 +101,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         name = f'/qhrr05-layout-{os.getpid()}-{caller}'
         manifest = directory / f'{caller}.json'
         settings = {
-            'shm_name': name,
+            'runtime_mode': 'simulation', 'shm_name': name,
             'terminal_exec': terminal,
             'log_directory': str(directory / 'logs'),
             'terminal_layout': {

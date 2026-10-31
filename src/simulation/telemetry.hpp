@@ -25,6 +25,7 @@ struct Sample {
     TrackingMethod tracking_method = TrackingMethod::InverseDynamics;
     std::uint64_t motion_sequence = 0;
     bool dynamics_enabled = false;
+    bool ground_truth_available = true;
     std::array<double, 3> dynamics_torque{}, commanded_torque{};
     std::array<double, 3> ball_position{}, ball_reference{};
     std::array<double, 3> toe_position{}, contact_force{}, contact_torque{}, object_position{};
@@ -41,7 +42,7 @@ public:
             figure.linewidth = 2;
             const float background[] = {.06f, .08f, .10f, 1.f};
             std::copy(background, background + 4, figure.figurergba);
-            std::snprintf(figure.xlabel, sizeof(figure.xlabel), "Simulation time [s]");
+            std::snprintf(figure.xlabel, sizeof(figure.xlabel), "Sample time [s]");
             std::snprintf(figure.xformat, sizeof(figure.xformat), "%%.1f");
             std::snprintf(figure.yformat, sizeof(figure.yformat), "%%.3f");
         }
@@ -340,7 +341,8 @@ public:
             const bool following =
                 m.phase == MagneticPhase::Following || m.phase == MagneticPhase::Releasing;
             Add(figures_[2], 0, sample.time, m.estimated_normal_force);
-            Add(figures_[2], 1, sample.time, following ? normal_gt : std::sqrt(gt_norm));
+            if (sample.ground_truth_available)
+                Add(figures_[2], 1, sample.time, following ? normal_gt : std::sqrt(gt_norm));
             Add(figures_[2], 2, sample.time, m.target_force);
             Add(figures_[2], 3, sample.time, m.force_command);
             Add(figures_[4], 0, sample.time, 1000 * std::sqrt(error));

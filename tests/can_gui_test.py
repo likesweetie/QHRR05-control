@@ -10,6 +10,7 @@ import tempfile
 import time
 
 import yaml
+from daemon_test_config import default_simulation_manifest
 
 from gui_test_utils import event, find_window as find_gui_window, wait_for
 
@@ -30,8 +31,13 @@ def find_daemon(manifest):
         except (PermissionError, FileNotFoundError, ProcessLookupError):
             continue
 
-        if args and args[0].endswith(b'/daemon') and str(manifest).encode() in args:
-            return int(candidate.name)
+        if args and args[0].endswith(b'/daemon') and b'--config' in args:
+            path = Path(os.fsdecode(args[args.index(b'--config') + 1]))
+            try:
+                if yaml.safe_load(path.read_text()).get('shm_name') == yaml.safe_load(manifest.read_text()).get('shm_name'):
+                    return int(candidate.name)
+            except FileNotFoundError:
+                continue
 
     return None
 
@@ -60,6 +66,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
         sim_shm = Path('/dev/shm') / sim_name[1:]
         config = directory / f'{action}-can.json'
         settings = yaml.safe_load((ROOT / 'config/can_hal/can_hal.yaml').read_text())
+        settings['interface'] = 'vcan0'
+        settings['poll_released'] = True
         settings['motor_config'] = 'motor profile.json'
 
         if action == 'hal-startup-failure':
@@ -73,10 +81,10 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
         simulation_config.write_text(json.dumps(simulation))
 
         manifest = directory / f'{action}-processes.json'
-        processes = yaml.safe_load((ROOT / 'config/daemon/daemon.yaml').read_text())
+        processes = default_simulation_manifest(directory / 'default-session')
         # GUI lifecycle tests never open a real host joystick. Input is tested with virtual events.
         for key in ('processes', 'debug_processes'):
-            processes[key] = [p for p in processes[key] if p['name'] != 'input']
+            processes[key] = [p for p in processes[key] if p['name'] not in ('input', 'web_gui')]
         processes['shm_name'] = name
         processes['log_directory'] = str(directory / 'logs')
         if action != 'logger-window-close':
@@ -133,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-terminal-') as directory:
 
         with log.open('w') as stream:
             command = [
-                str(ROOT / 'scripts/run_daemon.sh'),
+                str(ROOT / 'scripts/run_simulation.sh'),
                 '--config',
                 str(manifest),
             ]

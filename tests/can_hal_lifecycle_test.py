@@ -24,6 +24,10 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
         'frequency_hz': 1000,
         'statistics_hz': 10,
         'bus_load_bitrate': 1000000,
+        'command_timeout_sec': 0.10,
+        'feedback_timeout_sec': 0.25,
+        'enable_timeout_sec': 1.0,
+        'poll_released': False,
         'motor_ids': [1, 2, 3],
         'mit': {
             'velocity_max_rad_s': 45,
@@ -40,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
     manifest.write_text(
         json.dumps(
             {
-                'shm_name': name,
+                'runtime_mode': 'simulation', 'shm_name': name,
                 'monitoring': {'display_interval_sec': 2.0, 'window_sec': 10.0, 'sample_hz': 100.0},
                 'processes': [
                     {
@@ -187,7 +191,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
     manifest.write_text(
         json.dumps(
             {
-                'shm_name': name,
+                'runtime_mode': 'simulation', 'shm_name': name,
                 'monitoring': {'display_interval_sec': 2.0, 'window_sec': 10.0, 'sample_hz': 100.0},
                 'processes': [
                     {

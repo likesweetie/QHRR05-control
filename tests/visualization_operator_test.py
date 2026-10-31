@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import yaml
+from daemon_test_config import default_simulation_manifest
 
 from gui_test_utils import event, wait_for
 from simulation_ipc_utils import SimulationReader, Projection
@@ -40,7 +41,7 @@ try:
         config["homing"]["duration_sec"] = 0.5
         control = directory / "control.yaml"
         control.write_text(yaml.safe_dump(config))
-        manifest = yaml.safe_load((ROOT / "config/daemon/visualization.yaml").read_text())
+        manifest = default_simulation_manifest(directory / "session", ROOT / "config/daemon/visualization.yaml")
         manifest["shm_name"] = name
         manifest["log_directory"] = str(directory / "logs")
         manifest["processes"] = [
@@ -132,6 +133,8 @@ try:
                 lambda: latest.get("mode") == code, lambda: viewer_log.read_text() + str(latest)
             )
 
+        key("a")
+        wait_for(lambda: latest.get("drive_state") == "ACTIVE", daemon_log.read_text)
         mode("h", 0)
         wait_for(lambda: latest.get("holding"), daemon_log.read_text, timeout=8)
         # Use actual mouse events on the ImGui slider, through the Input path.

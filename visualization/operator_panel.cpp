@@ -21,11 +21,16 @@ viewer::Sample PlotSample(const Snapshot& snapshot) {
     const auto& s = snapshot.simulation;
     const auto& c = snapshot.control;
     viewer::Sample result;
-    result.time = s.time;
+    result.time = snapshot.simulation_available ? s.time : c.control_time;
+    result.ground_truth_available = snapshot.simulation_available;
     result.run_id = s.run_id;
     result.control_time = c.control_time;
     result.mode = c.mode;
-    result.position = s.position_gt;
+    for (int i = 0; i < 3; ++i)
+        result.position[i] =
+            snapshot.simulation_available
+                ? s.position_gt[i]
+                : snapshot.motor.position_offset[i] + snapshot.motor.feedback[i].position;
     result.reference = snapshot.motor.reference;
     result.measured_torque = snapshot.motor.motor_torque;
     result.magnetic = c.magnetic;
@@ -41,7 +46,8 @@ viewer::Sample PlotSample(const Snapshot& snapshot) {
     result.commanded_torque = snapshot.motor.debug_torque;
     result.ball_position = c.ball_position;
     result.ball_reference = c.ball_toe_reference;
-    result.toe_position = s.toe_position;
+    result.toe_position =
+        snapshot.simulation_available ? s.toe_position : snapshot.model.toe_position;
     result.contact_force = s.contact_force;
     result.contact_torque = s.contact_torque;
     result.object_position = s.object_position;
@@ -76,6 +82,11 @@ void OperatorPanel::Error(const std::string& message) {
 void OperatorPanel::Send(const std::string& operation) {
     if (!input_) {
         Error("Static preview has no live Input connection");
+        return;
+    }
+    if (!snapshot_.simulation_available &&
+        (operation.rfind("pause", 0) == 0 || operation == "reset" || operation == "step")) {
+        Error("This session has no simulation controls");
         return;
     }
     try {
@@ -114,7 +125,13 @@ bool OperatorPanel::Key(int key) {
         trail = !trail;
         return true;
     }
-    if (key == GLFW_KEY_D)
+    if (key == GLFW_KEY_A)
+        Send("arm");
+    else if (key == GLFW_KEY_X)
+        Send("release");
+    else if (key == GLFW_KEY_C && snapshot_.control.drive_state == DriveState::Fault)
+        Send("clear-fault");
+    else if (key == GLFW_KEY_D)
         Mode(5);
     else if (key == GLFW_KEY_H)
         Mode(0);
@@ -154,7 +171,8 @@ void OperatorPanel::Update(
     if (!force_editing_)
         target_force_ = snapshot.control.target_force;
     for (const auto& sample : samples)
-        plots_->Push(PlotSample(sample));
+        if (sample.pose_valid && (sample.simulation_available || sample.model.valid))
+            plots_->Push(PlotSample(sample));
     if (input_)
         for (auto& decision : input_->Decisions()) {
             auto found = std::find_if(decisions_.begin(), decisions_.end(), [&](const auto& old) {
@@ -282,6 +300,17 @@ void OperatorPanel::Draw(int width, int height) {
         c.control_time);
     ImGui::Text("Simulation IPC: %s", snapshot_.simulation_status.c_str());
     ImGui::BeginDisabled(!input_);
+    ImGui::Text("Drive: %s", DriveStateName(c.drive_state));
+    if (c.drive_fault_reason[0])
+        ImGui::TextWrapped("%s", c.drive_fault_reason.data());
+    if (ImGui::Button("A Arm"))
+        Send("arm");
+    ImGui::SameLine();
+    if (ImGui::Button("X Release"))
+        Send("release");
+    ImGui::SameLine();
+    if (ImGui::Button("Clear fault"))
+        Send("clear-fault");
     const char* buttons[] = {
         "D Damping", "H Home", "G Gravity", "M Magnetic", "T Tracking", "B Ball", "Z Zero set"};
     const int modes[] = {5, 0, 1, 2, 3, 4, 6};
@@ -309,6 +338,7 @@ void OperatorPanel::Draw(int width, int height) {
     ImGui::SameLine();
     if (ImGui::Button("3 YZ"))
         Mode(3, 2);
+    ImGui::BeginDisabled(!snapshot_.simulation_available);
     if (ImGui::Button(s.paused ? "Space Resume" : "Space Pause"))
         Send("pause 2");
     ImGui::SameLine();
@@ -317,6 +347,7 @@ void OperatorPanel::Draw(int width, int height) {
     ImGui::SameLine();
     if (ImGui::Button("Right Step"))
         Send("step");
+    ImGui::EndDisabled();
     if (ImGui::SliderFloat("Target force [N]", &target_force_, 0, float(maximum_force_), "%.2f")) {
         std::ostringstream command;
         command << std::setprecision(9) << "force " << target_force_;
@@ -324,7 +355,7 @@ void OperatorPanel::Draw(int width, int height) {
     }
     force_editing_ = ImGui::IsItemActive();
     ImGui::EndDisabled();
-    ImGui::Checkbox("L Toe trail (2 sim s)", &trail);
+    ImGui::Checkbox("L Toe trail (2 s)", &trail);
     ImGui::SameLine();
     if (ImGui::Button("W Workspace"))
         workspace_.Toggle(config_);

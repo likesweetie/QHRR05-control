@@ -20,6 +20,73 @@ struct MotorFeedback {
     int temperature = 0;
 };
 
+// Channel meaning is stable across physical and emulated devices. Origin is
+// diagnostic metadata and is never an input to a motion controller.
+enum class ObservationOrigin : int { Device, EmulatedDevice, DirectDebug };
+
+inline const char* ObservationOriginName(ObservationOrigin origin) {
+    switch (origin) {
+    case ObservationOrigin::Device:
+        return "device";
+    case ObservationOrigin::EmulatedDevice:
+        return "emulated-device";
+    case ObservationOrigin::DirectDebug:
+        return "direct-debug";
+    }
+    throw std::invalid_argument("invalid observation origin");
+}
+
+enum MotorSignal : std::uint32_t {
+    EncoderPosition = 1,
+    JointVelocity = 2,
+    MotorCurrent = 4,
+    MotorTemperature = 8,
+    ConvertedTorque = 16
+};
+
+inline constexpr std::uint32_t kCanSignals =
+    EncoderPosition | JointVelocity | MotorCurrent | MotorTemperature | ConvertedTorque;
+inline constexpr std::uint32_t kDebugSignals = EncoderPosition | JointVelocity | ConvertedTorque;
+enum class DriveState : int { Disarmed, Active, Fault, Armed };
+enum class DriveAction : int { None, Arm, Release, ClearFault, EnableMotor, DisableMotor };
+enum class TransportFault : int {
+    None,
+    CommandTimeout,
+    FeedbackTimeout,
+    EnableTimeout,
+    InvalidCommand
+};
+
+inline const char* DriveStateName(DriveState state) {
+    switch (state) {
+    case DriveState::Disarmed:
+        return "DISARMED";
+    case DriveState::Active:
+        return "ACTIVE";
+    case DriveState::Fault:
+        return "FAULT";
+    case DriveState::Armed:
+        return "ARMED";
+    }
+    throw std::invalid_argument("invalid drive state");
+}
+
+inline const char* TransportFaultName(TransportFault fault) {
+    switch (fault) {
+    case TransportFault::None:
+        return "none";
+    case TransportFault::CommandTimeout:
+        return "controller command expired";
+    case TransportFault::FeedbackTimeout:
+        return "motor feedback expired";
+    case TransportFault::EnableTimeout:
+        return "motor enable/feedback timeout";
+    case TransportFault::InvalidCommand:
+        return "invalid motor command";
+    }
+    throw std::invalid_argument("invalid transport fault");
+}
+
 enum class ZeroSetPhase : int { Idle, Waiting, Seeking, Backoff, Complete, Cancelled, Fault };
 enum class ZeroSetFailure : int {
     None,

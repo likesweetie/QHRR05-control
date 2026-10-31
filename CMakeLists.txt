@@ -129,6 +129,14 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(observations_test tests/observations_test.cpp)
+    target_link_libraries(observations_test PRIVATE qhrr05_common)
+    add_test(NAME observations COMMAND observations_test)
+    add_test(NAME hardware_deploy COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/run_hw_deploy_test.sh --verify --isolated-vcan)
+    set_tests_properties(hardware_deploy PROPERTIES TIMEOUT 180)
+    add_test(NAME hardware_deploy_gui COMMAND bash ${PROJECT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+        bash ${PROJECT_SOURCE_DIR}/tests/run_gui_test.sh ${PROJECT_SOURCE_DIR}/tests/hardware_gui_test.py)
+    set_tests_properties(hardware_deploy_gui PROPERTIES TIMEOUT 180)
     add_executable(zero_set_controller_test tests/zero_set_controller_test.cpp)
     target_link_libraries(zero_set_controller_test PRIVATE motion_controllers)
     add_test(NAME zero_set_controller COMMAND zero_set_controller_test
@@ -159,7 +167,7 @@ if(BUILD_TESTING)
     add_executable(web_gui_fixture tests/web_gui_fixture.cpp)
     target_link_libraries(web_gui_fixture PRIVATE interfaces)
     add_executable(safety_layer_test tests/safety_layer_test.cpp)
-    target_link_libraries(safety_layer_test PRIVATE safety_core)
+    target_link_libraries(safety_layer_test PRIVATE safety_core interfaces)
     add_test(NAME safety_layer COMMAND safety_layer_test
         ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml)
     add_executable(logging_core_test tests/logging_core_test.cpp)
@@ -218,7 +226,7 @@ if(BUILD_TESTING)
         python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/can_bus_load_test.py $<TARGET_FILE:can_hal>)
     add_test(NAME launcher_modes COMMAND unshare --user --map-root-user --net --
         python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_modes_test.py
-        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_daemon.sh)
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_simulation.sh)
     add_executable(can_control_integration_test tests/can_control_integration_test.cpp)
     target_link_libraries(can_control_integration_test PRIVATE simulation_core)
     set_target_properties(can_control_integration_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")

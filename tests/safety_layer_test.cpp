@@ -1,4 +1,5 @@
 #include "safety/safety_layer.hpp"
+#include "interfaces/input/simulation.hpp"
 
 #include <iostream>
 #include <limits>
@@ -86,7 +87,7 @@ int main(int argc, char** argv) {
         SimulationCommand operation;
         const auto rejected_simulation = [&] {
             try {
-                safety.ValidateSimulation(operation, simulation, approval, 100);
+                qhrr05::ValidateSimulationInput(operation, simulation, approval, 100);
                 return false;
             } catch (const std::runtime_error&) {
                 return true;
@@ -98,14 +99,14 @@ int main(int argc, char** argv) {
         Require(rejected_simulation(), "running simulator accepted single step");
         approval.pause_sequence = 1;
         approval.paused = true;
-        safety.ValidateSimulation(operation, simulation, approval, 100);
+        qhrr05::ValidateSimulationInput(operation, simulation, approval, 100);
         operation.action = SimulationAction::Perturb;
         auto& perturb = operation.perturb;
         perturb.owner = 7;
         perturb.active = 1;
         const char body[] = "FL_calf";
         std::copy(std::begin(body), std::end(body), perturb.body.begin());
-        safety.ValidateSimulation(operation, simulation, approval, 100);
+        qhrr05::ValidateSimulationInput(operation, simulation, approval, 100);
         perturb.reference_position[0] = nan;
         Require(rejected_simulation(), "non-finite perturbation accepted");
         perturb.reference_position[0] = 0;
@@ -116,7 +117,7 @@ int main(int argc, char** argv) {
         approval.perturb_expires_ns = 200;
         perturb.owner = 8;
         Require(rejected_simulation(), "another viewer took an active drag");
-        safety.ValidateSimulation(operation, simulation, approval, 201);
+        qhrr05::ValidateSimulationInput(operation, simulation, approval, 201);
 
         std::cout
             << "PASS: basic safety only, all modes without homing gate, session/shape/range/finite checks\n";

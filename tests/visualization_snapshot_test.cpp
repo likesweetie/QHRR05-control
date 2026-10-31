@@ -16,9 +16,31 @@ void Require(bool condition, const char* text) {
 
 int main() {
     try {
+        {
+            const auto hardware_name = "/qhrr_view_hw_" + std::to_string(getpid());
+            shm_utils::Mapping hardware(hardware_name, true);
+            SnapshotSource source(hardware_name);
+            {
+                shm_utils::Lock lock(*hardware.get());
+                auto& m = hardware.get()->motors[0];
+                m.supported.fill(kCanSignals);
+                m.valid.fill(kCanSignals);
+                m.coordinate_valid.fill(true);
+                m.received_sequence.fill(1);
+                m.feedback_sequence = 1;
+                m.feedback_published_ns = shm_utils::MonotonicNs();
+                m.feedback[0].position = .25;
+            }
+            std::this_thread::sleep_for(30ms);
+            auto view = source.Latest();
+            Require(!view.simulation_available && view.pose_valid && view.sequence > 0,
+                "physical viewer required simulation IPC");
+            Require(view.motor.feedback[0].position == .25, "physical pose did not update");
+        }
         const auto name = "/qhrr_visualization_test_" + std::to_string(getpid());
         shm_utils::Mapping owner(name, true);
         auto& shm = *owner.get();
+        shm.simulation_available = true;
         qhrr05::simulation_ipc::Server simulation_ipc(name);
         {
             SnapshotSource source(name);

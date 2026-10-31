@@ -56,6 +56,12 @@ template <> struct DataTamer2::TypeDefinitionTrait<MotorData> {
         add("debug_torque", &value.debug_torque);
         add("feedback", &value.feedback);
         add("motor_torque", &value.motor_torque);
+        add("supported", &value.supported);
+        add("valid", &value.valid);
+        add("measurement_ns", &value.measurement_ns);
+        add("coordinate_valid", &value.coordinate_valid);
+        add("transport_fault", &value.transport_fault);
+        add("clear_fault_sequence", &value.clear_fault_sequence);
         add("received_ns", &value.received_ns);
         add("received_sequence", &value.received_sequence);
         add("tx_frames", &value.tx_frames);
@@ -82,6 +88,10 @@ template <> struct DataTamer2::TypeDefinitionTrait<MotorData> {
 template <> struct DataTamer2::TypeDefinitionTrait<ModelData> {
     template <typename Add> static std::string_view define(ModelData& value, Add& add) {
         add("published_ns", &value.published_ns);
+        add("valid", &value.valid);
+        add("input_measurement_sequence", &value.input_measurement_sequence);
+        add("acceleration_valid", &value.acceleration_valid);
+        add("joint_acceleration", &value.joint_acceleration);
         add("gravity_torque", &value.gravity_torque);
         add("bias_torque", &value.bias_torque);
         add("passive_torque", &value.passive_torque);
@@ -112,11 +122,17 @@ template <> struct DataTamer2::TypeDefinitionTrait<ZeroSetTelemetry> {
 template <> struct DataTamer2::TypeDefinitionTrait<ControlData> {
     template <typename Add> static std::string_view define(ControlData& value, Add& add) {
         add("requested_mode", &value.requested_mode);
+        add("requested_motor_axis", &value.requested_motor_axis);
         add("requested_tracking_plane", &value.requested_tracking_plane);
         add("target_force", &value.target_force);
         add("motion_sequence", &value.motion_sequence);
         add("mode", &value.mode);
         add("holding", &value.holding);
+        add("drive_state", &value.drive_state);
+        add("drive_request_sequence", &value.drive_request_sequence);
+        add("active_drive_request_sequence", &value.active_drive_request_sequence);
+        add("requested_drive_action", &value.requested_drive_action);
+        add("drive_fault_reason", &value.drive_fault_reason);
         add("zero_set", &value.zero_set);
         add("damping_toe_reference", &value.damping_toe_reference);
         add("damping_reference_valid", &value.damping_reference_valid);

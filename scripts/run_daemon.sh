@@ -1,100 +1,45 @@
 #!/usr/bin/env bash
+# Default physical-CAN entry point. The manifest explicitly chooses the device.
 set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 daemon_config="$project_dir/config/daemon/daemon.yaml"
-mode=host
-daemon_options=()
-
+daemon_args=()
 while (($#)); do
     case "$1" in
-        --existing-can|--isolated-vcan|--without-can)
-            if [[ "$mode" != host ]]; then
-                echo '--existing-can, --isolated-vcan and --without-can cannot be combined' >&2
-                exit 1
-            fi
-
-            mode="${1#--}"
-            shift
-            ;;
-        --no-terminals) daemon_options+=(--no-terminals); shift ;;
-        --config)
-            if (($# < 2)); then
-                echo '--config requires a YAML path' >&2
-                exit 1
-            fi
-
-            daemon_config="$(realpath -- "$2")"
-            shift 2
-            ;;
-        *) echo 'usage: run_daemon.sh [--existing-can | --isolated-vcan | --without-can] [--config YAML] [--no-terminals]' >&2; exit 1 ;;
+        --config) daemon_config="$(realpath -- "${2:?--config requires a path}")"; shift 2 ;;
+        --no-terminals) daemon_args+=(--no-terminals); shift ;;
+        --help)
+            echo 'usage: run_daemon.sh [--config YAML] [--no-terminals]'
+            echo 'Physical CAN, control processes and web GUI. For MuJoCo use run_simulation.sh.'
+            exit 0 ;;
+        *) echo "Unknown hardware option: $1. For simulation use scripts/run_simulation.sh." >&2; exit 1 ;;
     esac
 done
-
-# Build before any CAN setup or process launch, including missing child binaries.
+# This path never creates or changes network interfaces, and never launches a simulator.
+python3 - "$daemon_config" <<'PYCODE'
+import json, pathlib, subprocess, sys, yaml
+manifest_path = pathlib.Path(sys.argv[1])
+manifest = yaml.safe_load(manifest_path.read_text())
+if manifest.get('runtime_mode') != 'hardware':
+    sys.exit('run_daemon.sh requires runtime_mode: hardware; use run_simulation.sh for simulation')
+hal = next((p for p in manifest['processes'] if p['name'] == 'can_hal'), None)
+if not hal:
+    sys.exit('hardware manifest requires can_hal')
+workdir = (manifest_path.parent / hal.get('working_directory', '.')).resolve()
+hal_path = (workdir / hal['args'][0]).resolve()
+config = yaml.safe_load(hal_path.read_text())
+name = config['interface']
+links = json.loads(subprocess.check_output(['ip', '-json', '-details', 'link', 'show', 'dev', name]))
+link = links[0]
+kind = link.get('linkinfo', {}).get('info_kind')
+if kind not in ('can', 'vcan') or 'UP' not in link.get('flags', []):
+    sys.exit(f'CAN interface {name} must be CAN/vcan and UP; no automatic replacement is performed')
+if kind == 'can':
+    actual = link['linkinfo'].get('info_data', {}).get('bittiming', {}).get('bitrate')
+    if actual != config['bitrate']:
+        sys.exit(f'CAN bitrate mismatch on {name}: expected {config["bitrate"]}, got {actual}')
+print(f'[launcher] Hardware pipeline | interface={name} kind={kind}; existing interface unchanged', flush=True)
+PYCODE
 source "$project_dir/scripts/ensure_build.sh"
-qhrr_ensure_native_build "$project_dir" daemon simulation control can_hal input shm_logger qhrr_logctl
-
-if [[ "$mode" == without-can ]]; then
-    exec "$project_dir/build/daemon" --config "$daemon_config" --without-can "${daemon_options[@]}"
-fi
-
-if [[ "$mode" == isolated-vcan ]]; then
-    echo '[launcher] DEBUG: creating vcan0 in an isolated network namespace'
-    exec unshare --user --map-root-user --net -- sh -ec '
-        ip link add dev vcan0 type vcan
-        ip link set dev vcan0 up
-        echo "[launcher] DEBUG network namespace: $(readlink /proc/self/ns/net)"
-        ip -details link show dev vcan0
-        runtime_dir=$(mktemp -d /tmp/qhrr05-can-session.XXXXXX)
-        export XDG_RUNTIME_DIR="$runtime_dir"
-        unset GNOME_TERMINAL_SERVICE GNOME_TERMINAL_SCREEN AT_SPI_BUS_ADDRESS
-        export NO_AT_BRIDGE=1 GIO_USE_VFS=local GTK_USE_PORTAL=0
-        trap "rm -rf -- \"$runtime_dir\"" EXIT
-        dbus-run-session -- "$@"
-    ' sh "$project_dir/build/daemon" --config "$daemon_config" "${daemon_options[@]}"
-fi
-
-if [[ "$mode" == host ]]; then
-    # Query errors abort. An existing device must really be a vcan device.
-    link_state=$(ip -json -details link show | python3 -c '
-import json, sys
-link = next((item for item in json.load(sys.stdin) if item["ifname"] == "vcan0"), None)
-if link is None:
-    print("missing")
-elif link.get("linkinfo", {}).get("info_kind") != "vcan":
-    sys.exit("[launcher] vcan0 exists but is not a vcan device; refusing to change it")
-else:
-    print("up" if "UP" in link["flags"] else "down")
-')
-
-    if [[ "$link_state" != up ]]; then
-        net_admin=0
-
-        while read -r key value _; do
-            if [[ "$key" == CapEff: ]]; then
-                net_admin=$((16#$value & 0x1000))
-                break
-            fi
-        done < /proc/self/status
-
-        network_ip=(ip)
-
-        if ((net_admin == 0)); then
-            echo '[launcher] Host vcan0 setup requires sudo; only ip link commands are elevated.' >&2
-            network_ip=(sudo -- ip)
-        fi
-
-        if [[ "$link_state" == missing ]]; then
-            "${network_ip[@]}" link add dev vcan0 type vcan
-        fi
-
-        "${network_ip[@]}" link set dev vcan0 up
-    fi
-
-    echo "[launcher] Host vcan0: $(readlink /proc/self/ns/net) (kept after daemon exit)"
-    ip -details link show dev vcan0
-else
-    echo "[launcher] Existing CAN: $(readlink /proc/self/ns/net); no interface setup"
-fi
-
-exec "$project_dir/build/daemon" --config "$daemon_config" "${daemon_options[@]}"
+qhrr_ensure_native_build "$project_dir" daemon control can_hal input shm_logger qhrr_logctl web_gui_bridge
+exec "$project_dir/build/daemon" --config "$daemon_config" "${daemon_args[@]}"

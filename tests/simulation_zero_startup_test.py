@@ -8,6 +8,7 @@ import sys
 import tempfile
 
 import yaml
+from daemon_test_config import default_simulation_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools/analysis'))
@@ -34,7 +35,8 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-zero-startup-') as directory:
     delayed = directory / 'delayed-control.sh'
     delayed.write_text('#!/bin/sh\nsleep 1\nexec "$@"\n')
     delayed.chmod(0o700)
-    manifest = yaml.safe_load((ROOT / 'config/daemon/daemon.yaml').read_text())
+    manifest = default_simulation_manifest(directory / 'default-session')
+    hal_path = directory / 'default-session/can.yaml'
     manifest['shm_name'] = name
     manifest['log_directory'] = str(directory / 'logs')
     manifest['processes'] = [p for p in manifest['processes'] if p['name'] != 'input']
@@ -51,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-zero-startup-') as directory:
                 '--shm-name',
                 '{shm_name}',
                 '--hal-config',
-                str(ROOT / 'config/can_hal/can_hal.yaml'),
+                str(hal_path),
                 '--simulation-config',
                 str(simulation_path),
                 '--headless',
@@ -59,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-zero-startup-') as directory:
                 '4',
             ]
         elif spec['name'] == 'can_hal':
-            spec['args'] = [str(ROOT / 'config/can_hal/can_hal.yaml'), '{shm_name}']
+            spec['args'] = [str(hal_path), '{shm_name}']
         elif spec['name'] == 'control':
             spec['exec_path'] = str(delayed)
             spec['args'] = [str(ROOT / 'build/control'), str(control_path), '{shm_name}']

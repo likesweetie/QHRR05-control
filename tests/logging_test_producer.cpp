@@ -4,6 +4,7 @@
 #include <csignal>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <thread>
 
 volatile std::sig_atomic_t stopped = 0;
@@ -19,13 +20,22 @@ int main(int argc, char** argv) {
             --argc;
             ++argv;
         }
+        const bool hardware = argc > 1 && std::string(argv[1]) == "--hardware";
+        if (hardware) {
+            --argc;
+            ++argv;
+        }
         if (argc < 3)
             throw std::runtime_error("producer SHM DURATION [CONTROL_FILE]");
         std::signal(SIGTERM, Stop);
         std::signal(SIGINT, Stop);
         shm_utils::Mapping owner(argv[1], !attach);
         auto& shm = *owner.get();
-        qhrr05::simulation_ipc::Server simulation_ipc(argv[1]);
+        if (!attach)
+            shm.simulation_available = !hardware;
+        std::unique_ptr<qhrr05::simulation_ipc::Server> simulation_ipc;
+        if (shm.simulation_available)
+            simulation_ipc = std::make_unique<qhrr05::simulation_ipc::Server>(argv[1]);
         if (!attach)
             shm.can_enabled = true;
         const auto start = shm_utils::MonotonicNs();
@@ -41,7 +51,8 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-            simulation_ipc.Poll();
+            if (simulation_ipc)
+                simulation_ipc->Poll();
             SimulationData simulation;
             {
                 shm_utils::Lock lock(shm);
@@ -53,6 +64,10 @@ int main(int argc, char** argv) {
                 motor.feedback_sequence++;
                 motor.command_published_ns = motor.feedback_published_ns = now;
                 motor.running = true;
+                motor.supported.fill(kCanSignals);
+                motor.valid.fill(kCanSignals);
+                motor.coordinate_valid.fill(true);
+                motor.measurement_ns.fill(now);
                 for (int i = 0; i < 3; ++i) {
                     motor.feedback[i].position = .1 * std::sin((now - start) / 1e9);
                     motor.feedback[i].velocity = .1 * std::cos((now - start) / 1e9);
@@ -65,6 +80,8 @@ int main(int argc, char** argv) {
                 ++shm.motor_sequence;
                 auto& model = shm_utils::Next(shm.model, shm.model_sequence);
                 model.published_ns = now;
+                model.valid = true;
+                model.input_measurement_sequence = motor.feedback_sequence;
                 model.joint_min.fill(-2);
                 model.joint_max.fill(2);
                 model.mass = {1, 0, 0, 0, 1, 0, 0, 0, 1};
@@ -75,6 +92,7 @@ int main(int argc, char** argv) {
                 control.published_ns = now;
                 control.control_time = (now - start) / 1e9;
                 control.mode = 2;
+                control.drive_state = DriveState::Active;
                 control.magnetic.observer_valid = command != "invalid";
                 control.magnetic.estimated_force = {0, 0, .9};
                 ++shm.control_sequence;
@@ -84,7 +102,8 @@ int main(int argc, char** argv) {
                 simulation.contact = true;
                 shm_utils::Notify(shm);
             }
-            simulation_ipc.Publish(simulation);
+            if (simulation_ipc)
+                simulation_ipc->Publish(simulation);
             next += 2000000;
             const auto now = shm_utils::MonotonicNs();
             if (next <= now)
@@ -93,7 +112,8 @@ int main(int argc, char** argv) {
                 static_cast<time_t>(next / 1000000000), static_cast<long>(next % 1000000000)};
             ::clock_nanosleep(kShmClock, TIMER_ABSTIME, &wake, nullptr);
         }
-        simulation_ipc.Finish();
+        if (simulation_ipc)
+            simulation_ipc->Finish();
         shm_utils::Stop(shm);
         std::cout << "producer done\n";
         return 0;

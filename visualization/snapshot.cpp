@@ -3,10 +3,16 @@
 #include <chrono>
 
 namespace qhrr05::visualization {
-SnapshotSource::SnapshotSource(const std::string& name)
-    : mapping_(name), simulation_channel_(name), worker_([this](std::stop_token stop) {
-          Observe(stop);
-      }) {
+SnapshotSource::SnapshotSource(const std::string& name) : mapping_(name) {
+    {
+        auto& shm = *mapping_.get();
+        // Session capabilities are immutable before participants are started.
+        if (shm.simulation_available)
+            simulation_channel_ = std::make_unique<simulation_ipc::Client>(name);
+    }
+    worker_ = std::jthread([this](std::stop_token stop) {
+        Observe(stop);
+    });
 }
 
 SnapshotSource::~SnapshotSource() {
@@ -33,14 +39,17 @@ std::vector<Snapshot> SnapshotSource::Drain() {
 void SnapshotSource::Observe(std::stop_token stop) {
     try {
         auto& shm = *mapping_.get();
-        std::uint64_t previous_sequence = 0;
+        std::uint64_t previous_sequence = 0, previous_motor = 0, previous_control = 0, revision = 0;
         while (!stop.stop_requested()) {
             Snapshot next;
-            simulation_channel_.Poll();
-            next.simulation = simulation_channel_.Latest();
-            next.sequence = next.simulation.sequence;
-            next.finished = next.simulation.finished;
-            next.simulation_status = simulation_channel_.Status();
+            next.simulation_available = bool(simulation_channel_);
+            if (simulation_channel_) {
+                simulation_channel_->Poll();
+                next.simulation = simulation_channel_->Latest();
+                next.finished = next.simulation.finished;
+                next.simulation_status = simulation_channel_->Status();
+            } else
+                next.simulation_status = "unavailable (physical device session)";
             const int result = ::pthread_mutex_trylock(&shm.mutex);
             if (result == EBUSY) {
                 ++misses_;
@@ -60,6 +69,19 @@ void SnapshotSource::Observe(std::stop_token stop) {
                 next.control = shm.control[shm.control_sequence % kShmBufferCount];
                 next.stopping = shm.stopping;
                 next.failed = shm.failed;
+                next.published_ns = next.simulation_available ? next.simulation.published_ns
+                                                              : next.motor.feedback_published_ns;
+                const auto observed = ReadObservation(next.motor);
+                next.pose_valid =
+                    next.simulation_available
+                        ? next.simulation.published_ns != 0
+                        : observed.position_velocity && CoordinatesValid(observed.coordinate_valid);
+                if (next.simulation.sequence != previous_sequence ||
+                    next.motor.feedback_sequence != previous_motor ||
+                    next.control.command_sequence != previous_control)
+                    ++revision;
+                next.sequence = revision;
+
                 const int unlock = ::pthread_mutex_unlock(&shm.mutex);
                 const auto released = shm_utils::MonotonicNs();
                 shm_utils::Check(unlock, "visualizer SHM unlock");
@@ -68,8 +90,12 @@ void SnapshotSource::Observe(std::stop_token stop) {
                 {
                     std::lock_guard lock(mailbox_mutex_);
                     latest_ = next;
-                    if (next.sequence != previous_sequence && next.simulation.published_ns) {
-                        previous_sequence = next.sequence;
+                    if (next.pose_valid && (next.simulation.sequence != previous_sequence ||
+                                               next.motor.feedback_sequence != previous_motor ||
+                                               next.control.command_sequence != previous_control)) {
+                        previous_sequence = next.simulation.sequence;
+                        previous_motor = next.motor.feedback_sequence;
+                        previous_control = next.control.command_sequence;
                         if (pending_.size() == 1000) {
                             pending_.pop_front();
                             ++dropped_;

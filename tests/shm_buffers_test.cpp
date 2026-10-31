@@ -60,6 +60,18 @@ int main() {
         }
 
         {
+            shm_utils::Mapping owner(name, true);
+            shm_utils::Mapping reader(name);
+            Require(owner.IsCurrent() && reader.IsCurrent(), "active SHM session not recognized");
+            Require(::shm_unlink(name.c_str()) == 0, "test SHM unlink failed");
+            Require(!reader.IsCurrent(), "deleted SHM was accepted as the current session");
+            shm_utils::Mapping replacement(name, true);
+            Require(replacement.IsCurrent(), "replacement SHM session not recognized");
+            Require(!owner.IsCurrent() && !reader.IsCurrent(),
+                "old SHM mapping silently switched to a replacement session");
+        }
+
+        {
             shm_utils::Mapping mapping(name, true);
             auto& shm = *mapping.get();
             const auto launch = [&](bool feedback) {

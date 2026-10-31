@@ -38,6 +38,40 @@ inline void Notify(ShmData& shm) {
     Check(::pthread_cond_broadcast(&shm.changed), "SHM notify");
 }
 
+// Transport loops must retain their deadline checks even while a publisher owns SHM.
+class TryLock {
+public:
+    explicit TryLock(ShmData& shm) : shm_(shm) {
+        const int result = ::pthread_mutex_trylock(&shm_.mutex);
+        if (result == EBUSY)
+            return;
+        if (result == EOWNERDEAD) {
+            shm_.stopping = shm_.failed = true;
+            ::pthread_mutex_consistent(&shm_.mutex);
+            ::pthread_mutex_unlock(&shm_.mutex);
+            throw std::runtime_error("SHM mutex owner died");
+        }
+        Check(result, "SHM trylock");
+        acquired_ = true;
+    }
+
+    ~TryLock() {
+        if (acquired_)
+            ::pthread_mutex_unlock(&shm_.mutex);
+    }
+
+    explicit operator bool() const {
+        return acquired_;
+    }
+
+    TryLock(const TryLock&) = delete;
+    TryLock& operator=(const TryLock&) = delete;
+
+private:
+    ShmData& shm_;
+    bool acquired_ = false;
+};
+
 class Lock {
 public:
     explicit Lock(ShmData& shm) : shm_(shm) {
@@ -123,6 +157,9 @@ public:
             if (stat.st_size != kShmByteSize)
                 throw std::runtime_error("SHM size mismatch: " + name);
 
+            device_ = stat.st_dev;
+            inode_ = stat.st_ino;
+
             void* address =
                 ::mmap(nullptr, kShmByteSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
@@ -196,9 +233,29 @@ public:
         return data_;
     }
 
+    // A mapping survives shm_unlink. Observers must not mistake an old, still-mapped
+    // object for a newly created session with the same name.
+    bool IsCurrent() const {
+        const int fd = ::shm_open(name_.c_str(), O_RDONLY | O_CLOEXEC, 0);
+        if (fd < 0) {
+            if (errno == ENOENT)
+                return false;
+            Check(errno, "SHM session open");
+        }
+
+        struct stat stat {};
+
+        const int error = ::fstat(fd, &stat) == 0 ? 0 : errno;
+        ::close(fd);
+        Check(error, "SHM session stat");
+        return stat.st_dev == device_ && stat.st_ino == inode_;
+    }
+
 private:
     std::string name_;
     bool owner_;
+    dev_t device_{};
+    ino_t inode_{};
     ShmData* data_ = nullptr;
 };
 }  // namespace shm_utils

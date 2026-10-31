@@ -56,6 +56,18 @@ public:
         if (!bus_load_bitrate_ || bus_load_bitrate_ > 1000000)
             throw std::runtime_error("bus_load_bitrate must be in [1, 1000000] bit/s");
 
+        const auto timeout = [&](const char* key) {
+            const double seconds = config[key].as<double>();
+            if (!std::isfinite(seconds) || seconds <= 0 || seconds > 10)
+                throw std::runtime_error(std::string(key) + " must be in (0, 10] seconds");
+            return static_cast<std::uint64_t>(seconds * 1e9);
+        };
+        command_timeout_ns_ = timeout("command_timeout_sec");
+        feedback_timeout_ns_ = timeout("feedback_timeout_sec");
+        enable_timeout_ns_ = timeout("enable_timeout_sec");
+        poll_released_ = config["poll_released"].as<bool>();
+        state_.supported.fill(kCanSignals);
+
         const auto ids = config["motor_ids"].as<std::vector<unsigned>>();
 
         if (ids.size() != 3 || interface_.empty() || interface_.size() >= IFNAMSIZ)
@@ -355,37 +367,63 @@ public:
         std::exception_ptr failure;
         auto next_cycle = shm_utils::MonotonicNs();
 
+        MotorData targets;
         try {
             while (!stopping) {
                 auto& shm = *mapping_->get();
-                MotorData targets;
                 {
-                    shm_utils::Lock lock(shm);
+                    shm_utils::TryLock lock(shm);
+                    if (lock) {
+                        if (shm.failed)
+                            throw std::runtime_error("CAN SHM marked failed");
 
-                    if (shm.failed)
-                        throw std::runtime_error("CAN SHM marked failed");
+                        if (shm.stopping)
+                            break;
 
-                    if (shm.stopping)
-                        break;
-
-                    targets = shm.motors[shm.motor_sequence % kShmBufferCount];
+                        targets = shm.motors[shm.motor_sequence % kShmBufferCount];
+                    }
                 }
 
                 if (display_failed)
                     throw std::runtime_error("CAN statistics terminal output failed");
 
                 Receive();
-                std::array<openrobot::Payload, 3> frames{};
-
-                // Validate the complete publication before transmitting any axis.
-                for (int i = 0; i < 3; ++i)
-                    frames[i] =
-                        openrobot::EncodeMitCommand(targets.command[i], velocity_max_, kd_scale_);
-
+                const auto now = shm_utils::MonotonicNs();
+                const bool requested = std::any_of(
+                    targets.command_enabled.begin(), targets.command_enabled.end(), [](bool v) {
+                        return v;
+                    });
+                if (targets.clear_fault_sequence != cleared_sequence_ && !requested) {
+                    cleared_sequence_ = targets.clear_fault_sequence;
+                    state_.transport_fault = TransportFault::None;
+                    std::cout << "[can_hal] fault cleared; outputs remain released" << std::endl;
+                }
+                if (requested && (!targets.command_published_ns ||
+                                     now - targets.command_published_ns > command_timeout_ns_))
+                    Trip(TransportFault::CommandTimeout);
                 for (int i = 0; i < 3; ++i) {
-                    const bool command_enabled = targets.command_enabled[i];
-
-                    // Periodic discovery/enable requests, not a response-age check.
+                    state_.valid[i] =
+                        state_.received_ns[i] && now - state_.received_ns[i] <= feedback_timeout_ns_
+                            ? kCanSignals
+                            : 0;
+                    if (state_.enable_requested[i] && state_.received_ns[i] < enable_since_[i] &&
+                        now - enable_since_[i] > enable_timeout_ns_)
+                        Trip(TransportFault::EnableTimeout);
+                    if (state_.enable_requested[i] && state_.received_ns[i] >= enable_since_[i] &&
+                        now - state_.received_ns[i] > feedback_timeout_ns_)
+                        Trip(TransportFault::FeedbackTimeout);
+                }
+                std::array<openrobot::Payload, 3> frames{};
+                try {
+                    for (int i = 0; i < 3; ++i)
+                        frames[i] = openrobot::EncodeMitCommand(
+                            targets.command[i], velocity_max_, kd_scale_);
+                } catch (const std::exception&) {
+                    Trip(TransportFault::InvalidCommand);
+                }
+                for (int i = 0; i < 3; ++i) {
+                    const bool command_enabled = targets.command_enabled[i] &&
+                                                 state_.transport_fault == TransportFault::None;
                     if (state_.cycles && state_.cycles % 100 == 0) {
                         if (!state_.profile_verified[i])
                             Send(i, {0xC4});
@@ -393,21 +431,21 @@ public:
                                  !state_.enabled[i])
                             Send(i, {0xC1});
                     }
-
                     if (command_enabled && !state_.enable_requested[i]) {
                         if (!state_.profile_verified[i])
-                            throw std::runtime_error(
-                                "enable requested before MIT C4 profile verification");
-
+                            throw std::runtime_error("enable requested before MIT C4 verification");
                         Send(i, {0xC1});
                         state_.enable_requested[i] = true;
+                        enable_since_[i] = now;
                     } else if (!command_enabled && state_.enable_requested[i]) {
                         Send(i, {0xC2});
                         state_.enable_requested[i] = state_.enabled[i] = false;
                     }
-
                     if (command_enabled && state_.enabled[i])
                         Send(i, frames[i]);
+                    else if (poll_released_ && state_.profile_verified[i] &&
+                             !state_.enable_requested[i])
+                        Send(i, openrobot::EncodeMitCommand({}, velocity_max_, kd_scale_));
                 }
 
                 state_.consumed_command_sequence = targets.command_sequence;
@@ -447,6 +485,19 @@ public:
     }
 
 private:
+    void Trip(TransportFault reason) {
+        if (state_.transport_fault != TransportFault::None)
+            return;
+        state_.transport_fault = reason;
+        std::cerr << "[can_hal] FAULT: " << TransportFaultName(reason)
+                  << "; all outputs released, explicit clear required" << std::endl;
+        for (int i = 0; i < 3; ++i) {
+            if (state_.enable_requested[i] || state_.enabled[i])
+                Send(i, {0xC2});
+            state_.enable_requested[i] = state_.enabled[i] = false;
+        }
+    }
+
     void SetOption(int level, int option, const void* value, socklen_t size) {
         if (::setsockopt(socket_, level, option, value, size) < 0)
             shm_utils::Check(errno, "SocketCAN option");
@@ -530,6 +581,7 @@ private:
                 state_.feedback[i] = openrobot::DecodeFeedback(bytes);
                 state_.motor_torque[i] = state_.feedback[i].current * motor_kt_output_[i];
                 state_.received_ns[i] = shm_utils::MonotonicNs();
+                state_.measurement_ns[i] = state_.received_ns[i];
                 ++state_.received_sequence[i];
             } else if (bytes[0] != 0xC2) {
                 ++state_.invalid_frames[i];
@@ -540,7 +592,9 @@ private:
 
     void Publish() {
         auto& shm = *mapping_->get();
-        shm_utils::Lock lock(shm);
+        shm_utils::TryLock lock(shm);
+        if (!lock)
+            return;
         auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
         next.sample_dt = state_.sample_dt;
         next.running = state_.running;
@@ -551,6 +605,10 @@ private:
         next.cycles = state_.cycles;
         next.socket_errors = state_.socket_errors;
 
+        next.supported = state_.supported;
+        next.valid = state_.valid;
+        next.measurement_ns = state_.measurement_ns;
+        next.transport_fault = state_.transport_fault;
         next.feedback = state_.feedback;
         next.motor_torque = state_.motor_torque;
         next.received_ns = state_.received_ns;
@@ -566,6 +624,10 @@ private:
         shm_utils::Notify(shm);
     }
 
+    std::uint64_t command_timeout_ns_ = 0, feedback_timeout_ns_ = 0, enable_timeout_ns_ = 0;
+    std::uint64_t cleared_sequence_ = 0;
+    std::array<std::uint64_t, 3> enable_since_{};
+    bool poll_released_ = false;
     int socket_ = -1, monitor_socket_ = -1;
     unsigned bus_load_bitrate_ = 0;
     std::string interface_;
@@ -588,58 +650,9 @@ int main(int argc, char** argv) {
 
     try {
         if (argc >= 2 &&
-            (std::string(argv[1]) == "--target" || std::string(argv[1]) == "--release")) {
-            const bool release = std::string(argv[1]) == "--release";
-
-            if ((release && argc != 3) || (!release && argc != 8))
-                throw std::runtime_error(
-                    "usage: can_hal --target SHM AXIS Q DQ KP KD | --release SHM");
-
-            shm_utils::Mapping mapping(argv[2]);
-            auto& shm = *mapping.get();
-            shm_utils::Lock lock(shm);
-
-            if (shm.stopping || !shm.motors[shm.motor_sequence % kShmBufferCount].running)
-                throw std::runtime_error("CAN HAL is not running");
-
-            auto targets = shm.motors[shm.motor_sequence % kShmBufferCount];
-
-            if (release) {
-                targets.command_enabled.fill(false);
-            } else {
-                const auto number = [](const char* value) {
-                    std::size_t length = 0;
-                    const double parsed = std::stod(value, &length);
-
-                    if (length != std::strlen(value) || !std::isfinite(parsed))
-                        throw std::runtime_error("invalid numeric position target");
-
-                    return parsed;
-                };
-                const double index = number(argv[3]);
-
-                if (index < 0 || index > 2 || index != std::floor(index))
-                    throw std::runtime_error("axis must be 0, 1 or 2");
-
-                const auto& state = shm.motors[shm.motor_sequence % kShmBufferCount];
-
-                if (!state.profile_verified[int(index)])
-                    throw std::runtime_error("motor MIT profile has not been verified");
-
-                MitCommand target{
-                    number(argv[4]), number(argv[5]), number(argv[6]), number(argv[7]), 0};
-                targets.command[int(index)] = target;
-                targets.command_enabled[int(index)] = true;
-            }
-
-            ++targets.command_sequence;
-            targets.command_published_ns = shm_utils::MonotonicNs();
-            shm.motors[(shm.motor_sequence + 1) % kShmBufferCount] = targets;
-            ++shm.motor_sequence;
-            shm_utils::Notify(shm);
-
-            return 0;
-        }
+            (std::string(argv[1]) == "--target" || std::string(argv[1]) == "--release"))
+            throw std::runtime_error(
+                "direct SHM motor commands were removed; use the Input interface");
 
         if (argc != 3)
             throw std::runtime_error("usage: can_hal HAL_CONFIG.yaml SHM_NAME");

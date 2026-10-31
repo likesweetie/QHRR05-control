@@ -1,3 +1,4 @@
+runtime_mode: simulation
 # Visualization session: original physics/control executables, headless physics, separate GPU process.
 # The development daemon.yaml and run_daemon.sh are unchanged.
 shm_name: /qhrr05
@@ -21,7 +22,7 @@ processes:
   wait_ready: true
   terminal_title: QHRR05-CAN-HAL
   args:
-  - config/can_hal/can_hal.yaml
+  - '{simulation_can_config}'
   - '{shm_name}'
 - name: simulation
   exec_path: simulation
@@ -36,7 +37,7 @@ processes:
   - --shm-name
   - '{shm_name}'
   - --hal-config
-  - config/can_hal/can_hal.yaml
+  - '{simulation_can_config}'
   - --simulation-config
   - config/simulation/simulation.yaml
   - --headless
@@ -76,6 +77,14 @@ processes:
   args:
   - --shm-name
   - '{shm_name}'
+- name: web_gui
+  exec_path: /bin/bash
+  working_directory: ../..
+  critical: false
+  keep_on_stack_stop: true
+  restart_limit: 0
+  args: [scripts/run_web_gui.sh, --shm-name, "{shm_name}", --control-config, config/control/control.yaml]
+
 debug_processes:
 - name: simulation
   exec_path: simulation
@@ -128,3 +137,11 @@ debug_processes:
   args:
   - --shm-name
   - '{shm_name}'
+
+- name: web_gui
+  exec_path: /bin/bash
+  working_directory: ../..
+  critical: false
+  keep_on_stack_stop: true
+  restart_limit: 0
+  args: [scripts/run_web_gui.sh, --shm-name, "{shm_name}", --control-config, config/control/control.yaml]

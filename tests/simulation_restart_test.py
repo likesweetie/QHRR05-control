@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix="qhrr-restart-") as folder:
     config.write_text(
         json.dumps(
             {
-                "shm_name": name,
+                "runtime_mode": "simulation", "shm_name": name,
                 "monitoring": {"display_interval_sec": 2, "window_sec": 10, "sample_hz": 100},
                 "processes": [spec],
                 "debug_processes": [spec],

@@ -53,6 +53,14 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
     const auto actual_motor = simulation["motor"];
     const bool require_zero = actual_motor["require_zero_position_setup"].as<bool>();
     require_zero_ = require_zero;
+    {
+        shm_utils::Lock lock(shared_);
+        if (shared_.simulation_available) {
+            auto& motors = shm_utils::Next(shared_.motors, shared_.motor_sequence);
+            motors.coordinate_valid.fill(!require_zero);
+            ++shared_.motor_sequence;
+        }
+    }
 
     if (require_zero) {
         std::mt19937_64 generator(std::random_device{}());
@@ -374,6 +382,8 @@ ControlData UpdateControlIO(ShmData& shm,
             throw std::runtime_error("SHM stopped during control");
 
         state.published_ns = shm_utils::MonotonicNs();
+        state.valid = true;
+        state.input_measurement_sequence = measurement_sequence;
         if (publish_model) {
             shm.model[(shm.model_sequence + 1) % kShmBufferCount] = state;
             ++shm.model_sequence;
@@ -382,6 +392,10 @@ ControlData UpdateControlIO(ShmData& shm,
         if (!can_feedback) {
             auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
             next.sample_dt = model->opt.timestep;
+            next.supported.fill(kDebugSignals);
+            next.valid.fill(measurement_sequence ? kDebugSignals : 0);
+            next.profile_verified.fill(true);
+            next.enabled = next.command_enabled;
             ++next.feedback_sequence;
             next.feedback_published_ns = state.published_ns;
 
@@ -396,6 +410,8 @@ ControlData UpdateControlIO(ShmData& shm,
                     next.received_ns[i] = state.published_ns;
 
                 next.received_sequence[i] = measurement_sequence;
+                next.measurement_ns[i] =
+                    static_cast<std::uint64_t>(measurement_sequence * model->opt.timestep * 1e9);
             }
 
             ++shm.motor_sequence;
@@ -411,7 +427,7 @@ ControlData UpdateControlIO(ShmData& shm,
             throw std::runtime_error("non-finite joint output");
 
         if (!can_feedback)
-            data->ctrl[i] = std::clamp(motors.debug_torque[i],
+            data->ctrl[i] = std::clamp(motors.command_enabled[i] ? motors.debug_torque[i] : 0.0,
                 model->actuator_ctrlrange[2 * i],
                 model->actuator_ctrlrange[2 * i + 1]);
 

@@ -28,6 +28,7 @@ struct ProcessSpec {
     bool create_process_group{true};
     bool terminal_viewer{false};
     bool critical{true};  // Optional observability processes never stop robot control.
+    bool keep_on_stack_stop{false};  // Keep the management UI available during control stops.
     int restart_limit{0}, restart_delay_ms{1000};
 };
 

@@ -18,6 +18,13 @@ void SafetyLayer::Validate(const ControlData& input, bool stopping, bool failed)
     if (stopping || failed)
         throw std::runtime_error("safety rejected request: session stopped or failed");
 
+    if (int(input.requested_drive_action) < 0 || int(input.requested_drive_action) > 5)
+        throw std::runtime_error("safety rejected request: invalid drive action");
+    if ((input.requested_drive_action == DriveAction::EnableMotor ||
+            input.requested_drive_action == DriveAction::DisableMotor) &&
+        (input.requested_motor_axis < -1 || input.requested_motor_axis >= 3))
+        throw std::runtime_error("safety rejected request: invalid motor axis");
+
     if (input.requested_mode < 0 || input.requested_mode > 6)
         throw std::runtime_error("safety rejected request: invalid mode");
 
@@ -41,52 +48,4 @@ void SafetyLayer::Validate(const ControlData& input, bool stopping, bool failed)
             throw std::runtime_error("safety rejected request: non-finite ball target");
 }
 
-void SafetyLayer::ValidateSimulation(const SimulationCommand& command,
-    const SimulationData& state,
-    const SimulationApproval& previous,
-    std::uint64_t now) const {
-    if (!state.published_ns)
-        throw std::runtime_error("safety rejected simulation request: simulation is not ready");
-    if (command.action == SimulationAction::Pause) {
-        if (command.pause < 0 || command.pause > 2)
-            throw std::runtime_error("safety rejected simulation request: invalid pause value");
-        return;
-    }
-    if (command.action == SimulationAction::Reset)
-        return;
-    if (command.action == SimulationAction::Step) {
-        const bool paused =
-            previous.pause_sequence > state.applied_pause_sequence ? previous.paused : state.paused;
-        if (!paused)
-            throw std::runtime_error("single step requires a paused simulation");
-        return;
-    }
-    if (command.action != SimulationAction::Perturb)
-        throw std::runtime_error("safety rejected simulation request: invalid operation");
-    const auto& p = command.perturb;
-    if (!p.owner || p.active < 0 || p.active > 2)
-        throw std::runtime_error("safety rejected perturbation owner or action");
-    const char* bodies[] = {"base", "FL_hip", "FL_thigh", "FL_calf", "touch_object"};
-    const bool named = p.body.back() == 0 &&
-                       std::any_of(std::begin(bodies), std::end(bodies), [&](const char* name) {
-                           return std::strcmp(name, p.body.data()) == 0;
-                       });
-    if (!named)
-        throw std::runtime_error("safety rejected perturbation: unknown QHRR body");
-    for (const auto* values : {&p.reference_position, &p.reference_selection, &p.local_position})
-        for (double value : *values)
-            if (!std::isfinite(value))
-                throw std::runtime_error("safety rejected perturbation: non-finite position");
-    double norm = 0;
-    for (double value : p.reference_quaternion) {
-        if (!std::isfinite(value))
-            throw std::runtime_error("safety rejected perturbation: non-finite quaternion");
-        norm += value * value;
-    }
-    if (std::abs(norm - 1) > .001)
-        throw std::runtime_error("safety rejected perturbation: quaternion must be unit length");
-    if (previous.perturb.active && previous.perturb_expires_ns > now &&
-        previous.perturb.owner != p.owner)
-        throw std::runtime_error("perturbation is owned by another viewer; release it first");
-}
 }  // namespace qhrr05
