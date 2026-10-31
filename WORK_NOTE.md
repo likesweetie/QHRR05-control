@@ -2,6 +2,13 @@
 
 갱신: 2026-10-31 · 제로셋 구현을 `refactoring`에서 `main`으로 통합
 
+## 하드웨어 배포 계획 — 2026-10-31
+
+- 제로셋 구현 `11e1a62`를 `main`의 `68d7df5`로 병합하고, 그 위치에서 `HW_deploy` 브랜치를 생성했습니다. 원격 반영은 이번 작업 범위에 포함하지 않았습니다.
+- `docs/HW_DEPLOY_PLAN.md`에 실제 CAN/모터 전환 계획을 기록했습니다. 명시적 실행 모드, 기존 폴더 내 하드웨어 프로파일/런처, 시뮬레이션 보조 코드의 작은 경계, MuJoCo 계산 백엔드 유지가 중심입니다.
+- 안전 정책을 중첩하지 않고 TaskController의 DISARMED/ACTIVE/FAULT와 기존 SafetyLayer, HAL 한 곳의 통신 기한 처리로 책임을 나눕니다. 자동 재-arm 및 통신 오류 후 대체 실행은 하지 않는 방향입니다.
+- 이번 HW_deploy 변경은 계획 문서뿐입니다. 사용자 요청에 따라 별도 빌드·시험·실물 CAN 송신을 수행하지 않았습니다.
+
 ## 순차 스토퍼 Zero set — 2026-10-31
 
 - `require_zero_position_setup: true`를 simulation IPC로 전달하면 TaskController가 모드 6을 자동 시작합니다. 원시 CAN 엔코더 좌표에서 hip → thigh → calf 순으로 증분 위치 탐색하고, 탐색 방향의 측정 Iq×Kt 토크와 저속이 150ms 유지되면 알려진 스토퍼 관절각 기준으로 런타임 `position_offset`을 저장합니다. C3/ROM/설정 파일 쓰기는 하지 않습니다.
