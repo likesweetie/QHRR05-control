@@ -5,6 +5,7 @@
 #include "motion_controllers/magnetic_touch_controller.hpp"
 #include "motion_controllers/tracking_controller.hpp"
 #include "motion_controllers/ball_following_controller.hpp"
+#include "motion_controllers/zero_set_controller.hpp"
 #include <array>
 #include <memory>
 #include <string>
@@ -27,6 +28,8 @@ public:
     void Release();
 
 private:
+    void ControlZeroSet();
+    bool ZeroComplete() const;
     shm_utils::Mapping shm_;
     InputInterface input_;
     SafetyLayer safety_;
@@ -35,6 +38,13 @@ private:
     std::string last_simulation_error_;
     std::string last_input_rejection_;
     bool without_can_ = false;
+    std::string config_path_;
+    bool zero_required_ = false, zero_policy_seen_ = false, zero_ready_ = false;
+    bool zero_started_ = false;
+    double zero_clock_ = 0, zero_last_control_time_ = 0;
+    std::array<bool, 3> zero_applied_{};
+    ZeroSetTelemetry zero_status_{};
+    std::array<double, 3> encoder_position_{};
 
     // Current joint inputs, copied once from the locked motor domain.
     std::array<double, 3> joint_position_{}, joint_velocity_{}, joint_acceleration_{};
@@ -72,6 +82,7 @@ private:
     std::unique_ptr<MagneticTouchController> magnetic_;
     std::unique_ptr<TrackingController> tracking_;
     std::unique_ptr<BallFollowingController> ball_;
+    std::unique_ptr<ZeroSetController> zero_set_;
 
     std::array<double, 3> torque_command_{}, position_reference_{};
     std::array<double, 3> torque_limits_{};

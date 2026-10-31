@@ -265,7 +265,7 @@ int main(int argc, char** argv) {
         };
 
         const auto select_controller = [&](int requested) {
-            if (requested == mode)
+            if (requested == mode && requested != 6)
                 return;
 
             mode = requested;
@@ -278,6 +278,7 @@ int main(int argc, char** argv) {
                              : mode == 2 ? "MAGNETIC"
                              : mode == 3 ? "TRACKING"
                              : mode == 4 ? "BALL FOLLOWING"
+                             : mode == 6 ? "ZERO SET"
                                          : "DAMPING")
                       << " at t=" << data->time << std::endl;
         };
@@ -297,6 +298,8 @@ int main(int argc, char** argv) {
         };
 
         SimulationData simulation_snapshot;
+        simulation_snapshot.require_zero_position_setup =
+            virtual_motors && virtual_motors->require_zero_position_setup();
         const auto sample = [&] {
             qhrr05::viewer::Sample frame;
             frame.time = data->time;
@@ -544,6 +547,10 @@ int main(int argc, char** argv) {
                     sim->user_controller_callback_(5);
                     return true;
                 }
+                if (key == 'Z' || key == 'z') {
+                    sim->user_controller_callback_(6);
+                    return true;
+                }
 
                 if (key == 'G' || key == 'g') {
                     sim->user_controller_callback_(1);
@@ -613,7 +620,13 @@ int main(int argc, char** argv) {
                     applied_command.control_time,
                     max_error);
 
-                if (mode == 5) {
+                if (mode == 6) {
+                    const auto& zero = applied_command.zero_set;
+                    std::snprintf(status, sizeof(status),
+                        "ZERO SET: %s / %s\n%s\ntravel=%.3f rad elapsed=%.2f s | Z retry / D cancel",
+                        ZeroSetAxisName(zero.axis), ZeroSetPhaseName(zero.phase),
+                        ZeroSetFailureName(zero.failure), zero.travel_rad, zero.elapsed_sec);
+                } else if (mode == 5) {
                     const auto& target = applied_command.damping_toe_reference;
 
                     if (applied_command.mode == 5 && applied_command.damping_reference_valid)

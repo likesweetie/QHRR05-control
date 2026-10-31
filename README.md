@@ -72,7 +72,7 @@ React/WebSocket 기반 [웹 제어 패널](docs/web_gui.md)도 사용할 수 있
 
 비주얼라이저 실행 파일이나 셰이더가 없으면 런처가 고정된 의존성을 준비하고 자동 빌드합니다. `build-filament/` 전체를 지운 경우 첫 실행에는 다운로드와 수 분의 빌드가 필요합니다. 동시에 실행한 런처는 빌드 잠금을 기다립니다. 웹 런처에는 이 C++ 자동 빌드를 추가하지 않았습니다.
 
-새 창에서 모드별 그래프·작업 단축키·Ctrl 드래그 외란·물체 조작·발끝 잔상·작업공간을 제공합니다. 명령은 Input → 안전레이어 → TaskController를 거치며, SHM에 직접 쓰지 않습니다. **SHM ABI 13 변경 후에는 모든 실행 파일을 재빌드하고 세션을 다시 시작해야 합니다.**
+새 창에서 모드별 그래프·작업 단축키·Ctrl 드래그 외란·물체 조작·발끝 잔상·작업공간을 제공합니다. 명령은 Input → 안전레이어 → TaskController를 거치며, SHM에 직접 쓰지 않습니다. **SHM ABI 14 변경 후에는 모든 실행 파일을 재빌드하고 세션을 다시 시작해야 합니다.**
 
 Filament의 기본 시각화는 4K 브러시드 금속 맵·이방성 반사·소프트박스 IBL·밝은 스튜디오 조명과 **8x MSAA + 고정 1.333333배 내부 해상도**를 사용합니다. 1920×1080의 3D 영역은 내부에서 약2560×1440으로 그립니다. `--msaa 4 --render-scale 1`로 비용을 줄이거나 `--render-scale 2`로 4K 내부 렌더링을 선택할 수 있습니다. 스크린샷에도 같은 품질 설정이 적용됩니다. 물리 모델과 제어 설정은 유지합니다.
 
@@ -168,7 +168,7 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 공유 영역은 기본 **`/qhrr05` 하나**이며 이름은 daemon 설정의 `shm_name`으로 지정합니다. CAN 사용 여부와 관계없이 daemon이 자식 실행 전에 생성·초기화하고, 모든 자식을 종료한 뒤 해제합니다. HAL·시뮬레이터·제어기·로거는 연결만 하며, 영역이 없으면 명시적으로 실패합니다. 기존 객체는 재사용·삭제하지 않습니다. daemon이 SIGKILL되면 정리할 수 없으므로 남은 객체는 다음 실행에서 충돌로 보고합니다.
 
-[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **13**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
+[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **14**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
 
 | 영역 | 데이터와 작성자 |
 | --- | --- |

@@ -138,7 +138,7 @@ OBJ에는 authored UV가 없으므로 `texrepeat`는 0~1 UV 타일 개수가 아
 
 | 조작 | 기능 |
 | --- | --- |
-| D / H / G / M / T / B | Damping / Homing / Gravity / Magnetic / Tracking / Ball |
+| D / H / G / M / T / B / Z | Damping / Homing / Gravity / Magnetic / Tracking / Ball / Zero set |
 | 1 / 2 / 3 | Tracking XY / XZ / YZ |
 | Space / R / 오른쪽 방향키 | 물리 pause·resume / reset 후 Damping / 1 ms 단일 스텝 |
 | 더블클릭 | 몸체 또는 주황색 touch_object 선택 |

@@ -1522,6 +1522,9 @@ void UiEvent(mjuiState* state) {
       case 18:            // Project joystick ball following controller
         if (sim->user_controller_callback_) sim->user_controller_callback_(4);
         break;
+      case 20:            // Project sequential stop calibration
+        if (sim->user_controller_callback_) sim->user_controller_callback_(6);
+        break;
       case 19:            // Project pure damping controller
         if (sim->user_controller_callback_) sim->user_controller_callback_(5);
         break;

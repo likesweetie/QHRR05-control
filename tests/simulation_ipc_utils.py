@@ -47,6 +47,7 @@ class State(c.Structure):
         ("contact", c.c_bool),
         ("contact_event_sequence", c.c_uint64),
         ("contact_event_time", c.c_double),
+        ("require_zero_position_setup", c.c_bool),
     ]
 
 
@@ -55,7 +56,7 @@ class SimulationReader:
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self.socket.settimeout(3)
         self.socket.connect(f"/tmp/qhrr05-simulation-{os.getuid()}/{session[1:]}.sock")
-        self.socket.send(struct.pack("=QIIII", 0x5148525253494D31, 1, 1, 0, 0))
+        self.socket.send(struct.pack("=QIIII", 0x5148525253494D31, 2, 1, 0, 0))
         self.state = State()
 
     def read(self, timeout=0.1):
@@ -68,7 +69,7 @@ class SimulationReader:
             if not packet:
                 return self.state
             magic, version, kind, size, _ = struct.unpack("=QIIII", packet[:24])
-            assert magic == 0x5148525253494D31 and version == 1 and kind == 3
+            assert magic == 0x5148525253494D31 and version == 2 and kind == 3
             assert len(packet) == 24 + size and size == c.sizeof(State), (size, c.sizeof(State))
             self.state = State.from_buffer_copy(packet[24:])
             if time.monotonic() >= deadline:

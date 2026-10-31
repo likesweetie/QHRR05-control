@@ -65,7 +65,8 @@ std::string WebGuiBridge::Snapshot() {
     }
 
     const auto now = shm_utils::MonotonicNs();
-    const bool ready = !stopping && !failed && model.published_ns && control.published_ns;
+    const bool ready = !stopping && !failed && control.published_ns &&
+                       (model.published_ns || control.mode == 6 || control.zero_set.required);
     std::ostringstream out;
     out << std::boolalpha << "{\"type\":\"state\",\"ready\":" << ready
         << ",\"can_enabled\":" << can_enabled << ",\"stopping\":" << stopping
@@ -76,6 +77,17 @@ std::string WebGuiBridge::Snapshot() {
         << ",\"motion_sequence\":" << control.motion_sequence
         << ",\"active_motion_sequence\":" << control.active_motion_sequence
         << ",\"holding\":" << control.holding
+        << ",\"zero_set\":{\"phase\":" << JsonString(ZeroSetPhaseName(control.zero_set.phase))
+        << ",\"failure\":" << JsonString(ZeroSetFailureName(control.zero_set.failure))
+        << ",\"axis\":" << JsonString(ZeroSetAxisName(control.zero_set.axis))
+        << ",\"required\":" << control.zero_set.required << ",\"complete\":"
+        << std::all_of(control.zero_set.calibrated.begin(),
+               control.zero_set.calibrated.end(),
+               [](bool v) {
+                   return v;
+               })
+        << ",\"travel_rad\":" << Number(control.zero_set.travel_rad)
+        << ",\"elapsed_sec\":" << Number(control.zero_set.elapsed_sec) << "}"
         << ",\"tracking_plane\":" << int(control.tracking_plane)
         << ",\"requested_tracking_plane\":" << int(control.requested_tracking_plane)
         << ",\"tracking_checking\":" << control.tracking_checking

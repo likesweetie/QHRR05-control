@@ -36,6 +36,7 @@ target_link_libraries(robot_model PUBLIC mujoco)
 add_library(motion_controllers STATIC
     src/motion_controllers/numerics/math.cpp
     src/motion_controllers/homing_controller.cpp
+    src/motion_controllers/zero_set_controller.cpp
     src/motion_controllers/gravity_compensation_controller.cpp
     src/motion_controllers/tracking_controller.cpp
     src/motion_controllers/tracking_ilc.cpp
@@ -128,6 +129,19 @@ endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(zero_set_controller_test tests/zero_set_controller_test.cpp)
+    target_link_libraries(zero_set_controller_test PRIVATE motion_controllers)
+    add_test(NAME zero_set_controller COMMAND zero_set_controller_test
+        ${PROJECT_SOURCE_DIR}/config/control/control.yaml)
+    add_executable(zero_set_can_test tests/zero_set_can_test.cpp)
+    target_link_libraries(zero_set_can_test PRIVATE control_core simulation_core)
+    set_target_properties(zero_set_can_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME zero_set_can COMMAND bash ${PROJECT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+        $<TARGET_FILE:zero_set_can_test> ${PROJECT_SOURCE_DIR}/config/control/control.yaml
+        ${PROJECT_SOURCE_DIR}/models/qhrr-05/scene.xml
+        ${PROJECT_SOURCE_DIR}/config/can_hal/can_hal.yaml $<TARGET_FILE:can_hal>
+        ${PROJECT_SOURCE_DIR}/config/simulation/simulation.yaml)
+    set_tests_properties(zero_set_can PROPERTIES TIMEOUT 45)
     add_test(NAME launcher_autobuild COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/launcher_autobuild_test.py)
     set_tests_properties(launcher_autobuild PROPERTIES TIMEOUT 120)

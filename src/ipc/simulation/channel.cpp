@@ -15,7 +15,7 @@
 namespace qhrr05::simulation_ipc {
 namespace {
 constexpr std::uint64_t magic = 0x5148525253494d31ULL;
-constexpr std::uint32_t version = 1;
+constexpr std::uint32_t version = 2;
 
 enum Type : std::uint32_t { HelloObserver = 1, HelloController, State, Command };
 
