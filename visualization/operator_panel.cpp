@@ -12,8 +12,9 @@
 namespace qhrr05::visualization {
 namespace {
 const char* ModeName(int mode) {
-    static const char* names[] = {"HOMING", "GRAVITY", "MAGNETIC", "TRACKING", "BALL", "DAMPING"};
-    return mode >= 0 && mode < 6 ? names[mode] : "UNKNOWN";
+    static const char* names[] = {
+        "HOMING", "GRAVITY", "MAGNETIC", "TRACKING", "BALL", "DAMPING", "ZERO SET"};
+    return mode >= 0 && mode < 7 ? names[mode] : "UNKNOWN";
 }
 
 viewer::Sample PlotSample(const Snapshot& snapshot) {
@@ -94,7 +95,7 @@ void OperatorPanel::Send(const std::string& operation) {
 void OperatorPanel::Mode(int mode, int plane) {
     if (plane < 0)
         plane = int(snapshot_.control.requested_tracking_plane);
-    if (mode == snapshot_.control.requested_mode &&
+    if (mode != 6 && mode == snapshot_.control.requested_mode &&
         plane == int(snapshot_.control.requested_tracking_plane))
         return;
     Send("mode " + std::to_string(mode) + ' ' + std::to_string(plane));
@@ -125,6 +126,8 @@ bool OperatorPanel::Key(int key) {
         Mode(3);
     else if (key == GLFW_KEY_B)
         Mode(4);
+    else if (key == GLFW_KEY_Z)
+        Mode(6);
     else if (key >= GLFW_KEY_1 && key <= GLFW_KEY_3)
         Mode(3, key - GLFW_KEY_1);
     else if (key == GLFW_KEY_SPACE)
@@ -280,13 +283,23 @@ void OperatorPanel::Draw(int width, int height) {
     ImGui::Text("Simulation IPC: %s", snapshot_.simulation_status.c_str());
     ImGui::BeginDisabled(!input_);
     const char* buttons[] = {
-        "D Damping", "H Home", "G Gravity", "M Magnetic", "T Tracking", "B Ball"};
-    const int modes[] = {5, 0, 1, 2, 3, 4};
-    for (int i = 0; i < 6; ++i) {
+        "D Damping", "H Home", "G Gravity", "M Magnetic", "T Tracking", "B Ball", "Z Zero set"};
+    const int modes[] = {5, 0, 1, 2, 3, 4, 6};
+    for (int i = 0; i < 7; ++i) {
         if (i % 3)
             ImGui::SameLine();
         if (ImGui::Button(buttons[i]))
             Mode(modes[i]);
+    }
+    if (c.zero_set.required || c.mode == 6) {
+        ImGui::TextWrapped("Zero set: %s | %s | %.2f rad / %.1f s",
+            ZeroSetPhaseName(c.zero_set.phase),
+            ZeroSetAxisName(c.zero_set.axis),
+            c.zero_set.travel_rad,
+            c.zero_set.elapsed_sec);
+        if (c.zero_set.phase == ZeroSetPhase::Fault)
+            ImGui::TextWrapped("%s; motors released. Z retries, D cancels.",
+                ZeroSetFailureName(c.zero_set.failure));
     }
     if (ImGui::Button("1 XY"))
         Mode(3, 0);

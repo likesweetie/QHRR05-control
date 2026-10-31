@@ -26,11 +26,16 @@ public:
         return torque_max_;
     }
 
+    bool require_zero_position_setup() const {
+        return require_zero_;
+    }
+
 private:
     enum class MotorMode { Released, Enabled, MitControl };
 
     void Reply(int axis, const openrobot::Payload& bytes);
     int socket_ = -1;
+    bool require_zero_ = false;
     std::array<unsigned, 3> ids_{};
     std::array<MotorMode, 3> modes_{};
     std::array<MitCommand, 3> targets_{};

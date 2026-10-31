@@ -4,6 +4,10 @@ import "./style.css";
 
 const modes = [
   {
+    id: 6, name: "Zero set", ko: "영점 보정", key: "Z", icon: "home",
+    description: "hip → thigh → calf 순서로 스토퍼를 찾아 영점을 보정합니다.",
+  },
+  {
     id: 5,
     name: "Damping",
     ko: "감쇠",
@@ -707,6 +711,13 @@ function App() {
                 );
               })}
             </div>
+            {state?.zero_set && (state.zero_set.required || state.mode === 6) && (
+              <div className="inline-warning" role={state.zero_set.phase === "FAULT" ? "alert" : "status"}>
+                영점 보정: {state.zero_set.axis} / {state.zero_set.phase}
+                {state.zero_set.phase === "FAULT" && ` — ${state.zero_set.failure} (모터 출력 해제)`}
+                <br />Z: 처음부터 재시도 · D: 중단. 보정 완료 전에는 일반 모션이 차단됩니다.
+              </div>
+            )}
             {state?.tracking_checking && (
               <div className="tracking-progress" role="status">
                 <span>
@@ -735,8 +746,8 @@ function App() {
               <small>입력란 편집 중에는 비활성</small>
             </div>
             <div className="mode-footnote">
-              처음에는 Damping으로 시작합니다. 기준 자세 이동은 Homing을
-              선택하세요.
+              영점 설정이 필요하면 Zero set으로 시작하며, 아니면 Damping으로 시작합니다.
+              영점 보정 후 기준 자세 이동은 Homing을 선택하세요.
             </div>
           </section>
 

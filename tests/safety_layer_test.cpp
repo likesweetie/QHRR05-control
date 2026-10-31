@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
 
         ControlData input;
 
-        for (int mode = 0; mode <= 5; ++mode) {
+        for (int mode = 0; mode <= 6; ++mode) {
             input.requested_mode = mode;
             safety.Validate(input, false, false);
         }
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
         Require(rejected(input, true), "stopped session accepted input");
         Require(rejected(input, false, true), "failed session accepted input");
 
-        for (int mode : {-1, 6}) {
+        for (int mode : {-1, 7}) {
             auto invalid = input;
             invalid.requested_mode = mode;
             Require(rejected(invalid), "invalid mode accepted");

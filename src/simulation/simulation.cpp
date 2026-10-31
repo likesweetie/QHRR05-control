@@ -52,6 +52,7 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
     const auto simulation = YAML::LoadFile(simulation_config_path);
     const auto actual_motor = simulation["motor"];
     const bool require_zero = actual_motor["require_zero_position_setup"].as<bool>();
+    require_zero_ = require_zero;
 
     if (require_zero) {
         std::mt19937_64 generator(std::random_device{}());
@@ -63,7 +64,7 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
     }
 
     std::cout << "[simulation] encoder zero: "
-              << (require_zero ? "RANDOM / explicit zero setup required"
+              << (require_zero ? "RANDOM / sequential stop calibration required"
                                : "MODEL / calibrated joint coordinates")
               << std::endl;
     const auto axis_value = [&](const char* key, int axis) {

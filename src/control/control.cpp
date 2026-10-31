@@ -10,7 +10,8 @@ namespace qhrr05 {
 TaskController::TaskController(
     const std::string& config_path, const std::string& shm_name, bool without_can)
     : shm_(shm_name), input_(shm_name), safety_(config_path), simulation_channel_(shm_name, true),
-      without_can_(without_can), model_backend_(MakeMujocoBackend(config_path)),
+      without_can_(without_can), config_path_(config_path),
+      model_backend_(MakeMujocoBackend(config_path)),
       homing_(std::make_unique<HomingController>(config_path)),
       gravity_(std::make_unique<GravityCompensationController>(config_path)),
       magnetic_(std::make_unique<MagneticTouchController>(config_path)),
@@ -24,6 +25,7 @@ TaskController::TaskController(
         if (shm.can_enabled == without_can_ ||
             (!without_can_ && (shm.failed || shm.stopping || !motors.running)))
             throw std::runtime_error("SHM transport does not match controller mode");
+        zero_status_ = shm.control[shm.control_sequence % kShmBufferCount].zero_set;
     }
 
     const auto config = YAML::LoadFile(config_path);
@@ -52,10 +54,20 @@ bool TaskController::ReadInput() {
                       << "; simulation commands unavailable; hardware control remains active\n";
         last_simulation_error_ = error.what();
     }
+    const auto& simulation = simulation_channel_.Latest();
+    const bool auto_zero = !zero_policy_seen_ && simulation.published_ns &&
+                           simulation.require_zero_position_setup && !ZeroComplete();
+    const bool resume_calibrated = !zero_policy_seen_ && simulation.published_ns &&
+                                   simulation.require_zero_position_setup && ZeroComplete();
+    if (simulation.published_ns) {
+        zero_policy_seen_ = true;
+        zero_required_ = simulation.require_zero_position_setup;
+    }
     const auto command = input_.Receive();
     std::string rejection;
     std::uint64_t approved_sequence = 0;
     std::optional<SimulationCommand> simulation_pending;
+    bool calibration_rejected = false;
     std::array<std::uint64_t, 3> received_sequence, received_ns;
     bool measured = false;
     {
@@ -79,6 +91,7 @@ bool TaskController::ReadInput() {
 
         for (int i = 0; i < 3; ++i) {
             encoder_origin_[i] = motors.position_offset[i];
+            encoder_position_[i] = motors.feedback[i].position;
             joint_position_[i] = motors.position_offset[i] + motors.feedback[i].position;
             joint_velocity_[i] = motors.feedback[i].velocity;
             motor_torque_[i] = motors.motor_torque[i];
@@ -88,8 +101,39 @@ bool TaskController::ReadInput() {
         received_sequence = motors.received_sequence;
         received_ns = motors.received_ns;
         measurement_dt_ = motors.sample_dt;
+        zero_ready_ = !without_can_ && measured && motor_commands_enabled_ &&
+                      std::all_of(motors.enabled.begin(), motors.enabled.end(), [](bool v) {
+                          return v;
+                      });
 
         auto candidate = shm.control[shm.control_sequence % kShmBufferCount];
+        if (resume_calibrated && candidate.requested_mode == 6) {
+            // A control process restart must not erase a completed session calibration.
+            candidate.requested_mode = 5;
+            ++candidate.motion_sequence;
+            auto& restored = shm_utils::Next(shm.control, shm.control_sequence);
+            restored.requested_mode = 5;
+            restored.motion_sequence = candidate.motion_sequence;
+            ++shm.control_sequence;
+            std::cout << "[zero-set] using completed runtime calibration; restarting in DAMPING"
+                      << std::endl;
+        }
+        if (auto_zero) {
+            candidate.requested_mode = 6;
+            ++candidate.motion_sequence;
+            auto& approved = shm_utils::Next(shm.control, shm.control_sequence);
+            approved.requested_mode = candidate.requested_mode;
+            approved.motion_sequence = candidate.motion_sequence;
+            ++shm.control_sequence;
+            requested_mode_ = 6;
+            request_sequence_ = candidate.motion_sequence;
+            model_published_ns_ = 0;
+            auto& invalid_model = shm_utils::Next(shm.model, shm.model_sequence);
+            invalid_model = {};
+            ++shm.model_sequence;
+            std::cout << "[zero-set] startup calibration required; normal motion locked"
+                      << std::endl;
+        }
 
         if (command) {
             if (command->set_mode) {
@@ -103,7 +147,21 @@ bool TaskController::ReadInput() {
         try {
             safety_.Validate(candidate, shm.stopping, shm.failed);
 
-            if (command && !model_published_ns_)
+            if (candidate.requested_mode == 6 && without_can_) {
+                calibration_rejected = true;
+                throw std::runtime_error(
+                    "zero-set requires motor encoder/torque feedback; --without-can is unsupported");
+            }
+            if (zero_required_ && !ZeroComplete() && candidate.requested_mode != 5 &&
+                candidate.requested_mode != 6) {
+                calibration_rejected = true;
+                throw std::runtime_error(
+                    "zero-set is incomplete: use Z to calibrate or D to cancel");
+            }
+
+            if (command && !model_published_ns_ &&
+                !(command->set_mode && (command->mode == 5 || command->mode == 6)) &&
+                command->simulation.action == SimulationAction::None)
                 throw std::runtime_error("safety rejected request: model is not ready");
             if (command && command->simulation.action != SimulationAction::None)
                 safety_.ValidateSimulation(command->simulation,
@@ -112,6 +170,16 @@ bool TaskController::ReadInput() {
                     shm_utils::MonotonicNs());
         } catch (const std::runtime_error& error) {
             rejection = error.what();
+        }
+
+        // Native/joystick inputs already occupy the request bank. Reject them
+        // conclusively; never execute a rejected motion later when calibration ends.
+        if (calibration_rejected && !command) {
+            auto& restored = shm_utils::Next(shm.control, shm.control_sequence);
+            restored.requested_mode = requested_mode_;
+            restored.requested_tracking_plane = requested_tracking_plane_;
+            restored.motion_sequence = request_sequence_;
+            ++shm.control_sequence;
         }
 
         if (rejection.empty()) {
@@ -179,7 +247,7 @@ bool TaskController::ReadInput() {
 
     last_input_rejection_ = rejection;
 
-    if (requested_mode_ < 0 || requested_mode_ > 5)
+    if (requested_mode_ < 0 || requested_mode_ > 6)
         throw std::runtime_error("invalid controller mode");
 
     TrackingPlaneAxes(requested_tracking_plane_);
@@ -222,7 +290,7 @@ bool TaskController::ReadInput() {
         }
     }
 
-    if (measured && (fresh || !model_published_ns_)) {
+    if (measured && (!zero_required_ || ZeroComplete()) && (fresh || !model_published_ns_)) {
         const auto& state = model_backend_->Update(joint_position_, joint_velocity_);
         gravity_torque_ = state.gravity;
         bias_torque_ = state.bias;
@@ -260,7 +328,19 @@ void TaskController::Control() {
 
     if (requested_mode_ != mode_ || request_sequence_ != active_request_sequence_ ||
         (requested_mode_ == 3 && requested_tracking_plane_ != tracking_->plane())) {
-        if (requested_mode_ == 0)
+        if (mode_ == 6 && zero_set_) {
+            zero_set_->Cancel();
+            zero_status_ = zero_set_->telemetry();
+        }
+        if (requested_mode_ == 6) {
+            zero_set_ = std::make_unique<ZeroSetController>(config_path_);
+            zero_started_ = false;
+            zero_applied_.fill(false);
+            zero_status_ = {};
+            zero_status_.phase = ZeroSetPhase::Waiting;
+            zero_clock_ = 0;
+            zero_last_control_time_ = control_time_;
+        } else if (requested_mode_ == 0)
             homing_->Start(control_time_, joint_position_.data());
         else if (requested_mode_ == 1)
             gravity_->Start(joint_position_.data());
@@ -284,6 +364,11 @@ void TaskController::Control() {
     }
 
     holding_ = false;
+
+    if (mode_ == 6) {
+        ControlZeroSet();
+        return;
+    }
 
     if (mode_ == 0) {
         homing_->Compute(control_time_,
@@ -395,6 +480,86 @@ void TaskController::Control() {
     }
 }
 
+bool TaskController::ZeroComplete() const {
+    return std::all_of(
+        zero_status_.calibrated.begin(), zero_status_.calibrated.end(), [](bool value) {
+            return value;
+        });
+}
+
+void TaskController::ControlZeroSet() {
+    const auto& simulation = simulation_channel_.Latest();
+    const auto now = shm_utils::MonotonicNs();
+    const bool paused = simulation_channel_.Connected() && !simulation.finished &&
+                        simulation.published_ns && now >= simulation.published_ns &&
+                        now - simulation.published_ns < 500000000ULL && simulation.paused;
+    if (!paused)
+        zero_clock_ += std::max(0.0, control_time_ - zero_last_control_time_);
+    zero_last_control_time_ = control_time_;
+
+    // Simulation truth can veto an unsafe external contact, never establish the
+    // encoder zero. Hardware detection still uses only measured torque/velocity.
+    if (simulation.published_ns && simulation.contact &&
+        zero_status_.phase != ZeroSetPhase::Complete && zero_status_.phase != ZeroSetPhase::Fault) {
+        zero_set_->Fail(ZeroSetFailure::ExternalContact);
+        zero_status_ = zero_set_->telemetry();
+    }
+
+    if (!zero_started_ && zero_ready_ && zero_status_.phase != ZeroSetPhase::Fault) {
+        zero_set_->Start(zero_clock_, encoder_position_);
+        zero_started_ = true;
+    }
+    if (!zero_started_) {
+        if (zero_clock_ > 5.0 && zero_status_.phase != ZeroSetPhase::Fault) {
+            zero_set_->Fail(ZeroSetFailure::FeedbackStale);
+            zero_status_ = zero_set_->telemetry();
+        }
+        torque_command_.fill(0);
+        motor_targets_.fill({});
+        position_reference_ = joint_position_;
+        if (zero_status_.phase == ZeroSetPhase::Fault)
+            motor_commands_enabled_ = false;
+        return;
+    }
+
+    if (!paused)
+        zero_set_->Update(zero_clock_,
+            encoder_position_,
+            joint_velocity_,
+            motor_torque_,
+            previous_received_sequence_);
+    zero_status_ = zero_set_->telemetry();
+    holding_ = zero_status_.phase == ZeroSetPhase::Complete;
+    const bool failed = zero_status_.phase == ZeroSetPhase::Fault;
+    if (failed)
+        motor_commands_enabled_ = false;
+
+    for (int i = 0; i < 3; ++i) {
+        if (zero_status_.calibrated[i] && !zero_applied_[i]) {
+            encoder_origin_[i] = zero_status_.offset[i];
+            joint_position_[i] = encoder_position_[i] + encoder_origin_[i];
+            zero_applied_[i] = true;
+        }
+        position_reference_[i] = zero_set_->reference()[i] + encoder_origin_[i];
+        const double kp = zero_set_->kp()[i], kd = zero_set_->kd()[i];
+        const double limit = std::min(torque_limits_[i], zero_set_->effort_limit()[i]);
+        torque_command_[i] =
+            failed ? 0
+                   : std::clamp(kp * (zero_set_->reference()[i] - encoder_position_[i]) -
+                                    kd * joint_velocity_[i],
+                         -limit,
+                         limit);
+        // The encoder frame is unchanged: calibration only changes the runtime
+        // encoder->joint mapping. No EEPROM/ROM write or C3 rebase is sent.
+        motor_targets_[i] = {
+            encoder_position_[i] + (torque_command_[i] + kd * joint_velocity_[i]) / kp,
+            0,
+            kp,
+            kd,
+            0};
+    }
+}
+
 void TaskController::WriteOutput() {
     auto& shm = *shm_.get();
     shm_utils::Lock lock(shm);
@@ -414,6 +579,8 @@ void TaskController::WriteOutput() {
         motors.command_enabled[i] = motor_commands_enabled_;
         motors.debug_torque[i] = torque_command_[i];
         motors.reference[i] = position_reference_[i];
+        if (zero_applied_[i])
+            motors.position_offset[i] = encoder_origin_[i];
     }
 
     auto& control = shm_utils::Next(shm.control, shm.control_sequence);
@@ -425,6 +592,8 @@ void TaskController::WriteOutput() {
     control.control_time = control_time_;
     control.mode = mode_;
     control.holding = holding_;
+    control.zero_set = zero_status_;
+    control.zero_set.required = zero_required_;
     control.damping_toe_reference = mode_ == 5 ? damping_toe_reference_ : std::array<double, 3>{};
     control.damping_reference_valid = mode_ == 5 && damping_reference_valid_;
     control.magnetic = mode_ == 2 ? magnetic_->telemetry() : MagneticTelemetry{};

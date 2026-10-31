@@ -9,7 +9,7 @@
 
 // Shared-memory protocol. Increment the ABI version when layout or field semantics change.
 inline constexpr std::uint64_t kShmMagic = 0x5148525253484D31ULL;  // QHRRSHM1
-inline constexpr std::uint32_t kShmAbiVersion = 13;
+inline constexpr std::uint32_t kShmAbiVersion = 14;
 inline constexpr std::size_t kShmBufferCount = 2;
 inline constexpr unsigned kShmPermissions = 0600;
 inline constexpr clockid_t kShmClock = CLOCK_MONOTONIC;
@@ -28,7 +28,8 @@ struct MotorData {
     std::array<std::uint64_t, 3> tx_frames{}, rx_frames{}, invalid_frames{};
     std::array<bool, 3> profile_verified{}, enable_requested{}, enabled{};
 
-    // Simulation bootstrap, then runtime calibration.
+    // Joint angle = raw CAN encoder + controller-owned runtime calibration.
+    // Simulation bootstrap initializes this once; reset/enable never clear it.
     std::array<double, 3> position_offset{};
 
     std::uint64_t command_sequence = 0, command_published_ns = 0;  // Controller
@@ -48,7 +49,7 @@ struct ModelData {
 
 struct ControlData {
     int requested_mode =
-        5;  // 0: homing, 1: gravity, 2: magnetic, 3: tracking, 4: ball, 5: damping.
+        5;  // 0: homing, 1: gravity, 2: magnetic, 3: tracking, 4: ball, 5: damping, 6: zero-set.
     // GUI owns requests. Slider edits preserve motion_sequence.
     double target_force = 3;
     TrackingPlane requested_tracking_plane = TrackingPlane::XY;
@@ -58,6 +59,7 @@ struct ControlData {
 
     int mode = 5;  // Controller owns status and observer output. Startup is damping only.
     bool holding = false;
+    ZeroSetTelemetry zero_set{};
     std::array<double, 3>
         damping_toe_reference{};  // Captured on damping entry, no position stiffness.
     bool damping_reference_valid = false;  // False until the first model sample is available.

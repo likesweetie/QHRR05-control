@@ -171,7 +171,7 @@ wss.on("connection", (client) => {
         if (
           !Number.isInteger(request.mode) ||
           request.mode < 0 ||
-          request.mode > 5 ||
+          request.mode > 6 ||
           !Number.isInteger(request.plane) ||
           request.plane < 0 ||
           request.plane > 2

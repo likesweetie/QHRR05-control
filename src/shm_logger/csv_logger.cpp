@@ -258,6 +258,7 @@ int qhrr05::logging::RunCsvLogger(int argc, char** argv) {
                 : command.mode == 3 ? "tracking"
                 : command.mode == 4 ? "ball"
                 : command.mode == 5 ? "damping"
+                : command.mode == 6 ? "zero_set"
                                     : "invalid");
 
             std::array<double, 3> reference;

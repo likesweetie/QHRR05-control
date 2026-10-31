@@ -3,7 +3,7 @@
 웹과 입력 코드는 `interfaces`로 묶었습니다. C++ Input/조이스틱은 `src/interfaces/input`, 읽기 전용 웹 브리지는 `src/interfaces/web_gui`, 실행 진입점은 `apps/interfaces/{input,web_gui}`입니다. Node/React 프로젝트는 `apps/interfaces/web_gui/frontend`에 있습니다. 실행 파일 이름(`input`, `web_gui_bridge`)과 `scripts/run_web_gui.sh` 명령은 유지됩니다.
 
 
-`GUI` 브랜치의 로컬 React/Vite 패널입니다. Damping·Homing·Gravity·Magnetic·Tracking·Ball 모드 요청, Tracking 평면 선택, 목표 접촉력 설정, 관절/CAN 상태와 최근 명령 기록을 제공합니다. 상태 표시는 20Hz이며 실제 제어 주기는 기존 TaskController 설정을 따릅니다.
+`GUI` 브랜치의 로컬 React/Vite 패널입니다. Damping·Homing·Gravity·Magnetic·Tracking·Ball·Zero set 모드 요청, Tracking 평면 선택, 목표 접촉력 설정, 관절/CAN 상태와 최근 명령 기록을 제공합니다. 상태 표시는 20Hz이며 실제 제어 주기는 기존 TaskController 설정을 따릅니다.
 
 ## 화면과 조작
 
@@ -105,3 +105,5 @@ npm --prefix apps/interfaces/web_gui/frontend run test:browser
 ```
 
 CAN·SHM·GUI 시험에는 로컬 실행 권한이 필요합니다. 브라우저 시험은 `/opt/google/chrome/chrome`을 사용하며 다른 Chrome/Chromium은 `QHRR_CHROME`에 경로를 지정합니다. 시험은 별도 SHM과 실제 TaskController를 사용하고 테스트 상태 발행기만 합성합니다. 실물 모터를 조작하지 않습니다. 브라우저 시험의 데스크톱·모바일 캡처는 Git 제외 디렉터리 `build/web_gui_desktop.png`, `build/web_gui_mobile.png`에 저장합니다.
+
+Zero set(Z)은 hip → thigh → calf 스토퍼 탐색과 런타임 영점 보정입니다. 보정 단계/축/실패 사유를 패널에 표시하며, 미보정 상태에서도 D로 중단하거나 Z로 재시도할 수 있습니다. 세 축 보정 전 일반 모션은 거부됩니다. 자세한 설정은 [제어 문서](control.md#스토퍼-기반-zero-set)를 참고하십시오.

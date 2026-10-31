@@ -20,11 +20,82 @@ struct MotorFeedback {
     int temperature = 0;
 };
 
+enum class ZeroSetPhase : int { Idle, Waiting, Seeking, Backoff, Complete, Cancelled, Fault };
+enum class ZeroSetFailure : int {
+    None,
+    Timeout,
+    TravelLimit,
+    FeedbackStale,
+    InvalidFeedback,
+    ExternalContact
+};
+
+inline const char* ZeroSetAxisName(int axis) {
+    static const char* names[] = {"hip", "thigh", "calf"};
+    return axis >= 0 && axis < 3 ? names[axis] : "all";
+}
+
+inline const char* ZeroSetPhaseName(ZeroSetPhase phase) {
+    switch (phase) {
+    case ZeroSetPhase::Idle:
+        return "IDLE";
+    case ZeroSetPhase::Waiting:
+        return "WAITING FOR MOTOR FEEDBACK";
+    case ZeroSetPhase::Seeking:
+        return "SEEKING STOP";
+    case ZeroSetPhase::Backoff:
+        return "BACKOFF";
+    case ZeroSetPhase::Complete:
+        return "COMPLETE";
+    case ZeroSetPhase::Cancelled:
+        return "CANCELLED";
+    case ZeroSetPhase::Fault:
+        return "FAULT";
+    }
+    throw std::invalid_argument("invalid zero-set phase");
+}
+
+inline const char* ZeroSetFailureName(ZeroSetFailure reason) {
+    switch (reason) {
+    case ZeroSetFailure::None:
+        return "none";
+    case ZeroSetFailure::Timeout:
+        return "axis timeout";
+    case ZeroSetFailure::TravelLimit:
+        return "maximum travel exceeded";
+    case ZeroSetFailure::FeedbackStale:
+        return "motor feedback stopped";
+    case ZeroSetFailure::InvalidFeedback:
+        return "non-finite motor feedback";
+    case ZeroSetFailure::ExternalContact:
+        return "toe touches the scene object; clear the path and retry";
+    }
+    throw std::invalid_argument("invalid zero-set failure");
+}
+
+struct ZeroSetTelemetry {
+    ZeroSetPhase phase = ZeroSetPhase::Idle;
+    ZeroSetFailure failure = ZeroSetFailure::None;
+    int axis = 0;
+    bool required = false;
+    std::array<bool, 3> calibrated{};
+    std::array<double, 3> offset{};
+    double travel_rad = 0, elapsed_sec = 0;
+};
+
 enum class TrackingPlane : int { XY, XZ, YZ };
 
 enum class TrackingMethod : int { InverseDynamics, CTC, Impedance };
 
-enum class TrackingILCState : int { Off, Warmup, Collecting, Active, SkippedSaturation, SkippedSamples, IKHold };
+enum class TrackingILCState : int {
+    Off,
+    Warmup,
+    Collecting,
+    Active,
+    SkippedSaturation,
+    SkippedSamples,
+    IKHold
+};
 
 inline const char* TrackingILCStateName(TrackingILCState state) {
     switch (state) {

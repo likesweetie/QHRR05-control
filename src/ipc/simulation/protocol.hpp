@@ -46,4 +46,6 @@ struct SimulationData {
     bool contact = false;
     std::uint64_t contact_event_sequence = 0;
     double contact_event_time = 0;
+    // Startup policy only; no physical joint angle is needed by calibration.
+    bool require_zero_position_setup = false;
 };

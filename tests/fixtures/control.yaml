@@ -12,6 +12,22 @@ control:
 
 # Joint order: FL hip roll, thigh pitch, calf pitch.
 # Gains accept either a scalar or three joint values.
+zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
+  direction: [-1, -1, -1]  # 엔코더 증가/감소 방향; 반드시 실제 스토퍼 방향과 일치해야 함
+  stop_position_rad: [-0.872665, -2.984513, -2.722714]  # 스토퍼의 모델 관절각; 스토퍼 자체를 0 rad로 취급하지 않음
+  speed_rad_s: [0.12, 0.12, 0.12]  # 증분 위치 목표 속도
+  contact_torque_nm: [6.0, 6.0, 3.0]  # 탐색 방향의 측정 토크가 이 값을 넘고 정지해야 접촉
+  maximum_push_nm: [8.0, 8.0, 4.5]  # 탐색/유지 노력 상한; limits.torque_nm 이하
+  kp: [120.0, 120.0, 100.0]
+  kd: [2.0, 2.0, 1.0]
+  maximum_travel_rad: [1.85, 6.0, 2.4]  # 축별 시작 엔코더각 대비 이동량 상한
+  timeout_sec: [30.0, 70.0, 40.0]  # 접촉 탐색과 후퇴를 포함한 축별 시간 상한
+  contact_duration_sec: 0.15  # 새 피드백에서 연속 확인; 한 번의 스파이크로 보정하지 않음
+  contact_velocity_rad_s: 0.02
+  backoff_rad: 0.10  # 보정 후 스토퍼에서 물러난 자세를 유지한 뒤 다음 축 탐색
+  settle_tolerance_rad: 0.04
+  feedback_timeout_sec: 0.25
+
 homing:
   kp: [40.0, 40.0, 40.0]  # N*m/rad
   kd: [1.0, 1.0, 1.0]    # N*m*s/rad

@@ -95,6 +95,20 @@ template <> struct DataTamer2::TypeDefinitionTrait<ModelData> {
     }
 };
 
+template <> struct DataTamer2::TypeDefinitionTrait<ZeroSetTelemetry> {
+    template <typename Add> static std::string_view define(ZeroSetTelemetry& value, Add& add) {
+        add("phase", &value.phase);
+        add("failure", &value.failure);
+        add("axis", &value.axis);
+        add("required", &value.required);
+        add("calibrated", &value.calibrated);
+        add("offset", &value.offset);
+        add("travel_rad", &value.travel_rad);
+        add("elapsed_sec", &value.elapsed_sec);
+        return "ZeroSetTelemetry";
+    }
+};
+
 template <> struct DataTamer2::TypeDefinitionTrait<ControlData> {
     template <typename Add> static std::string_view define(ControlData& value, Add& add) {
         add("requested_mode", &value.requested_mode);
@@ -103,6 +117,7 @@ template <> struct DataTamer2::TypeDefinitionTrait<ControlData> {
         add("motion_sequence", &value.motion_sequence);
         add("mode", &value.mode);
         add("holding", &value.holding);
+        add("zero_set", &value.zero_set);
         add("damping_toe_reference", &value.damping_toe_reference);
         add("damping_reference_valid", &value.damping_reference_valid);
         add("control_time", &value.control_time);
@@ -179,6 +194,7 @@ template <> struct DataTamer2::TypeDefinitionTrait<SimulationData> {
         add("contact", &value.contact);
         add("contact_event_sequence", &value.contact_event_sequence);
         add("contact_event_time", &value.contact_event_time);
+        add("require_zero_position_setup", &value.require_zero_position_setup);
         return "SimulationData";
     }
 };

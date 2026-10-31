@@ -303,7 +303,7 @@ class Simulate {
 
 
   // simulation section of UI
-  mjuiDef def_simulation[22] = {
+  mjuiDef def_simulation[23] = {
     {mjITEM_SECTION,   "Simulation",    mjPRESERVE, nullptr,     "AS"},
     {mjITEM_RADIO,     "",              5, &this->run,           "Pause\nRun"},
     {mjITEM_BUTTON,    "Reset",         2, nullptr,              " #259"},
@@ -325,6 +325,7 @@ class Simulate {
     {mjITEM_BUTTON,    "Tracking [T]",  2},
     {mjITEM_BUTTON,    "Ball follow [B]",2},
     {mjITEM_BUTTON,    "Damping [D]",   2},
+    {mjITEM_BUTTON,    "Zero set [Z]",  2},
     {mjITEM_END}
   };
 

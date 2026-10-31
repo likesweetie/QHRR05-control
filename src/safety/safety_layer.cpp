@@ -18,7 +18,7 @@ void SafetyLayer::Validate(const ControlData& input, bool stopping, bool failed)
     if (stopping || failed)
         throw std::runtime_error("safety rejected request: session stopped or failed");
 
-    if (input.requested_mode < 0 || input.requested_mode > 5)
+    if (input.requested_mode < 0 || input.requested_mode > 6)
         throw std::runtime_error("safety rejected request: invalid mode");
 
     if (int(input.requested_tracking_plane) < 0 || int(input.requested_tracking_plane) > 2)

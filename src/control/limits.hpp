@@ -11,8 +11,12 @@
 namespace qhrr05 {
 // Shared configuration only: no controller, model, transport or runtime state.
 inline std::array<double, 3> ReadControlTorqueLimits(const YAML::Node& config) {
-    for (const char* name :
-        {"homing", "gravity_compensation", "magnetic_touch", "tracking", "ball_following"}) {
+    for (const char* name : {"homing",
+             "gravity_compensation",
+             "magnetic_touch",
+             "tracking",
+             "ball_following",
+             "zero_set"}) {
         const auto section = config[name];
         if (section && (section["torque_limit_nm"] || section["output_torque_limit_nm"]))
             throw std::runtime_error(
