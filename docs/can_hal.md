@@ -108,7 +108,7 @@ HAL은 확인한 C4 응답의 Kt를 프로세스 내부에 보관하고 `motor_t
 - 일반 CSV는 model/control/motors의 최신 완성본을 함께 읽고, 시뮬레이션 세션에서만 별도 IPC 정보를 추가합니다. `state_seq`는 소비한 모델 프레임 번호이고 `control_latency_us`는 모델 발행에서 명령 발행까지의 시간입니다.
 - `sim_contact_event_time`은 시뮬레이션 시간, RFOB `event_time`은 독립 제어 시간입니다.
 
-daemon이 소유한 SHM은 모든 자식이 종료된 뒤 daemon이 해제합니다. SIGKILL 뒤 남은 객체나 크기가 다른 객체는 자동 재사용·삭제하지 않고 충돌로 보고합니다. SHM 배치를 변경하면 모든 프로그램을 새 바이너리로 재시작합니다.
+daemon이 소유한 SHM은 모든 자식이 종료된 뒤 daemon이 해제합니다. daemon을 직접 실행하면 SIGKILL 뒤 남은 객체나 크기가 다른 객체는 충돌로 보고합니다. `run_daemon.sh`는 빌드 성공 후 같은 프로젝트·SHM의 이전 프로세스를 종료하고, 살아 있는 매핑이 없는 오래된 SHM·관리 소켓을 정리한 뒤 시작합니다. SHM 배치를 변경하면 모든 프로그램을 새 바이너리로 재시작합니다.
 
 ## 스토퍼 영점 보정
 

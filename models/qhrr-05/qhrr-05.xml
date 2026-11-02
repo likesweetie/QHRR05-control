@@ -1,7 +1,8 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="qhrr-05">
-  <compiler angle="radian" meshdir="assets" autolimits="true" inertiafromgeom="auto" />
-  <option cone="elliptic" impratio="100" timestep="0.002" />
+  <!--SolidWorks body + FL. Inertials synchronized from the user-finalized URDF; meshes never infer mass.-->
+  <compiler angle="radian" meshdir="assets" autolimits="true" inertiafromgeom="false" fusestatic="false" />
+  <option cone="elliptic" impratio="100" timestep="0.001" />
   <default>
     <default class="qhrr-05">
       <joint damping="0" armature="0.01" frictionloss="0.0" />
@@ -16,47 +17,49 @@
     </default>
   </default>
   <asset>
-    <material name="metal" rgba=".9 .95 .95 1" />
-    <material name="black" rgba="0 0 0 1" />
-    <material name="white" rgba="1 1 1 1" />
-    <material name="gray" rgba="0.65 0.68 0.72 1" />
+    <material name="qhrr_metal" rgba="0.65 0.68 0.72 1" />
     <mesh name="qhrr_base" file="qhrr_base.obj" />
     <mesh name="qhrr_hip" file="qhrr_hip.obj" />
     <mesh name="qhrr_thigh" file="qhrr_thigh.obj" />
     <mesh name="qhrr_calf" file="qhrr_calf.obj" />
+    <mesh name="qhrr_foot" file="qhrr_foot.obj" />
   </asset>
   <worldbody>
     <body name="base" pos="0 0 0.55" childclass="qhrr-05">
       <inertial pos="0.0255657022298543 0.0135975879763332 -0.00420097113554719" mass="8.163921" fullinertia="0.048588 0.124676 0.143891 -0.013651 0.000304 0.000232" />
-      <geom name="qhrr_base_visual" mesh="qhrr_base" material="gray" class="visual" />
+      <geom name="qhrr_base_visual" mesh="qhrr_base" material="qhrr_metal" class="visual" />
       <geom name="torso_collision" type="box" class="collision" pos="0 0 0" size="0.1894 0.1255 0.065" />
-      <body name="FL_hip" pos="0.1912 0.0624999999999999 0">
-        <inertial pos="0.0569605793736814 -0.00464593794605549 -2.79951436338299e-08" mass="1.06311951886917" fullinertia="0.0010806801895359 0.00150113063464163 0.00119024653554896 1.80329283900043e-05 0.000001 5.29865593866141e-06" />
+      <body name="hip" pos="0.1912 0.0624999999999999 0">
+        <inertial pos="0.0569 -0.0046 0" mass="1.066431" fullinertia="0.001084 0.001509 0.001198 1.8e-05 -1e-06 -5e-06" />
         <joint name="FL_hip_joint" type="hinge" axis="1 0 0" range="-0.872665 0.872665" />
         <site name="hip_roll" pos="0 0 0" size="0.004" rgba="0.2 0.7 1 1" group="4" />
-        <geom name="qhrr_hip_visual" mesh="qhrr_hip" material="gray" class="visual" />
+        <geom name="qhrr_hip_visual" mesh="qhrr_hip" material="qhrr_metal" class="visual" />
         <geom name="hip_collision" type="capsule" class="collision" fromto="0 0 0 0.0599999999999996 0.0262000000000003 0" size="0.028" />
-        <body name="FL_thigh" pos="0.0599999999999996 0.0262000000000003 0">
-          <inertial pos="-0.00385988628636716 0.0573570359748067 -0.0264287380321596" mass="1.776288" fullinertia="0.011888 0.011512 0.003266 0.000292 0.000926 -0.001934" />
-          <joint name="FL_thigh_joint" type="hinge" axis="0 1 0" range="-2.984513 2.879793" />
+        <body name="thigh" pos="0.0599999999999996 0.0262000000000003 0">
+          <inertial mass="1.84642260454764" pos="-0.00515747094968852 0.0609131376470748 -0.0339110652522399" fullinertia="0.00992559546037413 0.00941130042917401 0.00276702899734491 0.000292736954044417 -0.000708219127957802 0.00186567978879519" />
+          <joint name="FL_thigh_joint" type="hinge" axis="0 1 0" range="-2.14675 3.71755" />
           <site name="hip_pitch" pos="0 0 0" size="0.004" rgba="0.2 0.7 1 1" group="4" />
-          <geom name="qhrr_thigh_visual" mesh="qhrr_thigh" material="gray" class="visual" />
+          <geom name="qhrr_thigh_visual" mesh="qhrr_thigh" material="qhrr_metal" class="visual" />
           <geom name="thigh_collision" type="capsule" class="collision" fromto="0 0.0902999999999997 0 0 0.0902999999999997 -0.22" size="0.026" />
-          <body name="FL_calf" pos="0 0.0902999999999997 -0.22">
-            <inertial pos="0.00624789973136231 2.56601114564936e-06 -0.164638132808556" mass="0.416044433148062" fullinertia="0.00184658643459813 0.00190518975448778 9.85254384492916e-05 0 0.000046 0" />
+          <body name="calf" pos="0 0.0902999999999997 -0.22">
+            <inertial pos="0.010562 -3.40000000000062e-05 -0.133469" mass="0.254231" fullinertia="0.001767 0.001796 5.2e-05 0 7.1e-05 1e-06" />
             <joint name="FL_calf_joint" type="hinge" axis="0 1 0" range="-2.722714 -0.575959" />
             <site name="knee_pitch" pos="0 0 0" size="0.004" rgba="0.2 0.7 1 1" group="4" />
-            <geom name="qhrr_calf_visual" mesh="qhrr_calf" material="gray" class="visual" />
+            <geom name="qhrr_calf_visual" mesh="qhrr_calf" material="qhrr_metal" class="visual" />
             <geom name="calf_collision" type="capsule" class="collision" fromto="0 0 0 -0.00403072499058543 8.18446382888638e-09 -0.211879434390862" size="0.013" />
-            <geom name="FL" type="sphere" class="collision" pos="-0.00403072499058543 8.18446382888638e-09 -0.233011802519609" size="0.0211323681287468" condim="6" priority="1" friction="0.8 0.02 0.01" solimp="0.015 1 0.022" />
-            <site name="FL_foot" pos="-0.00403072499058543 8.18446382888638e-09 -0.233011802519609" size="0.004" rgba="1 0.3 0.1 1" group="4" />
+            <body name="foot" pos="0 0 -0.22">
+              <inertial pos="-0.00852116107449988 6.21062986039256e-08 -0.00852113120415932" mass="0.072" fullinertia="2.33083089683581e-05 2.95870615277993e-05 2.33084146249485e-05 -7.40694098911257e-11 6.6573765845794e-06 2.16450541180921e-11" />
+              <geom name="qhrr_foot_visual" mesh="qhrr_foot" material="qhrr_metal" class="visual" />
+              <geom name="FL" type="sphere" class="collision" pos="-0.00403072499058543 8.18446382888638e-09 -0.013011802519609" size="0.0211323681287468" condim="6" priority="1" friction="0.8 0.02 0.01" solimp="0.015 1 0.022" />
+              <site name="FL_foot" pos="-0.00403072499058543 8.18446382888638e-09 -0.013011802519609" size="0.004" rgba="1 0.3 0.1 1" group="4" />
+            </body>
           </body>
         </body>
       </body>
     </body>
   </worldbody>
   <contact>
-    <exclude body1="base" body2="FL_hip" />
+    <exclude body1="base" body2="hip" />
   </contact>
   <actuator>
     <motor name="FL_hip" joint="FL_hip_joint" ctrlrange="-53.7 53.7" />

@@ -20,7 +20,7 @@ limits:  # 모든 모션의 최종 출력 토크 상한; 물리 MJCF/CAN 한계�
 
 anticogging:  # 일반 모션의 torque_command에 합산 후 선택한 출력 방식으로 변환
   # Zero set·출력 해제·미보정 좌표에는 적용하지 않음
-  enabled: false  # true이면 활성화. 위상은 각 모터의 실제 측정값으로 설정
+  enabled: true  # true이면 활성화. 위상은 각 모터의 실제 측정값으로 설정
   motor_config: ../motor/ak10_9_v3.yaml  # 이 YAML 기준; gear_ratio·kt_output_nm_a 사용
   scale: 1.0  # 0..1; 모터 토크/전류 제한 후 곱하는 보상 비율
   phase_slew_rad_s: 5.0  # GUI 위상 목표 적용 속도; 0.5 rad 변경에 약 0.1 s
@@ -30,9 +30,9 @@ anticogging:  # 일반 모션의 torque_command에 합산 후 선택한 출력 �
   # 배열 순서 HR/HP/KP. theta_motor = gear_ratio*q + motor_zero_rad
   # 양의 추정 코깅 외란에 음의 보상 토크를 더함. 아래 위상 0은 예시값
   motor_zero_rad: [0.0, -0.0, -0.0]  # 모터 기계각 기준 원점 오프셋 [rad]
-  amp21_motor_nm: [0.01, 0.01, 0.01]  # 21차 외란 진폭 [모터축 Nm]
+  amp21_motor_nm: [0.0, 0.0, 0.0]  # 21차 외란 진폭 [모터축 Nm]
   phase21_rad: [3.38, 0.42, 6.22]  # sin(21*theta_motor + phase21_rad)
-  amp36_motor_nm: [0.01, 0.01, 0.01]  # 36차 외란 진폭 [모터축 Nm]
+  amp36_motor_nm: [0.01, 0.005, 0.005]  # 36차 외란 진폭 [모터축 Nm]
   phase36_rad: [4.9, 0.93, 3.22]  # sin(36*theta_motor + phase36_rad)
 
 workspace:  # 트래킹 실행 검사와 공 추종·W 오버레이가 함께 사용하는 기준
@@ -44,7 +44,7 @@ control:  # 제어 프로세스의 실행 주기
 
 zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
   direction: [1, -1, 1]  # 엔코더 증가/감소 방향; 반드시 실제 스토퍼 방향과 일치해야 함
-  stop_position_rad: [0.872665, -2.2, -0.575959]  # 접촉 위치에 부여할 C3 출력축 각도(rad)
+  stop_position_rad: [0.872665, -2.14675, -0.575959]  # 접촉 위치에 부여할 C3 출력축 각도(rad)
   # stop_position_rad: [-0.872665, -2.984513, -2.722714]
   speed_rad_s: [0.12, 0.12, 0.12]  # 증분 위치 목표 속도
   contact_torque_nm: [6.0, 6.0, 3.0]  # 탐색 방향의 측정 토크가 이 값을 넘고 정지해야 접촉

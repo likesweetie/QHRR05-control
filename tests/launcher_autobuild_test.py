@@ -3,8 +3,11 @@
 import os
 from pathlib import Path
 import shutil
+import signal
+import socket
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -92,6 +95,7 @@ set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
     assert "NATIVE_LAUNCHED SOURCE_UPDATED" in changed
     assert "CAN_PREPARED" in changed
     assert changed.index("Checking native source changes") < changed.index("CAN_PREPARED")
+    assert changed.index("Previous session cleanup complete") < changed.index("CAN_PREPARED")
     header.write_text('#define LAUNCH_MESSAGE "NATIVE_LAUNCHED_HEADER_UPDATED"\n')
     changed = run(root, "run_daemon.sh", "--no-terminals")
     assert "NATIVE_LAUNCHED_HEADER_UPDATED SOURCE_UPDATED" in changed
@@ -191,3 +195,114 @@ for name in ibl.ktx pbr.filamat qhrr_pbr.filamat decor.filamat; do echo fixture 
     failed = run(root, "run_visualization.sh", "--preview", expected=7, env=env)
     assert "intentional shader build failure" in failed and "VISUALIZER_LAUNCHED" not in failed
     print("PASS: invalid launcher options/build failures do not launch or switch backend")
+
+    # Exercise only the cleanup helper with isolated names; never touch can0 or
+    # the real project's running daemon. Fake workers live in this fixture.
+    import json
+    worker = root / 'build/stale_worker'
+    worker.parent.mkdir(exist_ok=True)
+    worker.write_text('''#!/usr/bin/env python3
+import json, mmap, os, signal, sys, time
+from pathlib import Path
+if sys.argv[1] == '--terminal-output':
+    session, mode, ready = '', 'ignore', sys.argv[-1]
+elif sys.argv[1] == '--config':
+    session = json.loads(Path(sys.argv[2]).read_text())['shm_name']
+    mode, ready = sys.argv[3:5]
+else:
+    session, mode, ready = sys.argv[1:4]
+child = None
+if mode == 'tree':
+    child = os.fork()
+    if not child:
+        os._exit(0)
+    def stop(*_):
+        os.waitpid(child, 0)
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
+elif mode == 'ignore':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+elif mode == 'mapped':
+    mapping = mmap.mmap(os.open('/dev/shm' + session, os.O_RDWR), 0)
+Path(ready).write_text(json.dumps({'pid': os.getpid(), 'child': child}))
+while True:
+    time.sleep(1)
+''')
+    worker.chmod(0o755)
+    stale_daemon = root / 'build/daemon'
+    shutil.copy2(worker, stale_daemon)
+    outside = root / 'unrelated/stale_worker'
+    outside.parent.mkdir()
+    shutil.copy2(worker, outside)
+    session = f'/qhrr05-launcher-clean-{os.getpid()}'
+    cleanup_manifest = root / 'cleanup.json'
+    cleanup_manifest.write_text(json.dumps({'runtime_mode': 'hardware', 'shm_name': session}))
+
+    def cleanup(expected=0):
+        result = subprocess.run(
+            ['bash', '-c', 'source "$1"; qhrr_cleanup_session "$2" "$3"', 'cleanup',
+             str(scripts / 'ensure_build.sh'), str(root), str(cleanup_manifest)],
+            capture_output=True, text=True, timeout=12)
+        assert (result.returncode == 0) == (expected == 0), result.stdout + result.stderr
+        return result.stdout + result.stderr
+
+    workers = []
+
+    def start_worker(path, args, name):
+        ready = root / (name + '.ready')
+        process = subprocess.Popen([str(path), *args, str(ready)])
+        workers.append(process)
+        deadline = time.monotonic() + 3
+        while not ready.exists():
+            assert process.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        return process, json.loads(ready.read_text())
+
+    shm_file = Path('/dev/shm') / session[1:]
+    other_shm = Path(str(shm_file) + '-other')
+    socket_paths = [Path(f'/tmp/qhrr05-{kind}-{os.getuid()}') / (session[1:] + '.sock')
+                    for kind in ('daemon', 'input')]
+    socket_paths += [Path(f'/tmp/qhrr05-log-{os.getuid()}-{session[1:]}.sock')]
+    try:
+        owner, details = start_worker(stale_daemon, ['--config', str(cleanup_manifest), 'tree'], 'owner')
+        relay, _ = start_worker(stale_daemon,
+            ['--terminal-output', '0', str(owner.pid), 'worker', '2.0',
+             str(root / 'logs/old-session.log'), str(owner.pid)], 'relay')
+        stubborn, _ = start_worker(worker, [session, 'ignore'], 'stubborn')
+        other, _ = start_worker(worker, [session + '-other', 'wait'], 'other')
+        unrelated, _ = start_worker(outside, [session, 'wait'], 'unrelated')
+        os.kill(owner.pid, signal.SIGSTOP)
+        shm_file.write_bytes(b'stale')
+        other_shm.write_bytes(b'keep')
+        for path in socket_paths:
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(str(path))
+        result = cleanup()
+        assert owner.wait(timeout=2) == 0, result
+        assert stubborn.wait(timeout=2) == -signal.SIGKILL, result
+        assert relay.wait(timeout=2) == -signal.SIGKILL, result
+        assert not Path(f"/proc/{details['child']}").exists(), 'zombie child was not reaped'
+        assert other.poll() is None and unrelated.poll() is None, 'unrelated process was stopped'
+        assert not shm_file.exists() and other_shm.read_bytes() == b'keep'
+        assert all(not path.exists() for path in socket_paths)
+        assert 'Force-stopping unresponsive PIDs' in result
+        cleanup()  # Repeated cleanup is harmless.
+        print('PASS: stopped owner resumes/reaps zombies, unresponsive workers stop, stale IPC removed; other sessions survive')
+
+        shm_file.write_bytes(b'owned by reader')
+        reader, _ = start_worker(outside, [session, 'mapped'], 'reader')
+        result = cleanup(expected=1)
+        assert 'still mapped by PID' in result and shm_file.exists() and reader.poll() is None
+        reader.terminate()
+        reader.wait(timeout=2)
+        cleanup()
+        print('PASS: live unrecognized SHM reader prevents unlink and startup')
+    finally:
+        for process in workers:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=3)
+        for path in [shm_file, other_shm, *socket_paths]:
+            path.unlink(missing_ok=True)
