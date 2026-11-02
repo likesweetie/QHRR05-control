@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-terminal-config-') as temporary:
     for session, wayland in [('wayland', None), (None, 'wayland-test')]:
         result, output = run(session=session, wayland=wayland)
         assert result.returncode == 1 and 'invalid terminal configuration: worker' in output, output
-        assert 'opening separate process terminals' in output, output
+        assert 'arranging separate process terminals through XWayland' in output, output
         assert '--no-terminals: child output' not in output, output
         assert not (directory / 'logs').exists(), output
     print('PASS: Wayland requires a terminal and never silently combines child output')
@@ -103,13 +103,13 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-terminal-config-') as temporary:
     assert 'Wayland session:' not in output, output
     result, output = run('--terminals', session='wayland')
     assert result.returncode == 1 and 'invalid terminal configuration' in output, output
-    assert 'opening separate process terminals' in output, output
+    assert 'arranging separate process terminals through XWayland' in output, output
     print('PASS: respect X11 sessions and explicit --terminals')
 
     for session in ('x11', 'wayland'):
         result, output = run('--no-terminals', session=session)
         assert result.returncode == 0 and 'worker started' in output and 'web_gui started' in output, output
-        assert 'opening separate process terminals' not in output, output
+        assert 'arranging separate process terminals through XWayland' not in output, output
     result, output = run('--terminals', '--no-terminals')
     assert result.returncode == 1 and 'cannot be combined' in output, output
     print('PASS: explicit inline mode and mutually exclusive options')

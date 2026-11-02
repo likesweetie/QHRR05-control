@@ -362,11 +362,11 @@ int main(int argc, char** argv) {
         const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
         const bool wayland = (session_type && std::string(session_type) == "wayland") ||
             ((!session_type || !*session_type) && wayland_display && *wayland_display);
-        const bool arrange_terminals = !no_terminals && !wayland;
+        const bool arrange_terminals = !no_terminals;
         daemon.BeginTerminalScreen();
         if (wayland && !no_terminals)
             daemon.WriteTerminalLog(
-                "[daemon] Wayland session: opening separate process terminals; automatic window placement is disabled.\n");
+                "[daemon] Wayland session: arranging separate process terminals through XWayland; the caller terminal is not moved.\n");
         config_path = fs::absolute(config_path);
         const auto config = YAML::LoadFile(config_path.string());
         const auto runtime = config["runtime_mode"].as<std::string>();
@@ -375,6 +375,14 @@ int main(int argc, char** argv) {
         if (without_can && runtime != "simulation")
             throw std::runtime_error("--without-can is only available in simulation manifests");
         auto specs = LoadProcesses(config_path, config, without_can, no_terminals);
+        std::string terminal_session_exec;
+        if (wayland && !no_terminals) {
+            terminal_session_exec = TerminalExecutable("dbus-run-session");
+            if (!fs::is_regular_file(terminal_session_exec) ||
+                ::access(terminal_session_exec.c_str(), X_OK) != 0)
+                throw std::runtime_error(
+                    "Wayland terminal layout requires dbus-run-session; install dbus-daemon");
+        }
         const auto shm_name = config["shm_name"].as<std::string>();
         const auto monitoring = config["monitoring"];
         const double display_interval = monitoring["display_interval_sec"].as<double>();
@@ -388,26 +396,17 @@ int main(int argc, char** argv) {
 
         ShmStatistics statistics(shm_name, monitoring["window_sec"].as<double>());
         fs::path log_directory;
+        fs::path terminal_bus_config;
 
         if (!no_terminals) {
             const auto layout = config["terminal_layout"];
-            if (arrange_terminals) {
-                daemon.PlanTerminalLayout(specs,
-                    layout["monitor"].as<std::string>(),
-                    layout["columns"].as<int>(),
-                    layout["gap_px"].as<int>(),
-                    layout["margin_px"].as<int>(),
-                    layout["zoom"].as<double>(),
-                    layout["include_daemon"].as<bool>());
-            } else {
-                const double zoom = layout["zoom"].as<double>();
-                if (!std::isfinite(zoom) || zoom < .5 || zoom > 2)
-                    throw std::runtime_error("invalid terminal_layout.zoom: expected .5..2");
-                for (auto& spec : specs) {
-                    spec.terminal_role = "qhrr05-" + std::to_string(::getpid()) + '-' + spec.name;
-                    spec.terminal_zoom = zoom;
-                }
-            }
+            daemon.PlanTerminalLayout(specs,
+                layout["monitor"].as<std::string>(),
+                layout["columns"].as<int>(),
+                layout["gap_px"].as<int>(),
+                layout["margin_px"].as<int>(),
+                layout["zoom"].as<double>(),
+                layout["include_daemon"].as<bool>() && !wayland);
 
             const auto base =
                 fs::absolute(config_path.parent_path() / config["log_directory"].as<std::string>());
@@ -421,6 +420,37 @@ int main(int argc, char** argv) {
             if (!fs::create_directory(log_directory))
                 throw std::runtime_error(
                     "process log directory already exists: " + log_directory.string());
+
+            if (wayland) {
+                // A normal private session bus also starts desktop portals, whose
+                // singleton services can block terminal startup. Activate only
+                // GNOME Terminal and its settings service on these log-only buses.
+                const auto services = log_directory / "terminal-services";
+                fs::create_directory(services);
+                const fs::path system_services("/usr/share/dbus-1/services");
+                fs::copy_file(system_services / "org.gnome.Terminal.service",
+                    services / "org.gnome.Terminal.service");
+                if (fs::is_regular_file(system_services / "ca.desrt.dconf.service"))
+                    fs::copy_file(system_services / "ca.desrt.dconf.service",
+                        services / "ca.desrt.dconf.service");
+                terminal_bus_config = log_directory / "terminal-bus.conf";
+                std::ofstream bus(terminal_bus_config);
+                bus << "<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen>"
+                       "<auth>EXTERNAL</auth><servicedir>";
+                for (char c : services.string()) {
+                    if (c == '&') bus << "&amp;";
+                    else if (c == '<') bus << "&lt;";
+                    else if (c == '>') bus << "&gt;";
+                    else bus << c;
+                }
+                bus << "</servicedir><policy context=\"default\">"
+                       "<allow send_destination=\"*\" eavesdrop=\"true\"/>"
+                       "<allow receive_sender=\"*\" eavesdrop=\"true\"/>"
+                       "<allow own=\"*\"/></policy></busconfig>\n";
+                bus.close();
+                if (!bus)
+                    throw std::runtime_error("cannot write terminal session bus configuration");
+            }
         }
 
         shared_memory = std::make_unique<shm_utils::Mapping>(shm_name, true);
@@ -507,6 +537,15 @@ int main(int argc, char** argv) {
                     log_path.string(),
                     std::to_string(spec.critical ? ::getpid() : daemon.Get(spec.name)->pid)};
                 display.pass_fd = terminal->master;
+                if (wayland) {
+                    // Isolate the terminal server too: an existing native Wayland server
+                    // would ignore the client's GDK_BACKEND and prevent X11 placement.
+                    display.env["GDK_BACKEND"] = "x11";
+                    display.args.insert(display.args.begin(),
+                        {"--config-file=" + terminal_bus_config.string(), "--",
+                            display.exec_path, "--app-id=org.gnome.Terminal"});
+                    display.exec_path = terminal_session_exec;
+                }
                 StartProcess(daemon, display, children);
                 if (arrange_terminals)
                     daemon.PlaceTerminalWindow(spec);

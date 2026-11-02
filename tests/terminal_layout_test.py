@@ -277,13 +277,17 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
     )
     print('PASS: undersized work area fails explicitly without overlap or fallback')
 
-    # Exercise the Wayland policy using real terminals on our isolated X11 server.
-    # The small work area above would reject X11 tiling; separate windows must still open.
+    # Exercise the Wayland policy using isolated X11 terminal servers. No compositor
+    # or global desktop settings are changed, and the child environment stays native.
+    subprocess.run(
+        ['xprop', '-root', '-f', '_NET_WORKAREA', '32c', '-set', '_NET_WORKAREA',
+         '48, 28, 2464, 1380'], check=True,
+    )
     for explicit in (False, True):
         settings['shm_name'] = f'/qhrr05-wayland-windows-{os.getpid()}-{explicit}'
         settings['processes'] = [
             {'name': name, 'exec_path': '/bin/sh',
-             'args': ['-c', f'printf "SEPARATE-{name}\\n"; exec /bin/sleep 60']}
+             'args': ['-c', f'printf "SEPARATE-{name} backend=%s\\n" "$GDK_BACKEND"; exec /bin/sleep 60']}
             for name in ('alpha', 'beta', 'gamma')
         ]
         manifest.write_text(json.dumps(settings))
@@ -293,22 +297,42 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             command.append('--terminals')
         with log_path.open('w') as log:
             process = subprocess.Popen(command, stdout=log, stderr=log,
-                                       env={**env, 'XDG_SESSION_TYPE': 'wayland'})
+                                       env={**env, 'XDG_SESSION_TYPE': 'wayland',
+                                            'GDK_BACKEND': 'wayland',
+                                            'GNOME_TERMINAL_SERVICE': ':999.12345'})
         try:
             roles = [f'qhrr05-{process.pid}-{name}' for name in ('alpha', 'beta', 'gamma')]
 
-            def separate_windows():
+            def tiled_windows():
                 assert process.poll() is None, log_path.read_text()
                 found = [window_for_role(role) for role in roles]
-                return found if all(found) else None
+                if not all(found):
+                    return None
+                rectangles = [geometry(window) for window in found]
+                if any(x < 60 or y < 40 or x + w > 2500 or y + h > 1396
+                       or w < 600 or h < 500 for x, y, w, h in rectangles):
+                    return None
+                if any(overlaps(a, b) for i, a in enumerate(rectangles)
+                       for b in rectangles[i + 1:]):
+                    return None
+                return found
 
-            windows = wait_for(separate_windows, log_path.read_text)
+            windows = wait_for(tiled_windows, log_path.read_text)
             assert len(set(windows)) == 3, windows
             output = log_path.read_text()
-            assert 'opening separate process terminals' in output, output
+            assert 'arranging separate process terminals through XWayland' in output, output
             assert '--no-terminals: child output' not in output, output
+            server_pids = []
+            for window in windows:
+                info = subprocess.check_output(['xprop', '-id', window, '_NET_WM_PID'], text=True)
+                server_pid = re.search(r'=\s*(\d+)', info).group(1)
+                server_pids.append(server_pid)
+                server_env = (Path('/proc') / server_pid / 'environ').read_bytes().split(b'\0')
+                assert b'GDK_BACKEND=x11' in server_env, server_env
+                assert (b'DBUS_SESSION_BUS_ADDRESS=' + env['DBUS_SESSION_BUS_ADDRESS'].encode()) not in server_env
+            assert len(set(server_pids)) == 3, 'Terminal servers were not isolated'
             for name in ('alpha', 'beta', 'gamma'):
-                marker = f'SEPARATE-{name}'
+                marker = f'SEPARATE-{name} backend=wayland'
 
                 def persisted():
                     return any(marker in path.read_text()
@@ -320,7 +344,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             assert process.wait(timeout=8) == 0, log_path.read_text()
             assert not (Path('/dev/shm') / settings['shm_name'][1:]).exists()
             wait_for(lambda: not any(window_for_role(role) for role in roles), log_path.read_text)
-            print('PASS: Wayland policy opens three separate windows with per-process logs',
+            print('PASS: Wayland policy tiles three isolated X11 windows; application environment and logs retained',
                   '(explicit --terminals)' if explicit else '(default)')
         finally:
             if process.poll() is None:

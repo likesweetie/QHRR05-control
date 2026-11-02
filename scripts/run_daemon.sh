@@ -13,7 +13,7 @@ while (($#)); do
             echo 'Build changed native sources, bring up the configured CAN interface, then start the hardware session.'
             echo 'Before launch, stop the previous project session and remove its stale SHM/sockets.'
             echo 'Only interface setup may use sudo. For MuJoCo use run_simulation.sh.'
-            echo 'Each process opens its own terminal. Wayland skips automatic window placement; --no-terminals uses inline logs.'
+            echo 'Each process opens its own tiled terminal, using XWayland on Wayland; --no-terminals uses inline logs.'
             exit 0 ;;
         *) echo "Unknown hardware option: $1. For simulation use scripts/run_simulation.sh." >&2; exit 1 ;;
     esac
