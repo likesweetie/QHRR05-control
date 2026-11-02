@@ -18,6 +18,7 @@ while (($#)); do
     esac
 done
 source "$project_dir/scripts/ensure_build.sh"
+qhrr_use_local_tools "$project_dir"
 qhrr_ensure_native_build "$project_dir" daemon control can_hal input shm_logger qhrr_logctl web_gui_bridge
 qhrr_cleanup_session "$project_dir" "$daemon_config"
 # Prepare only the explicitly configured, existing CAN device after a successful build.

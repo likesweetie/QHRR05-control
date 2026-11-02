@@ -173,6 +173,8 @@ if(BUILD_TESTING)
     add_test(NAME prepare_can COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/prepare_can_test.py)
     set_tests_properties(launcher_autobuild PROPERTIES TIMEOUT 120)
+    add_test(NAME setup COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/setup_test.py)
+    set_tests_properties(setup PROPERTIES TIMEOUT 30)
     add_test(NAME simulation_restart COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/simulation_restart_test.py)
     set_tests_properties(simulation_restart PROPERTIES TIMEOUT 30)

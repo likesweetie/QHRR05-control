@@ -5,7 +5,7 @@
 2026-10-31 대화에서 확인된 문제를 기준으로 정리했습니다. 설치 명령을 안내한 것만으로는 완료로 표시하지 않습니다.
 
 - [x] **zstd/lz4 개발 패키지 누락 해결 확인.** `Could NOT find zstd` 오류 당시 `libzstd-dev`, `liblz4-dev`가 모두 없었습니다. 이후 CMake 설정과 전체 빌드는 통과했습니다.
-- [ ] **신규 환경용 네이티브 의존성 설치 안내 보완.** README에 `sudo apt-get install libzstd-dev liblz4-dev`와 설치 후 CMake 재설정·빌드 명령을 추가합니다. 일반 런타임 라이브러리만으로는 헤더와 링크용 파일이 준비되지 않는다는 점을 명시합니다.
+- [x] **신규 환경용 의존성 설치 스크립트·안내 추가.** `scripts/setup.sh`가 `libzstd-dev`, `liblz4-dev` 등 개발 패키지, Python venv, Node.js, 웹 GUI를 준비하고 네이티브·웹 빌드까지 수행합니다. README에 기본 실행·dry-run·선택적 Filament 빌드를 안내했습니다. 실제 새 PC에서의 설치 결과는 별도로 확인합니다.
 - [x] **Git 메타데이터 없는 배포 폴더의 빌드 중단 해결.** `git rev-parse HEAD`의 종료 코드 128을 치명적 오류로 처리하던 CMake를 수정했습니다. Git 정보를 얻지 못하면 경고와 `git_commit=unknown`으로 빌드를 계속합니다.
 - [ ] **Node.js 22.12 이상과 npm 설치·버전 확인.** `web_gui.log`에서 `required executable not found: node`를 확인했습니다. `node --version`, `npm --version`으로 확인하고, 미설치 또는 낮은 버전이면 설치합니다. 실제 설치 완료 여부는 아직 확인하지 않았습니다.
 - [ ] **daemon 실행 환경의 Node.js PATH 확인.** nvm을 사용하는 경우 해당 셸에서 nvm을 로드하고 Node를 선택한 뒤 daemon을 실행하는 절차를 README와 웹 GUI 문서에 추가합니다. daemon이 시작한 `web_gui`에서도 `node`, `npm`을 찾는지 확인합니다.

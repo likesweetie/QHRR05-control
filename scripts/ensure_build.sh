@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Build helpers shared by launchers; session cleanup is used by the hardware launcher.
 
+qhrr_use_local_tools() {
+    local node_bin="$1/.cache/setup/node/bin"
+    if [[ -x "$node_bin/node" && -x "$node_bin/npm" ]]; then
+        export PATH="$node_bin:$PATH"
+    fi
+}
+
 qhrr_cleanup_session() {
     python3 - "$1" "$2" <<'PY'
 import fcntl

@@ -63,6 +63,7 @@ else
     ((${#daemon_args[@]} == 0)) || { echo 'daemon options cannot be combined with --attach/--preview' >&2; exit 1; }
 fi
 source "$project_dir/scripts/ensure_build.sh"
+qhrr_use_local_tools "$project_dir"
 qhrr_ensure_visualization_build "$project_dir" "$setup"
 if [[ "$mode" == session ]]; then
     cd "$project_dir"

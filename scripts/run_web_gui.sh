@@ -44,6 +44,8 @@ while (($#)); do
 done
 
 cd -- "$project_dir"
+source "$project_dir/scripts/ensure_build.sh"
+qhrr_use_local_tools "$project_dir"
 
 for executable in node npm; do
     if ! command -v "$executable" >/dev/null 2>&1; then

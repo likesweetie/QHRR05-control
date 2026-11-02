@@ -8,6 +8,19 @@
 
 Linux, CMake 3.22 이상, C++17 컴파일러(DataTamer 내부는 C++20), yaml-cpp, GLFW/OpenGL, OpenSSL·zstd·lz4 개발 라이브러리와 스크립트용 Python 3/PyYAML을 사용합니다. 같은 컴퓨터에서 시뮬레이션도 할 수 있도록 기존 빌드 타깃을 유지합니다.
 
+Ubuntu/Pop!_OS 22.04 이상 Linux x86_64의 처음 설치는 다음 한 번으로 준비합니다. 패키지 설치에만 sudo를 사용하고, CAN이나 모터를 켜거나 실행 중인 세션을 종료하지 않습니다.
+
+```bash
+./scripts/setup.sh
+# 설치 작업을 먼저 확인: ./scripts/setup.sh --dry-run
+# 시스템 패키지를 이미 설치했다면: ./scripts/setup.sh --skip-system
+# Filament까지 빌드하려면: ./scripts/setup.sh --with-visualization
+```
+
+기본 셋업은 시스템 개발 패키지와 `can-utils`, Python 로그 분석 환경(`.venv`), 네이티브 실행 파일, 웹 GUI를 설치·빌드합니다. Node.js 22.12 이상과 npm이 없으면 공식 Node.js 22 LTS 배포본을 SHA256 확인 후 `.cache/setup/node`에 설치합니다. 런처가 이 경로를 자동으로 사용하므로 nvm이나 로그인 셸의 PATH에 의존하지 않습니다. 기존 호환 Node.js가 있으면 그 실행 파일을 프로젝트 캐시에 연결하여, 로그인 셸을 바꿔도 같은 Node.js·npm을 찾습니다. Python 패키지는 시스템 pip 대신 프로젝트의 venv에 설치하고, 생성되는 `build/qhrr-log-*`도 해당 Python을 사용합니다. `--jobs N` 또는 `QHRR_BUILD_JOBS`로 빌드 병렬 수를 조절합니다. Filament 옵션은 기존의 고정 버전 도구·소스 다운로드와 빌드를 실행하며 GPU 드라이버는 별도로 준비해야 합니다.
+
+시스템 의존성이 이미 준비된 환경에서 수동으로 빌드하거나 실행할 때는:
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel 4

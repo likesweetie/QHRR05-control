@@ -39,6 +39,7 @@ done
 
 # Build before any CAN setup or process launch, including missing child binaries.
 source "$project_dir/scripts/ensure_build.sh"
+qhrr_use_local_tools "$project_dir"
 qhrr_ensure_native_build "$project_dir" daemon simulation control can_hal input shm_logger qhrr_logctl web_gui_bridge
 work_dir=$(mktemp -d /tmp/qhrr-simulation.XXXXXX)
 session_pid=
