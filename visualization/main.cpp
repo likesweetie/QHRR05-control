@@ -223,7 +223,7 @@ struct StateBinding {
         if (!state.simulation_available) {
             for (int i = 0; i < 3; ++i) {
                 data->qpos[qpos[i]] =
-                    state.motor.position_offset[i] + state.motor.feedback[i].position;
+                    state.motor.feedback[i].position;
                 data->qvel[qpos[i]] = state.motor.feedback[i].velocity;
             }
             data->mocap_pos[3 * mocap] = 5;  // No physical object pose sensor exists.

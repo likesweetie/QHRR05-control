@@ -50,6 +50,7 @@ int main(int argc, char** argv) {
         joystick.start();
         bool finished = false;
 
+        // The reader remains running while the device is absent and reconnects itself.
         while (!stopped && joystick.isRunning()) {
             {
                 shm_utils::Lock lock(shm);

@@ -5,8 +5,8 @@
 #include <string>
 
 namespace qhrr05 {
-// Works exclusively in encoder coordinates. No simulator truth or dynamics model
-// is used to detect a stop; the configured stop angle defines the joint frame.
+// Detects stops from motor observations. The HAL applies the configured motor
+// coordinate with C3; no controller-side position offset is retained.
 class ZeroSetController {
 public:
     explicit ZeroSetController(const std::string& config_path);
@@ -18,6 +18,7 @@ public:
         const std::array<std::uint64_t, 3>& sample_sequence);
     void Cancel();
     void Fail(ZeroSetFailure reason);
+    void ConfirmZero(double time, const std::array<double, 3>& position);
 
     const ZeroSetTelemetry& telemetry() const {
         return telemetry_;

@@ -1,5 +1,5 @@
 #include "motion_controllers/zero_set_controller.hpp"
-#include "control/limits.hpp"
+#include "control/control.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -54,6 +54,9 @@ ZeroSetController::ZeroSetController(const std::string& config_path) {
             effort_limit_[i] > limits[i] || travel_limit_[i] <= backoff_ || timeout_[i] <= 0)
             throw std::runtime_error(
                 "invalid zero_set direction, gains, travel, timeout or torque bounds");
+        const double centidegrees = stop_position_[i] * (18000.0 / 3.141592653589793);
+        if (centidegrees < -32768 || centidegrees > 32767)
+            throw std::runtime_error("zero_set.stop_position_rad exceeds C3 signed 0.01 degree range");
     }
     if (settle_tolerance_ >= backoff_ ||
         debounce_ >= *std::min_element(timeout_.begin(), timeout_.end()))
@@ -94,10 +97,28 @@ void ZeroSetController::Fail(ZeroSetFailure reason) {
 }
 
 void ZeroSetController::Cancel() {
-    if (telemetry_.phase == ZeroSetPhase::Seeking || telemetry_.phase == ZeroSetPhase::Backoff) {
+    if (telemetry_.phase == ZeroSetPhase::Seeking || telemetry_.phase == ZeroSetPhase::SettingZero ||
+        telemetry_.phase == ZeroSetPhase::Backoff) {
         telemetry_.phase = ZeroSetPhase::Cancelled;
-        std::cout << "[zero-set] CANCELLED; completed axis offsets retained" << std::endl;
+        std::cout << "[zero-set] CANCELLED; completed motor C3 coordinates retained" << std::endl;
     }
+}
+
+void ZeroSetController::ConfirmZero(double time, const std::array<double, 3>& position) {
+    if (telemetry_.phase != ZeroSetPhase::SettingZero || !std::isfinite(time) || time < last_time_)
+        throw std::runtime_error("unexpected C3 completion");
+    const int axis = telemetry_.axis;
+    if (!std::isfinite(position[axis]))
+        throw std::runtime_error("invalid position after C3");
+    reference_[axis] = position[axis];
+    start_[axis] = position[axis];
+    last_sample_time_[axis] = time;
+    contact_since_ = -1;
+    backoff_target_ = stop_position_[axis] - direction_[axis] * backoff_;
+    telemetry_.calibrated[axis] = true;
+    telemetry_.phase = ZeroSetPhase::Backoff;
+    std::cout << "[zero-set] CALIBRATED " << ZeroSetAxisName(axis)
+              << " C3 position=" << position[axis] << " rad; backing off" << std::endl;
 }
 
 void ZeroSetController::Update(double time,
@@ -105,7 +126,8 @@ void ZeroSetController::Update(double time,
     const std::array<double, 3>& velocity,
     const std::array<double, 3>& torque,
     const std::array<std::uint64_t, 3>& sample_sequence) {
-    if (telemetry_.phase != ZeroSetPhase::Seeking && telemetry_.phase != ZeroSetPhase::Backoff &&
+    if (telemetry_.phase != ZeroSetPhase::Seeking && telemetry_.phase != ZeroSetPhase::SettingZero &&
+        telemetry_.phase != ZeroSetPhase::Backoff &&
         telemetry_.phase != ZeroSetPhase::Complete)
         return;
     if (!std::isfinite(time) || time < last_time_)
@@ -138,6 +160,8 @@ void ZeroSetController::Update(double time,
         Fail(ZeroSetFailure::Timeout);
         return;
     }
+    if (telemetry_.phase == ZeroSetPhase::SettingZero)
+        return;
     if (telemetry_.travel_rad > travel_limit_[axis]) {
         Fail(ZeroSetFailure::TravelLimit);
         return;
@@ -160,13 +184,11 @@ void ZeroSetController::Update(double time,
             contact_since_ = time;
         if (time - contact_since_ < debounce_)
             return;
-        telemetry_.offset[axis] = stop_position_[axis] - encoder[axis];
-        telemetry_.calibrated[axis] = true;
+        telemetry_.position[axis] = stop_position_[axis];
         reference_[axis] = encoder[axis];
-        backoff_target_ = encoder[axis] - direction_[axis] * backoff_;
-        telemetry_.phase = ZeroSetPhase::Backoff;
-        std::cout << "[zero-set] CALIBRATED " << ZeroSetAxisName(axis)
-                  << " offset=" << telemetry_.offset[axis] << " rad; backing off" << std::endl;
+        telemetry_.phase = ZeroSetPhase::SettingZero;
+        std::cout << "[zero-set] CONTACT " << ZeroSetAxisName(axis)
+                  << " requesting C3 position=" << stop_position_[axis] << " rad" << std::endl;
     } else {
         const double step = speed_[axis] * dt;
         reference_[axis] += std::clamp(backoff_target_ - reference_[axis], -step, step);

@@ -13,6 +13,8 @@ template <> struct DataTamer2::TypeDefinitionTrait<MitCommand> {
         add("kp", &value.kp);
         add("kd", &value.kd);
         add("tau_ff", &value.tau_ff);
+        add("rmd_torque", &value.rmd_torque);
+        add("rmd_damping_constant", &value.rmd_damping_constant);
         return "MitCommand";
     }
 };
@@ -70,7 +72,11 @@ template <> struct DataTamer2::TypeDefinitionTrait<MotorData> {
         add("profile_verified", &value.profile_verified);
         add("enable_requested", &value.enable_requested);
         add("enabled", &value.enabled);
-        add("position_offset", &value.position_offset);
+        add("zero_position", &value.zero_position);
+        add("zero_request_sequence", &value.zero_request_sequence);
+        add("zero_resume_sequence", &value.zero_resume_sequence);
+        add("zero_completed_sequence", &value.zero_completed_sequence);
+        add("zero_applied_position", &value.zero_applied_position);
         add("command_sequence", &value.command_sequence);
         add("command_published_ns", &value.command_published_ns);
         add("feedback_sequence", &value.feedback_sequence);
@@ -112,7 +118,7 @@ template <> struct DataTamer2::TypeDefinitionTrait<ZeroSetTelemetry> {
         add("axis", &value.axis);
         add("required", &value.required);
         add("calibrated", &value.calibrated);
-        add("offset", &value.offset);
+        add("position", &value.position);
         add("travel_rad", &value.travel_rad);
         add("elapsed_sec", &value.elapsed_sec);
         return "ZeroSetTelemetry";

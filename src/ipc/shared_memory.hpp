@@ -9,7 +9,7 @@
 
 // Shared-memory protocol. Increment the ABI version when layout or field semantics change.
 inline constexpr std::uint64_t kShmMagic = 0x5148525253484D31ULL;  // QHRRSHM1
-inline constexpr std::uint32_t kShmAbiVersion = 16;
+inline constexpr std::uint32_t kShmAbiVersion = 22;
 inline constexpr std::size_t kShmBufferCount = 2;
 inline constexpr unsigned kShmPermissions = 0600;
 inline constexpr clockid_t kShmClock = CLOCK_MONOTONIC;
@@ -19,7 +19,12 @@ struct MotorData {
     // Controller-owned outputs.
     std::array<MitCommand, 3> command{};
     std::array<bool, 3> command_enabled{};
-    std::array<double, 3> reference{}, debug_torque{};
+    std::array<double, 3> reference{};     // Independent q_ref before the motor adapter.
+    std::array<double, 3> debug_torque{};  // Independent tau_ref; excludes the motor's position P/D.
+    // C3 request in output-shaft radians. Resume only after observing completion
+    // and publishing a command expressed in the new motor coordinate frame.
+    std::array<double, 3> zero_position{};
+    std::array<std::uint64_t, 3> zero_request_sequence{}, zero_resume_sequence{};
 
     // HAL-owned feedback and per-axis CAN status.
     std::array<MotorFeedback, 3> feedback{};
@@ -29,13 +34,11 @@ struct MotorData {
     std::array<bool, 3> profile_verified{}, enable_requested{}, enabled{};
     std::array<std::uint32_t, 3> supported{}, valid{};
     std::array<std::uint64_t, 3> measurement_ns{};  // Producer sample clock, for derivatives.
-    std::array<bool, 3> coordinate_valid{};  // Controller-owned encoder -> joint calibration.
+    std::array<bool, 3> coordinate_valid{};  // HAL confirms C3 and fresh rebased feedback.
+    std::array<std::uint64_t, 3> zero_completed_sequence{};
+    std::array<double, 3> zero_applied_position{};
     TransportFault transport_fault = TransportFault::None;
     std::uint64_t clear_fault_sequence = 0;  // Explicit controller request, never automatic.
-
-    // Joint angle = raw CAN encoder + controller-owned runtime calibration.
-    // Simulation bootstrap initializes this once; reset/enable never clear it.
-    std::array<double, 3> position_offset{};
 
     std::uint64_t command_sequence = 0, command_published_ns = 0;  // Controller
     std::uint64_t feedback_sequence = 0, feedback_published_ns = 0;  // HAL (sim in debug)

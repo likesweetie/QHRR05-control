@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -70,6 +71,7 @@ public:
 private:
     static void* thread_function_wrapper(void* context);
     void* loop();
+    void TryConnect();
 
     void processEvent_(const js_event& event);
     void Publish(bool connected = true);
@@ -84,6 +86,7 @@ private:
     int js_ = -1;
     pthread_t thread_ = 0;
     std::atomic<bool> running_{false};
+    std::chrono::steady_clock::time_point reconnect_at_{};
 
     static constexpr size_t kMaxAxes = 32;
     static constexpr size_t kMaxButtons = 32;

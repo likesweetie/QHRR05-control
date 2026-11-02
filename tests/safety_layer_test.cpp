@@ -19,6 +19,13 @@ int main(int argc, char** argv) {
         const double limit =
             YAML::LoadFile(argv[1])["magnetic_touch"]["maximum_force_n"].as<double>();
         const double nan = std::numeric_limits<double>::quiet_NaN();
+        for (double value : {0., 5., 100.}) safety.ValidateRmdDampingConstant(value);
+        for (double value : {-1., 101., 5.5, nan}) {
+            bool invalid = false;
+            try { safety.ValidateRmdDampingConstant(value); }
+            catch (const std::runtime_error&) { invalid = true; }
+            Require(invalid, "invalid RMD damping constant was accepted");
+        }
         const auto rejected =
             [&](const ControlData& input, bool stopping = false, bool failed = false) {
                 try {
@@ -30,7 +37,25 @@ int main(int argc, char** argv) {
             };
 
         ControlData input;
+        for (int axis = 0; axis < 3; ++axis) for (int order : {21, 36})
+            for (double delta : {-.5, -.25, -.1, .1, .25, .5}) safety.ValidateAnticoggingPhase(axis, order, delta);
+        for (const auto parameters : {std::array<double, 3>{-1, 21, .5}, {3, 21, .5},
+                 {0, 22, .5}, {0, 36, .2}, {0, 36, .05}, {0, 36, 0}, {0, 21, nan}}) {
+            bool rejected_phase = false;
+            try { safety.ValidateAnticoggingPhase(int(parameters[0]), int(parameters[1]), parameters[2]); }
+            catch (const std::runtime_error&) { rejected_phase = true; }
+            Require(rejected_phase, "invalid live phase command accepted");
+        }
 
+        for (int axis = 0; axis < 3; ++axis) for (int order : {21, 36})
+            for (double delta : {-.01, .01}) safety.ValidateAnticoggingAmplitude(axis, order, delta);
+        for (const auto values : {std::array<double, 3>{-1, 21, .01}, {0, 22, .01},
+                {0, 21, .1}, {0, 36, 0}, {0, 21, nan}}) {
+            bool rejected_amplitude = false;
+            try { safety.ValidateAnticoggingAmplitude(int(values[0]), int(values[1]), values[2]); }
+            catch (const std::runtime_error&) { rejected_amplitude = true; }
+            Require(rejected_amplitude, "invalid amplitude command accepted");
+        }
         for (int mode = 0; mode <= 6; ++mode) {
             input.requested_mode = mode;
             safety.Validate(input, false, false);

@@ -1,4 +1,4 @@
-device: /dev/input/js0  # Linux joystick 장치; 없으면 명시적 오류, 다른 입력으로 대체하지 않음
+device: /dev/input/js0  # Linux joystick 장치; 없거나 연결이 끊기면 1초마다 재연결
 direction_axes: [1, 0, 4]  # 월드 X/Y/Z: 왼쪽 스틱 상하/좌우, 오른쪽 스틱 상하
 direction_invert: [true, true, true]  # 각 방향 반전; 장치의 축 방향에 맞춰 조정
 deadband: 0.08  # 스틱 중앙 무입력 범위(0..1)

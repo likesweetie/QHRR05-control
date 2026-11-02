@@ -11,6 +11,7 @@
     "build": "vite build",
     "start": "node server.mjs",
     "test": "node --test ../../../../tests/web_gui_test.mjs",
+    "test:analysis": "node --test ../../../../tests/cogging_analysis_test.mjs",
     "test:browser": "node --test ../../../../tests/web_gui_browser_test.mjs"
   },
   "dependencies": {

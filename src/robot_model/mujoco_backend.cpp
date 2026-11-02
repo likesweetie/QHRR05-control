@@ -178,6 +178,33 @@ public:
         return result;
     }
 
+    std::array<double, 9> CoriolisMatrix(const Vec3& q, const Vec3& dq) override {
+        Finite(q);
+        Finite(dq);
+        if (coriolis_valid_ && q == coriolis_q_ && dq == coriolis_dq_)
+            return coriolis_;
+        // For these fixed-base hinge coordinates, RNE bias is quadratic in dq
+        // and d(bias)/d(dq) = 2*C (Christoffel convention). Polarization with
+        // +/-1 rad/s is exact for that quadratic, without differencing poses.
+        for (int column = 0; column < 3; ++column) {
+            auto velocity = dq;
+            Vec3 plus{}, minus{};
+            velocity[column] += 1;
+            Prepare(q, velocity, true);
+            mj_rne(model_.get(), scratch_.get(), 0, plus.data());
+            velocity[column] -= 2;
+            Prepare(q, velocity, true);
+            mj_rne(model_.get(), scratch_.get(), 0, minus.data());
+            for (int row = 0; row < 3; ++row)
+                coriolis_[3 * row + column] = .25 * (plus[row] - minus[row]);
+        }
+        Finite(coriolis_);
+        coriolis_q_ = q;
+        coriolis_dq_ = dq;
+        coriolis_valid_ = true;
+        return coriolis_;
+    }
+
     Vec3 InverseDynamics(const Vec3& q, const Vec3& dq, const Vec3& ddq) override {
         Finite(ddq);
         if (initialized_ && q == state_.joint_position && dq == state_.joint_velocity) {
@@ -230,6 +257,9 @@ private:
         scratch_{nullptr, mj_deleteData}, gravity_{nullptr, mj_deleteData};
     RobotModelState state_{};
     Vec3 scratch_q_{}, scratch_dq_{};
+    Vec3 coriolis_q_{}, coriolis_dq_{};
+    std::array<double, 9> coriolis_{};
+    bool coriolis_valid_ = false;
     int site_ = -1;
     bool initialized_ = false, scratch_valid_ = false, velocity_valid_ = false;
     std::uint64_t updates_ = 0;

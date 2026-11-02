@@ -282,6 +282,25 @@ std::optional<InputCommand> InputInterface::Receive() {
             parsed = bool(input >> command.motor_axis);
             command.drive_action =
                 operation == "motor-enable" ? DriveAction::EnableMotor : DriveAction::DisableMotor;
+        } else if (parsed && operation == "tracking-ilc-status") {
+            command.tracking_ilc_status = true;
+        } else if (parsed && operation == "tracking-ilc") {
+            command.set_tracking_ilc = true;
+            parsed = bool(input >> command.ilc_phase_lead_bins >> command.ilc_smoothing_passes
+                                >> command.ilc_retention);
+        } else if (parsed && operation == "rmd-status") {
+            command.rmd_status = true;
+        } else if (parsed && operation == "rmd-damping") {
+            command.set_rmd_damping = true;
+            parsed = bool(input >> command.rmd_damping_constant);
+        } else if (parsed && operation == "anticogging-status") {
+            command.anticogging_status = true;
+        } else if (parsed && operation == "anticogging-phase") {
+            command.set_anticogging_phase = true;
+            parsed = bool(input >> command.motor_axis >> command.anticogging_order >> command.phase_delta);
+        } else if (parsed && operation == "anticogging-amplitude") {
+            command.set_anticogging_amplitude = true;
+            parsed = bool(input >> command.motor_axis >> command.anticogging_order >> command.amplitude_delta);
         } else if (parsed && operation == "force")
             parsed = bool(input >> command.force);
         else if (parsed && operation == "pause") {
@@ -331,7 +350,8 @@ std::optional<InputCommand> InputInterface::Receive() {
 }
 
 void InputInterface::Reply(
-    const InputCommand& command, const std::string& rejection, std::uint64_t motion_sequence) {
+    const InputCommand& command, const std::string& rejection, std::uint64_t motion_sequence,
+    const std::string& data_json) {
     if (!command.id)
         return;
     std::ostringstream out;
@@ -346,6 +366,8 @@ void InputInterface::Reply(
     else
         out << ",\"type\":\"error\",\"message\":" << JsonString(rejection);
 
+    if (rejection.empty() && !data_json.empty())
+        out << ",\"data\":" << data_json;
     out << "}\n";
     const auto bytes = out.str();
     const auto sent = ::send(replying_, bytes.data(), bytes.size(), MSG_DONTWAIT | MSG_NOSIGNAL);

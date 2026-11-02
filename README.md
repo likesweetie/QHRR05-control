@@ -11,11 +11,11 @@ Linux, CMake 3.22 이상, C++17 컴파일러(DataTamer 내부는 C++20), yaml-cp
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel 4
-./scripts/run_daemon.sh          # 기본: 준비된 물리 can0, 시뮬레이터 실행 안 함
+./scripts/run_daemon.sh          # 기본: 물리 can0를 설정·UP한 뒤 실행
 # 웹 패널도 자동 시작: http://127.0.0.1:8080
 ```
 
-물리 인터페이스와 비트레이트는 [CAN 설정](config/can_hal/can_hal.yaml)을 확인하십시오. 기본 스크립트는 장치가 없거나 DOWN/비트레이트 불일치이면 명시적으로 실패하며, 네트워크 설정을 바꾸거나 가상 장치로 대체하지 않습니다. daemon은 HAL/control 및 선택적 input/logger/web_gui의 수명을 관리합니다. `--no-terminals`는 자식 출력을 현재 터미널로 모읍니다.
+물리 인터페이스와 비트레이트는 [CAN 설정](config/can_hal/can_hal.yaml)을 확인하십시오. 기본 스크립트는 설정된 기존 CAN 장치에 비트레이트를 적용하고 UP으로 전환합니다. 이미 UP이고 비트레이트가 같으면 그대로 사용하며, UP 상태에서 비트레이트를 바꿔야 하면 잠시 DOWN으로 전환합니다. 권한이 필요하면 `ip link` 설정 명령에만 sudo를 사용하고 daemon은 호출한 사용자 권한으로 실행합니다. 장치가 없거나 CAN 종류가 아니면 명시적으로 실패하며 가상 장치를 만들거나 대신 사용하지 않습니다. daemon은 HAL/control 및 선택적 input/logger/web_gui의 수명을 관리합니다. `--no-terminals`는 자식 출력을 현재 터미널로 모읍니다.
 
 ### vcan 시뮬레이션
 
@@ -51,7 +51,7 @@ cmake --build build --parallel 4
 ./build/input --command /qhrr05 clear-fault  # 원인 해소 후 DISARMED로 복귀
 ```
 
-실제 장치 세션은 엔코더를 수신했다고 보정 완료로 간주하지 않습니다. 일반 모션 전에 영점 보정이 필요합니다. 제로셋은 엔코더·속도·Iq×Kt 환산 토크를 사용하고 ROM을 쓰지 않습니다. 자세한 설정은 [제어 문서](docs/control.md)를 참고하십시오. 자동 시뮬레이션 시작 정책도 일반 작업 선택으로 전달하며 출력에는 Arm이 필요합니다.
+실제 장치 세션은 엔코더를 수신했다고 보정 완료로 간주하지 않습니다. 일반 모션 전에 영점 보정이 필요합니다. 제로셋은 엔코더·속도·Iq×Kt 환산 토크로 스토퍼를 감지한 뒤 `stop_position_rad`를 C3 오프셋으로 전송합니다. 에코와 새 좌표의 피드백을 확인한 뒤 후퇴하며, 제어기는 별도 위치 오프셋 없이 모터 좌표를 사용합니다. ROM은 쓰지 않습니다. 자세한 설정은 [제어 문서](docs/control.md)를 참고하십시오. 자동 시뮬레이션 시작 정책도 일반 작업 선택으로 전달하며 출력에는 Arm이 필요합니다.
 
 | 키 | 기능 |
 | --- | --- |
@@ -62,7 +62,7 @@ cmake --build build --parallel 4
 | B / W | 공 추종 / 작업공간 표시 |
 | Space / R / Ctrl 드래그 | 시뮬레이션에서만 pause / reset / 외란 |
 
-취득 가능, 미수신, 오래됨, 미보정, 유효한 0을 구분합니다. 원시 엔코더와 보정된 관절 좌표, Iq×Kt 환산 토크와 직접 토크 측정, 모델 FK와 실측/GT는 같은 의미로 표시하지 않습니다. 시뮬레이션 전용 데이터는 기존 별도 IPC에 남고 공통 SHM에는 관측·계산·제어 상태와 유효성을 저장합니다. **SHM ABI 16**이므로 참여 프로세스를 모두 다시 빌드하고 재시작해야 합니다.
+취득 가능, 미수신, 오래됨, 미보정, 유효한 0을 구분합니다. 원시 엔코더와 보정된 관절 좌표, Iq×Kt 환산 토크와 직접 토크 측정, 모델 FK와 실측/GT는 같은 의미로 표시하지 않습니다. 시뮬레이션 전용 데이터는 기존 별도 IPC에 남고 공통 SHM에는 관측·계산·제어 상태와 유효성을 저장합니다. **SHM ABI 22**이므로 참여 프로세스를 모두 다시 빌드하고 재시작해야 합니다.
 
 ## Filament PBR 시각화
 
@@ -75,7 +75,7 @@ cmake --build build --parallel 4
 
 물리 세션에서는 CAN 관절 좌표로 렌더링 전용 데이터의 FK만 갱신합니다. 시뮬레이션 GT가 없어도 갱신되며 물리 적분은 하지 않습니다. 아직 관절 좌표가 유효하지 않으면 자세가 확정되지 않았음을 표시합니다. 기존 카메라·재질·8x MSAA·고정 내부 해상도 기능을 유지합니다. 시뮬레이션 전용 조작은 해당 기능이 제공되는 세션에서만 활성화합니다.
 
-필요한 native 실행 파일이나 렌더링 자산이 없으면 해당 런처가 자동 빌드합니다. 소스를 수정한 뒤에는 직접 다시 빌드하십시오. 웹 런처에는 C++ 자동 빌드를 추가하지 않습니다.
+데몬·시뮬레이션 런처는 실행 전에 CMake 증분 빌드로 C++ 소스·헤더·빌드 설정 변경을 반영합니다. 변경이 없으면 재컴파일하지 않으며, 빌드가 실패하면 프로세스를 시작하지 않습니다. `QHRR_BUILD_JOBS`로 병렬 빌드 수를 지정할 수 있습니다(기본 4). Filament 시각화는 실행 파일이나 렌더링 자산이 없을 때 자동 빌드하며, 시각화 소스 변경은 `build_visualization.sh`로 빌드합니다. 웹 런처에는 C++ 자동 빌드를 추가하지 않습니다.
 
 ## 설정과 코드 위치
 
@@ -167,7 +167,7 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 공유 영역은 기본 **`/qhrr05` 하나**이며 이름은 daemon 설정의 `shm_name`으로 지정합니다. CAN 사용 여부와 관계없이 daemon이 자식 실행 전에 생성·초기화하고, 모든 자식을 종료한 뒤 해제합니다. HAL·시뮬레이터·제어기·로거는 연결만 하며, 영역이 없으면 명시적으로 실패합니다. 기존 객체는 재사용·삭제하지 않습니다. daemon이 SIGKILL되면 정리할 수 없으므로 남은 객체는 다음 실행에서 충돌로 보고합니다.
 
-[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **16**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
+[shared_memory.hpp](src/ipc/shared_memory.hpp)에 magic·ABI 버전·버퍼 수·권한·시계·컴파일된 전체 바이트 크기와 `MotorData`·`ModelData`·`ControlData`·`ShmData`를 함께 정의합니다. 연결 시 실제 객체 크기와 헤더의 magic·ABI 버전·크기·버퍼 수를 검사하고 불일치하면 동기화 객체를 사용하기 전에 거부합니다. 현재 ABI는 **22**입니다. 레이아웃이나 필드 의미를 변경하면 `kShmAbiVersion`을 올리고 모든 프로세스를 함께 재빌드·재시작합니다. [control_types.hpp](src/ipc/control_types.hpp)에는 여러 곳에서 재사용하는 `MitCommand`·`MotorFeedback`·Tracking 평면·제어 방식·ILC 및 Magnetic 상태/계측만 남깁니다. 두 헤더는 OpenRobot 코덱을 포함하지 않습니다.
 
 | 영역 | 데이터와 작성자 |
 | --- | --- |
@@ -177,15 +177,17 @@ Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고
 
 같은 영역의 작성자는 **mutex 안에서 최신 슬롯을 반대 슬롯으로 복사하고 자기 필드만 갱신한 뒤 발행**합니다. 명령·피드백 sequence와 시각은 별도입니다. robust mutex 소유자 사망은 명시적 오류입니다. 계산·렌더링·파일 쓰기는 잠금 밖에서 수행합니다.
 
-관절 명령·측정값은 `MotorData` 한 곳을 원본으로 사용합니다. `MitCommand`는 position·velocity·kp·kd·tau_ff를 담고 enable 요청은 별도 `command_enabled[i]`에 둡니다. tau_ff는 0만 허용합니다. TaskController는 패킷 인코딩을 호출하지 않으며 프로토콜 범위·양자화 검증은 HAL이 수행합니다. `MotorProfile`과 설정값 복사본은 SHM에 두지 않습니다. HAL이 C4 모터 응답을 설정과 대조하고, 응답의 Kt와 측정 Iq로 `motor_torque[i]`를 계산합니다. 제어기는 이 토크 값을 바로 사용합니다. 그래프는 로컬 표시 샘플을 만들고 로거는 필요한 영역을 한 번의 잠금으로 읽어 CSV 행을 조합합니다.
+관절 명령·측정값은 `MotorData` 한 곳을 원본으로 사용합니다. `MitCommand`는 position·velocity·kp·kd·tau_ff와 RMD 선택 플래그를 담고 enable 요청은 별도 `command_enabled[i]`에 둡니다. [control.yaml](config/control/control.yaml) 최상단의 `torque_reference_mode`는 `torque_ref_as_position`(q_ref+tau_ref/kp, tau_ff=0) 또는 `native_torque_ref`(q_ref, tau_ff=tau_ref)를 선택합니다. 두 방식 모두 모션별 kp/kd와 합산 노력 제한을 유지합니다. 세 번째 선택인 `rmd_torque_ref`는 Gravity·Magnetic·Tracking 실행·Damping의 토크를 검증된 Kt로 전류로 변환해 RMD A1로 전송합니다. 이 경로의 위치/속도 게인은 0이며 Homing·Ball·ZeroSet과 Tracking의 위치 HOLD는 MIT를 유지합니다. 상세 단위·좌표 전환은 [CAN HAL 문서](docs/can_hal.md#rmd-torque-closed-loop-출력)를 참고하십시오. Damping 테스트 모드는 항상 kp=kd=0으로 관측 누적각의 차분 속도에 30 Hz 1차 LPF를 적용한 뒤 댐핑 토크를 tau_ff로 전송합니다. TaskController는 패킷 인코딩을 호출하지 않으며 프로토콜 범위·양자화 검증은 HAL이 수행합니다. `MotorProfile`과 설정값 복사본은 SHM에 두지 않습니다. HAL은 시작 시 C2 해제 확인 후 모터 YAML 파라미터를 C5로 한 번 기록하고 C4로 검증하며, 응답의 Kt와 측정 Iq로 `motor_torque[i]`를 계산합니다. 제어기는 이 토크 값을 바로 사용합니다. 그래프는 로컬 표시 샘플을 만들고 로거는 필요한 영역을 한 번의 잠금으로 읽어 CSV 행을 조합합니다.
+
+호밍의 기본값은 위의 MIT 위치 제어입니다. `homing.torque_control: true`이면 같은 궤적에 대해 호스트에서 `tau=kp*(q_ref-q)-kd*dq`를 계산합니다. native에서는 모터 `kp/kd=0`과 `tau_ff`로, RMD에서는 A1과 설정된 `rmd_damping_constant`로 보내며, 위치 환산 방식에서는 `q_measured+tau/kp`로 보내 위치 오차를 두 번 더하지 않습니다. 속도 레퍼런스는 사용하지 않습니다. [호밍 토크 옵션](docs/control.md#호밍-토크-추종)에 출력 방식별 동작을 설명합니다.
 
 제어 주파수는 `control.frequency_hz`로 설정합니다. 제어기는 monotonic 시간으로 동작하며 새 측정이나 물리 run/pause를 기다리지 않고 최신 입력을 사용합니다. 물리 간격은 모델의 `timestep`, 그래프·계측 주기는 `plots.sample_hz`의 시뮬레이션 시간 기준입니다. 물리 일시정지 중에도 제어 시간은 진행합니다. 제어 경로는 응답 지연·관측 누락으로 동작을 바꾸지 않습니다. CSV 평가는 **shm_logger**, 읽기 전용 실시간 SHM 관측은 daemon이 담당합니다. 더블버퍼는 모든 중간 프레임의 기록을 보장하지 않습니다.
 
 시뮬레이션 전용 교환은 모두 [simulation IPC](src/ipc/simulation/channel.hpp)의 버전형 Unix `SOCK_SEQPACKET` 경로(`/tmp/qhrr05-simulation-<uid>/<세션>.sock`)를 사용합니다. 실제 위치·속도·토크, 접촉 이벤트·합력, 물체 위치·회전, pause·finished 상태와 승인된 시뮬레이션 조작은 SHM에 넣지 않습니다. 뷰어·로거·웹 브리지가 IPC 상태와 하드웨어 SHM을 로컬에서 조합하며, 느린 구독자는 물리를 막지 않고 누락 수를 확인할 수 있습니다. 자세한 구조는 [시각화 안내](docs/visualization.md)를 참고하십시오.
 
-RFOB는 새 측정에서만 필터를 갱신합니다. 접촉 GT 힘·모멘트와 물체 좌표는 simulation IPC에만 있으며 제어 입력으로 사용하지 않습니다. 현재 관측기는 모델 잔차 기반 발끝 등가 외력 추정입니다. 발끝의 `condim=6` 접촉 모멘트를 3관절 관측으로 힘과 분리할 수 없으며, Momentum Observer는 미구현입니다.
+반력 추정기는 새 측정에서 일반화 운동량 `p=M(q)*dq`와 모델 입력을 비교하는 GM 옵저버를 사용합니다. 가속도 차분은 반력 추정에 사용하지 않습니다. 접촉 GT 힘·모멘트와 물체 좌표는 simulation IPC에만 있으며 제어 입력으로 사용하지 않습니다. 발끝의 `condim=6` 접촉 모멘트를 3관절 관측만으로 힘과 분리할 수는 없습니다.
 
-CAN 모드에서는 새 CAN 피드백에서 속도를 차분하고 RFOB를 갱신합니다. 제어기는 읽은 엔코더 상태로 같은 제어 주기 안에서 모델을 갱신합니다. 시뮬레이터가 없어도 이 경로로 계산하며, 외부 `ModelData`는 제어 입력으로 읽지 않습니다. 물체 이동·접촉·해제 같은 시뮬레이션 이벤트는 통일된 simulation IPC로 전달합니다. 수집 주기마다 `contact`·`contact_event_sequence`·`contact_event_time`을 갱신하며 CSV에도 기록합니다. 이 이벤트 때문에 모터 CAN 패킷을 추가하지 않습니다.
+CAN 모드에서는 새 관절 피드백의 실제 관측 간격으로 GM 옵저버를 갱신합니다. 제어기는 읽은 엔코더 상태로 같은 제어 주기 안에서 모델을 갱신합니다. 시뮬레이터가 없어도 이 경로로 계산하며, 외부 `ModelData`는 제어 입력으로 읽지 않습니다. 물체 이동·접촉·해제 같은 시뮬레이션 이벤트는 통일된 simulation IPC로 전달합니다. 수집 주기마다 `contact`·`contact_event_sequence`·`contact_event_time`을 갱신하며 CSV에도 기록합니다. 이 이벤트 때문에 모터 CAN 패킷을 추가하지 않습니다.
 
 ## CAN HAL
 
@@ -193,7 +195,7 @@ HAL은 기본 daemon의 필수 프로세스입니다. 통계 창의 `BUS LOAD es
 
 기본 자동 배치 빌드에는 X11/XRandR 개발 라이브러리(`pkg-config x11 xrandr`)가 필요합니다. 호스트 vcan 준비에는 iproute2·Python 3와 생성/활성화 권한이 필요합니다. 권한이 없으면 sudo 인증을 요청합니다. `--isolated-vcan` 디버깅에는 `unshare`·D-Bus가 추가로 필요합니다. 터미널 실행 파일은 최상위 `terminal_exec`, 창 이름은 프로그램별 `terminal_title`로 지정합니다. 현재 환경은 FD 전달을 지원하는 `/usr/bin/gnome-terminal.real`을 명시했습니다. 실행 파일·인터페이스·창 오류를 다른 경로로 자동 대체하지 않습니다.
 
-명령은 MIT q target·velocity·kp/kd이며 tau_ff는 논리적 0으로 고정합니다. 기본 시뮬레이터가 C4 프로파일 조회·C1 enable·C0 제어/피드백·C2 release에 응답합니다. 시작 시 가상 모터가 늦게 준비되어도 100 HAL 주기마다 프로파일/enable을 재요청합니다. 응답 지연 판정이나 시간 초과 정지는 없습니다. 명령 API·로깅·프로토콜 범위·스토퍼 보정 결정은 [CAN HAL 동작 규약](docs/can_hal.md)에 정리했습니다.
+명령은 MIT q target·velocity·kp/kd·tau_ff입니다. Damping 테스트는 MIT C0 누적각의 차분 속도를 30 Hz 1차 LPF로 필터링한 댐핑 토크를 tau_ff에 넣고, HAL은 C4 T_MAX 범위로 제한합니다. 기본 시뮬레이터가 C4 프로파일 조회·C1 enable·C0 제어/피드백·C2 release에 응답합니다. 시작 시 가상 모터가 늦게 준비되어도 100 HAL 주기마다 프로파일/enable을 재요청합니다. 응답 지연 판정이나 시간 초과 정지는 없습니다. 명령 API·로깅·프로토콜 범위·스토퍼 보정 결정은 [CAN HAL 동작 규약](docs/can_hal.md)에 정리했습니다.
 
 ## 검증과 유지 문서
 

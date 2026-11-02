@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
             }
             if (z.phase == ZeroSetPhase::Complete) {
                 for (int i = 0; i < 3; ++i)
-                    Require(std::abs(feedback.position_offset[i] + feedback.feedback[i].position -
+                    Require(std::abs(feedback.feedback[i].position -
                                      data->qpos[i]) < .04,
                         "calibrated encoder does not match model coordinates");
                 complete = true;
@@ -194,15 +194,15 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         const auto after = motors.ReadFeedback();
-        Require(after.position_offset == before.position_offset, "reset cleared runtime zero");
+        Require(after.zero_completed_sequence == before.zero_completed_sequence, "reset cleared C3 completion");
         for (int i = 0; i < 3; ++i)
             Require(
-                std::abs(after.position_offset[i] + after.feedback[i].position - initial[i]) < .04,
+                std::abs(after.feedback[i].position - initial[i]) < .04,
                 "reset encoder lost calibration");
         stop();
         std::filesystem::remove_all(root);
         std::cout
-            << "PASS: random encoder startup, real CAN torque contact, hip/thigh/calf offsets and reset persistence\n";
+            << "PASS: random encoder startup, real CAN torque contact, hip/thigh/calf C3 coordinates and reset persistence\n";
         return 0;
     } catch (const std::exception& e) {
         stop();

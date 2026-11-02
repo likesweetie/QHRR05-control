@@ -1,9 +1,10 @@
 #include "control/control.hpp"
-#include "control/limits.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <yaml-cpp/yaml.h>
 
 namespace qhrr05 {
@@ -15,7 +16,10 @@ TaskController::TaskController(
       gravity_(std::make_unique<GravityCompensationController>(config_path)),
       magnetic_(std::make_unique<MagneticTouchController>(config_path)),
       tracking_(std::make_unique<TrackingController>(config_path, *model_backend_)),
-      ball_(std::make_unique<BallFollowingController>(config_path, *model_backend_)) {
+      ball_(std::make_unique<BallFollowingController>(config_path, *model_backend_)),
+      damping_(std::make_unique<DampingController>(config_path)),
+      anticogging_(std::make_unique<TwoOrderAnticogging>(config_path)) {
+    can_transport_ = !without_can;
     {
         auto& shm = *shm_.get();
         shm_utils::Lock lock(shm);
@@ -25,9 +29,18 @@ TaskController::TaskController(
             (!without_can && (shm.failed || shm.stopping || !motors.running)))
             throw std::runtime_error("SHM transport does not match controller mode");
         zero_status_ = shm.control[shm.control_sequence % kShmBufferCount].zero_set;
+        zero_requests_ = motors.zero_request_sequence;
+        zero_resume_ = motors.zero_resume_sequence;
+        zero_positions_ = motors.zero_position;
     }
 
     const auto config = YAML::LoadFile(config_path);
+    torque_ref_as_position_ = ReadTorqueRefAsPosition(config);
+    rmd_torque_ref_ = config["torque_reference_mode"].as<std::string>() == "rmd_torque_ref";
+    const double rmd_damping = config["rmd_damping_constant"]
+        ? config["rmd_damping_constant"].as<double>() : 5;
+    safety_.ValidateRmdDampingConstant(rmd_damping);
+    rmd_damping_constant_ = static_cast<std::uint16_t>(rmd_damping);
     torque_limits_ = ReadControlTorqueLimits(config);
     {
         auto& shm = *shm_.get();
@@ -65,7 +78,7 @@ void TaskController::Fault(const std::string& reason) {
 
 bool TaskController::ReadInput() {
     input_context_ = input_.Poll();
-    const auto command = input_.Receive();
+    auto command = input_.Receive();
     std::string rejection;
     std::uint64_t approved_sequence = 0;
     MotorData motors;
@@ -91,6 +104,88 @@ bool TaskController::ReadInput() {
         candidate.requested_mode = 6;
         ++candidate.motion_sequence;
     }
+    if (command && (command->tracking_ilc_status || command->set_tracking_ilc)) {
+        auto& ilc = tracking_->ilc();
+        std::string rejection;
+        try {
+            if (command->set_tracking_ilc)
+                ilc.SetParameters(command->ilc_phase_lead_bins,
+                    command->ilc_smoothing_passes, command->ilc_retention);
+        } catch (const std::exception& error) {
+            rejection = error.what();
+        }
+        std::ostringstream status;
+        status << std::setprecision(17) << "{\"enabled\":" << (ilc.enabled() ? "true" : "false")
+               << ",\"phase_bins\":" << ilc.phase_bins()
+               << ",\"phase_lead_bins\":" << ilc.phase_lead_bins()
+               << ",\"smoothing_passes\":" << ilc.smoothing_passes()
+               << ",\"retention\":" << ilc.retention()
+               << ",\"updates\":" << ilc.updates()
+               << ",\"observed_ns\":" << shm_utils::MonotonicNs() << '}';
+        input_.Reply(*command, rejection, request_sequence_, status.str());
+        command.reset();
+    }
+    if (command && (command->rmd_status || command->set_rmd_damping)) {
+        std::string rejection;
+        try {
+            if (command->set_rmd_damping) {
+                safety_.ValidateRmdDampingConstant(command->rmd_damping_constant);
+                rmd_damping_constant_ = static_cast<std::uint16_t>(command->rmd_damping_constant);
+            }
+        } catch (const std::exception& error) {
+            rejection = error.what();
+        }
+        std::ostringstream status;
+        status << "{\"enabled\":" << (rmd_torque_ref_ ? "true" : "false")
+               << ",\"damping_constant\":" << rmd_damping_constant_
+               << ",\"observed_ns\":" << shm_utils::MonotonicNs() << '}';
+        input_.Reply(*command, rejection, request_sequence_, status.str());
+        command.reset();
+    }
+    if (command && (command->anticogging_status || command->set_anticogging_phase || command->set_anticogging_amplitude)) {
+        std::string phase_rejection;
+        try {
+            if (command->set_anticogging_phase) {
+                safety_.ValidateAnticoggingPhase(command->motor_axis,
+                    command->anticogging_order, command->phase_delta);
+                anticogging_->setPhaseTarget(command->motor_axis, command->anticogging_order,
+                    anticogging_->phase(command->motor_axis, command->anticogging_order, true) +
+                        command->phase_delta);
+            } else if (command->set_anticogging_amplitude) {
+                safety_.ValidateAnticoggingAmplitude(command->motor_axis,
+                    command->anticogging_order, command->amplitude_delta);
+                const double target = anticogging_->amplitude(command->motor_axis,
+                    command->anticogging_order, true) + command->amplitude_delta;
+                // Decimal button steps can leave a tiny round-off below zero.
+                anticogging_->setAmplitudeTarget(command->motor_axis, command->anticogging_order,
+                    std::abs(target) < 1e-12 ? 0 : target);
+            }
+        } catch (const std::exception& error) {
+            phase_rejection = error.what();
+        }
+        std::ostringstream status;
+        status << std::setprecision(17) << "{\"enabled\":" << (anticogging_->enabled() ? "true" : "false")
+               << ",\"observed_ns\":" << shm_utils::MonotonicNs()
+               << ",\"phase_slew_rad_s\":" << anticogging_->phaseSlewRate()
+               << ",\"amplitude_slew_nm_s\":" << anticogging_->amplitudeSlewRate();
+        for (int order : {21, 36}) for (bool target : {false, true}) {
+            status << ",\"" << (target ? "target_phase" : "phase") << order << "_rad\":[";
+            for (int i = 0; i < 3; ++i)
+                status << (i ? "," : "") << anticogging_->phase(i, order, target);
+            status << "],\"" << (target ? "target_amp" : "amp") << order << "_motor_nm\":[";
+            for (int i = 0; i < 3; ++i)
+                status << (i ? "," : "") << anticogging_->amplitude(i, order, target);
+            status << ']';
+        }
+        status << ",\"clipping\":[";
+        for (int i = 0; i < 3; ++i)
+            status << (i ? "," : "") << (control_time_ < anticogging_clip_until_[i] ? anticogging_clipping_[i] : 0);
+        status << "],\"compensation_output_nm\":[";
+        for (int i = 0; i < 3; ++i) status << (i ? "," : "") << anticogging_output_nm_[i];
+        status << "]}";
+        input_.Reply(*command, phase_rejection, request_sequence_, status.str());
+        command.reset();
+    }
     if (command) {
         if (command->set_mode) {
             candidate.requested_mode = command->mode;
@@ -114,6 +209,8 @@ bool TaskController::ReadInput() {
             throw std::runtime_error("invalid motor axis");
         if (!priority_action)
             safety_.Validate(candidate, false, false);
+        if (!priority_action && candidate.requested_mode == 6 && !can_transport_)
+            throw std::runtime_error("C3 zero set requires CAN; direct debug already uses model coordinates");
         if (!priority_action && candidate.requested_drive_action != DriveAction::EnableMotor &&
             candidate.requested_mode != 5 && candidate.requested_mode != 6 && zero_required_)
             throw std::runtime_error("joint coordinates are not calibrated; select Zero set first");
@@ -127,7 +224,7 @@ bool TaskController::ReadInput() {
                     motors.transport_fault != TransportFault::None)
                     throw std::runtime_error("clear the drive fault before arming");
                 auto needed =
-                    candidate.requested_mode == 5 ? JointVelocity : EncoderPosition | JointVelocity;
+                    candidate.requested_mode == 5 ? EncoderPosition : EncoderPosition | JointVelocity;
                 if (candidate.requested_mode == 6 || candidate.requested_mode == 2)
                     needed |= ConvertedTorque;
                 for (auto available : motors.supported)
@@ -219,7 +316,7 @@ bool TaskController::ReadInput() {
     encoder_position_ = observation_.encoder;
     joint_velocity_ = observation_.velocity;
     motor_torque_ = observation_.torque;
-    encoder_origin_ = motors.position_offset;
+    zero_completed_ = motors.zero_completed_sequence;
     bool fresh = false;
     for (int i = 0; i < 3; ++i) {
         if (observation_.sequence[i] != previous_received_sequence_[i]) {
@@ -233,13 +330,19 @@ bool TaskController::ReadInput() {
             previous_received_sequence_[i] = observation_.sequence[i];
             previous_received_ns_[i] = observation_.sample_ns[i];
             previous_velocity_[i] = joint_velocity_[i];
-            if (dt > 0)
-                measurement_dt_ = dt;
             fresh = true;
         }
     }
-    if (fresh)
+    if (fresh) {
+        // Momentum integration uses the interval between complete observations,
+        // not the last axis's individual (possibly staggered) CAN period.
+        const auto now = can_transport_ ? shm_utils::MonotonicNs()
+            : *std::max_element(observation_.sample_ns.begin(), observation_.sample_ns.end());
+        measurement_dt_ = !measurement_ns_ ? period_ns_ / 1e9
+            : now > measurement_ns_ ? (now - measurement_ns_) / 1e9 : 0;
+        measurement_ns_ = now;
         ++measurement_sequence_;
+    }
     motor_commands_enabled_ =
         (drive_state_ == DriveState::Active || drive_state_ == DriveState::Armed) &&
         std::all_of(motors.profile_verified.begin(), motors.profile_verified.end(), [](bool v) {
@@ -287,13 +390,18 @@ bool TaskController::ReadInput() {
 }
 
 void TaskController::Control() {
+    const double previous_time = control_time_;
     control_time_ = (shm_utils::MonotonicNs() - started_ns_) / 1e9;
+    anticogging_->update(control_time_ - previous_time);
+    anticogging_output_nm_.fill(0);
     const bool valid =
-        (requested_mode_ == 5 ? observation_.velocity_valid : observation_.position_velocity) &&
+        (requested_mode_ == 5 ? observation_.position_valid : observation_.position_velocity) &&
         observation_.ready && (requested_mode_ == 5 || requested_mode_ == 6 || !zero_required_) &&
         (requested_mode_ != 2 || CoordinatesValid(acceleration_valid_)) &&
         ((requested_mode_ != 6 && requested_mode_ != 2) || observation_.torque_valid);
     if (drive_state_ != DriveState::Active || !valid) {
+        if (requested_mode_ == 5)
+            damping_->Reset();
         if (drive_state_ == DriveState::Active && control_time_ - armed_at_ > startup_timeout_)
             Fault("required motor observations are unavailable");
         torque_command_.fill(0);
@@ -311,7 +419,7 @@ void TaskController::Control() {
         if (requested_mode_ == 6) {
             zero_set_ = std::make_unique<ZeroSetController>(config_path_);
             zero_started_ = false;
-            zero_applied_.fill(false);
+            zero_issued_.fill(false);
             zero_status_ = {};
             zero_status_.phase = ZeroSetPhase::Waiting;
             zero_clock_ = 0;
@@ -329,10 +437,11 @@ void TaskController::Control() {
             ball_->Start(joint_position_);
             active_ball_target_sequence_ = ball_target_sequence_;
         } else {
+            damping_->Reset();
             position_reference_ = joint_position_;
             damping_toe_reference_.fill(0);
             damping_reference_valid_ = false;
-            std::cout << "[control] DAMPING kp=0 kd=1; awaiting initial model sample" << std::endl;
+            std::cout << "[control] DAMPING torque test kp=0 kd=0; differentiating encoder positions" << std::endl;
         }
 
         mode_ = requested_mode_;
@@ -341,6 +450,8 @@ void TaskController::Control() {
 
     holding_ = false;
 
+    if (mode_ != 6)
+        zero_resume_ = zero_completed_;
     if (mode_ == 6) {
         ControlZeroSet();
         return;
@@ -350,23 +461,24 @@ void TaskController::Control() {
         homing_->Compute(control_time_,
             joint_position_.data(),
             joint_velocity_.data(),
-            torque_command_.data(),
-            position_reference_.data());
+            observation_.sequence,
+            observation_.sample_ns,
+            position_reference_, torque_command_);
         holding_ = homing_->Reference(control_time_).holding;
     } else if (mode_ == 1) {
-        gravity_->Compute(
-            model_backend_->state(), torque_command_.data(), position_reference_.data());
+        gravity_->Compute(model_backend_->state(), position_reference_, torque_command_);
     } else if (mode_ == 2) {
+        const auto coriolis = model_backend_->CoriolisMatrix(joint_position_, joint_velocity_);
         magnetic_->Compute(control_time_,
             joint_position_,
             joint_velocity_,
-            joint_acceleration_,
             motor_torque_,
             gravity_torque_,
             bias_torque_,
             passive_torque_,
             friction_limit_,
             mass_matrix_,
+            coriolis,
             jacobian_,
             toe_position_,
             joint_min_,
@@ -374,8 +486,7 @@ void TaskController::Control() {
             measurement_sequence_,
             measurement_dt_,
             target_force_,
-            torque_command_,
-            position_reference_);
+            position_reference_, torque_command_);
     } else if (mode_ == 3) {
         tracking_->Compute(control_time_,
             joint_position_,
@@ -383,9 +494,7 @@ void TaskController::Control() {
             gravity_torque_,
             jacobian_,
             toe_position_,
-            torque_command_);
-
-        position_reference_ = tracking_->joint_reference();
+            position_reference_, torque_command_);
     } else if (mode_ == 4) {
         if (ball_target_sequence_ != active_ball_target_sequence_) {
             ball_->SetBallPosition(requested_ball_position_);
@@ -400,8 +509,7 @@ void TaskController::Control() {
             joint_position_,
             joint_velocity_,
             gravity_torque_,
-            torque_command_);
-        position_reference_ = ball_->joint_reference();
+            position_reference_, torque_command_);
     } else {
         if (!damping_reference_valid_ && model_sequence_) {
             for (double value : toe_position_)
@@ -416,21 +524,27 @@ void TaskController::Control() {
                       << "] m (no position stiffness)" << std::endl;
         }
 
-        for (int i = 0; i < 3; ++i)
-            torque_command_[i] = -joint_velocity_[i];
+        damping_->Compute(observation_.position, observation_.sequence,
+            observation_.sample_ns, position_reference_, torque_command_);
     }
 
-    for (int i = 0; i < 3; ++i)
+    std::array<unsigned, 3> clipping{};
+    for (int i = 0; i < 3; ++i) {
+        // C3 defines the phase origin. Add compensation before the selected
+        // torque-to-position/native-torque conversion and the shared torque limit.
+        if (!zero_required_)
+            anticogging_output_nm_[i] = anticogging_->compensationOutputNm(i, joint_position_[i], &clipping[i]);
+        torque_command_[i] += anticogging_output_nm_[i];
+        if (anticogging_->enabled() && std::abs(torque_command_[i]) > torque_limits_[i])
+            clipping[i] |= TwoOrderAnticogging::CombinedTorque;
         torque_command_[i] = std::clamp(torque_command_[i], -torque_limits_[i], torque_limits_[i]);
+    }
 
+    const bool homing_uses_host_pd = mode_ == 0 && homing_->torque_control();
     if (mode_ == 5) {
-        // Pure MIT damping has no position surrogate and never divides by kp=0.
+        // The host computes damping; both motor gains are zero and tau_ff carries it.
         for (int i = 0; i < 3; ++i)
-            motor_targets_[i] = {position_reference_[i] - encoder_origin_[i],
-                joint_velocity_[i] + torque_command_[i],
-                0,
-                1,
-                0};
+            motor_targets_[i] = {position_reference_[i], 0, 0, 0, torque_command_[i], rmd_torque_ref_};
     } else {
         const auto& kp = mode_ == 0   ? homing_->kp()
                          : mode_ == 1 ? gravity_->kp_motor()
@@ -442,16 +556,58 @@ void TaskController::Control() {
                          : mode_ == 2 ? magnetic_->kd_motor()
                          : mode_ == 3 ? tracking_->kd_motor()
                                       : ball_->kd_motor();
-        const auto home = homing_->Reference(control_time_);
-
         for (int i = 0; i < 3; ++i) {
-            // Remove the motor D term already included in torque_command_, then
-            // represent the resulting effort as an actual MIT position target.
-            const double target_velocity = mode_ == 0 ? home.velocity[i] : 0;
-            const double position =
-                joint_position_[i] +
-                (torque_command_[i] - kd[i] * (target_velocity - joint_velocity_[i])) / kp[i];
-            motor_targets_[i] = {position - encoder_origin_[i], target_velocity, kp[i], kd[i], 0};
+            for (double value : {position_reference_[i], torque_command_[i],
+                     joint_position_[i], kp[i], kd[i], torque_limits_[i]})
+                if (!std::isfinite(value))
+                    throw std::runtime_error("non-finite motor command component");
+            if (kp[i] < 0 || (torque_ref_as_position_ && kp[i] == 0) || kd[i] < 0 ||
+                torque_limits_[i] <= 0)
+                throw std::runtime_error("invalid motor gains or effort limit");
+
+            const double torque = torque_command_[i];
+            // Position homing, Ball and tracking's preflight/failure hold retain MIT.
+            // RMD A1 receives only the controller's torque, with no implicit joint PD.
+            if (rmd_torque_ref_ && (homing_uses_host_pd || mode_ == 1 || mode_ == 2 ||
+                    (mode_ == 3 && !tracking_->checking() && !tracking_->ik_failed()))) {
+                motor_targets_[i] = {position_reference_[i], 0, 0, 0, torque, true};
+            } else if (torque_ref_as_position_) {
+                // Homing already included its position error in torque. Adding
+                // it to q_ref again would apply the same P feedback twice.
+                const double base = homing_uses_host_pd ? joint_position_[i] : position_reference_[i];
+                const double position = base + torque / kp[i];
+                const double maximum_error = torque_limits_[i] / kp[i];
+                motor_targets_[i] = {std::clamp(position,
+                    joint_position_[i] - maximum_error, joint_position_[i] + maximum_error),
+                    0, kp[i], homing_uses_host_pd ? 0 : kd[i], 0};
+            } else if (homing_uses_host_pd || kp[i] == 0) {
+                motor_targets_[i] = {position_reference_[i], 0, 0, homing_uses_host_pd ? 0 : kd[i], torque};
+            } else {
+                // Bound P + torque FF together, retaining torque in its native field.
+                const double minimum_position =
+                    joint_position_[i] + (-torque_limits_[i] - torque) / kp[i];
+                const double maximum_position =
+                    joint_position_[i] + (torque_limits_[i] - torque) / kp[i];
+                motor_targets_[i] = {std::clamp(position_reference_[i],
+                    minimum_position, maximum_position), 0, kp[i], kd[i], torque};
+            }
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (motor_targets_[i].rmd_torque)
+            motor_targets_[i].rmd_damping_constant = rmd_damping_constant_;
+        const double position_effort = homing_uses_host_pd ? 0 : motor_targets_[i].kp *
+            (position_reference_[i] - joint_position_[i]);
+        if (anticogging_->enabled() && std::abs(position_effort + torque_command_[i]) > torque_limits_[i] + 1e-9)
+            clipping[i] |= TwoOrderAnticogging::CombinedTorque;
+        if (anticogging_->enabled() && !motor_targets_[i].rmd_torque &&
+            anticogging_->motorTorqueLimitNm() > 0 &&
+            std::abs(motor_targets_[i].tau_ff) > anticogging_->motorTorqueLimitNm())
+            clipping[i] |= TwoOrderAnticogging::CanTorque;
+        if (control_time_ >= anticogging_clip_until_[i]) anticogging_clipping_[i] = 0;
+        if (clipping[i]) {
+            anticogging_clipping_[i] = clipping[i];
+            anticogging_clip_until_[i] = control_time_ + 1.0;
         }
     }
 }
@@ -490,6 +646,14 @@ void TaskController::ControlZeroSet() {
         return;
     }
 
+    if (zero_set_->telemetry().phase == ZeroSetPhase::SettingZero) {
+        const int axis = zero_set_->telemetry().axis;
+        if (zero_issued_[axis] && zero_completed_[axis] == zero_requests_[axis] &&
+            observation_.coordinate_valid[axis]) {
+            zero_set_->ConfirmZero(zero_clock_, encoder_position_);
+            zero_resume_[axis] = zero_requests_[axis];
+        }
+    }
     zero_set_->Update(zero_clock_,
         encoder_position_,
         joint_velocity_,
@@ -501,29 +665,40 @@ void TaskController::ControlZeroSet() {
     if (failed)
         Fault(ZeroSetFailureName(zero_status_.failure));
 
-    for (int i = 0; i < 3; ++i) {
-        if (zero_status_.calibrated[i] && !zero_applied_[i]) {
-            encoder_origin_[i] = zero_status_.offset[i];
-            joint_position_[i] = encoder_position_[i] + encoder_origin_[i];
-            zero_applied_[i] = true;
+    if (zero_status_.phase == ZeroSetPhase::SettingZero) {
+        const int axis = zero_status_.axis;
+        if (!zero_issued_[axis]) {
+            zero_positions_[axis] = zero_status_.position[axis];
+            ++zero_requests_[axis];
+            zero_issued_[axis] = true;
         }
-        position_reference_[i] = zero_set_->reference()[i] + encoder_origin_[i];
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        if (zero_status_.phase == ZeroSetPhase::SettingZero && zero_status_.axis == i) {
+            position_reference_[i] = zero_positions_[i];
+            torque_command_[i] = 0;
+            motor_targets_[i] = {};
+            continue;
+        }
+        position_reference_[i] = zero_set_->reference()[i];
         const double kp = zero_set_->kp()[i], kd = zero_set_->kd()[i];
         const double limit = std::min(torque_limits_[i], zero_set_->effort_limit()[i]);
-        torque_command_[i] =
-            failed ? 0
-                   : std::clamp(kp * (zero_set_->reference()[i] - encoder_position_[i]) -
-                                    kd * joint_velocity_[i],
-                         -limit,
-                         limit);
-        // The encoder frame is unchanged: calibration only changes the runtime
-        // encoder->joint mapping. No EEPROM/ROM write or C3 rebase is sent.
-        motor_targets_[i] = {
-            encoder_position_[i] + (torque_command_[i] + kd * joint_velocity_[i]) / kp,
-            0,
-            kp,
-            kd,
-            0};
+        torque_command_[i] = 0;
+        // Both observations and targets are in the motor's C3-defined frame.
+        if (failed) {
+            motor_targets_[i] = {};
+            continue;
+        }
+        for (double value : {position_reference_[i], encoder_position_[i], kp, kd, limit})
+            if (!std::isfinite(value))
+                throw std::runtime_error("non-finite motor command component");
+        if (kp <= 0 || kd < 0 || limit <= 0)
+            throw std::runtime_error("invalid motor gains or effort limit");
+        const double maximum_error = limit / kp;
+        motor_targets_[i] = {std::clamp(position_reference_[i],
+            encoder_position_[i] - maximum_error, encoder_position_[i] + maximum_error),
+            0, kp, kd, 0};
     }
 }
 
@@ -546,10 +721,9 @@ void TaskController::WriteOutput() {
         motors.command_enabled[i] = motor_commands_enabled_ && enabled_axes_[i];
         motors.debug_torque[i] = torque_command_[i];
         motors.reference[i] = position_reference_[i];
-        if (zero_applied_[i]) {
-            motors.position_offset[i] = encoder_origin_[i];
-            motors.coordinate_valid[i] = true;
-        }
+        motors.zero_position[i] = zero_positions_[i];
+        motors.zero_request_sequence[i] = zero_requests_[i];
+        motors.zero_resume_sequence[i] = zero_resume_[i];
     }
 
     motors.clear_fault_sequence = clear_fault_sequence_;

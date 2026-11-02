@@ -43,7 +43,8 @@ int main(int argc, char** argv) {
         const auto home_values = config["homing"]["position_rad"].as<std::vector<double>>();
         const std::array<double, 3> home{home_values[0], home_values[1], home_values[2]};
         const std::array<double, 3> zero{};
-        std::array<double, 3> torque{};
+        std::array<double, 3> position_reference{}, torque{};
+
         follower.Start(home);
         const auto entry = follower.ball_position();
         Require(follower.joint_reference() == home, "mode entry jumped the reference");
@@ -52,12 +53,21 @@ int main(int argc, char** argv) {
         const std::array<double, 3> direction{1, 0, 0};
         const double dt = .002;
         double speeds[4]{};
+        const std::array<double, 3> measured_velocity{.5, -.4, .3};
 
         for (int mode = 0; mode < 4; ++mode) {
             follower.SetBallPosition(entry);
             follower.Compute(dt, direction, mode == 1 || mode == 3, mode >= 2,
-                true, home, zero, zero, torque);
+                true, home, measured_velocity, zero, position_reference, torque);
             speeds[mode] = Distance(follower.ball_position(), entry) / dt;
+            for (int i = 0; i < 3; ++i) {
+                const double limit = config["limits"]["torque_nm"][i].as<double>();
+                const double expected = 0;
+                Require(position_reference == follower.joint_reference(),
+                    "ball position reference was replaced by measured position or a torque offset");
+                Require(std::abs(torque[i] - std::clamp(expected, -limit, limit)) < 1e-12,
+                    "ball torque added joint position/velocity feedback");
+            }
         }
 
         Require(std::abs(speeds[0] - .10) < 1e-9 && std::abs(speeds[1] - .03) < 1e-9 &&
@@ -73,6 +83,73 @@ int main(int argc, char** argv) {
         const int site = mj_name2id(model.get(), mjOBJ_SITE, "FL_foot");
         double greatest_step = 0;
 
+        // Two nearby targets must resolve to distinct interior FK interpolants,
+        // rather than waiting for the nearest grid vertex to change.
+        std::array<double, 3> interpolated_goals[2];
+        follower.Start(home);
+        for (int target = 0; target < 2; ++target) {
+            auto position = entry;
+            position[0] += .001 * (target + 1);
+            follower.SetBallPosition(position);
+            for (int i = 0; i < 6000; ++i)
+                follower.Compute(.001, zero, 0, 0, false, home, zero, zero, position_reference, torque);
+            Require(!follower.workspace_limited(), "interior FK cell was not available for interpolation");
+            interpolated_goals[target] = follower.nearest_position();
+            Require(Distance(follower.toe_reference(), interpolated_goals[target]) < 1e-5,
+                "reference did not settle to the interpolated FK target");
+            Require(Distance(interpolated_goals[target], position) < .006,
+                "coarse FK interpolation error unexpectedly exceeded 6 mm");
+        }
+        const double mapped_step = Distance(interpolated_goals[0], interpolated_goals[1]);
+        Require(mapped_step > .0005 && mapped_step < .0015,
+            "sub-grid target change was lost or became a grid-size jump");
+
+        follower.Start(home);
+        auto previous = follower.toe_reference();
+        std::array<double, 3> previous_velocity{}, previous_acceleration{};
+        double maximum_acceleration = 0, maximum_jerk = 0, pause = 0, longest_pause = 0;
+        std::vector<double> compute_us;
+        for (int i = 0; i < 9000; ++i) {
+            const double input = i >= 1000 && i < 3000 ? .2 : i >= 3000 && i < 5000 ? -.2 : 0;
+            const auto begin = std::chrono::steady_clock::now();
+            follower.Compute(.001, {input, 0, 0}, 0, 0, true,
+                home, measured_velocity, zero, position_reference, torque);
+            compute_us.push_back(std::chrono::duration<double, std::micro>(
+                std::chrono::steady_clock::now() - begin).count());
+            const auto position = follower.toe_reference();
+            std::array<double, 3> velocity{}, acceleration{};
+            double speed_squared = 0, acceleration_squared = 0, jerk_squared = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                velocity[axis] = (position[axis] - previous[axis]) / .001;
+                acceleration[axis] = (velocity[axis] - previous_velocity[axis]) / .001;
+                speed_squared += velocity[axis] * velocity[axis];
+                acceleration_squared += acceleration[axis] * acceleration[axis];
+                jerk_squared += std::pow((acceleration[axis] - previous_acceleration[axis]) / .001, 2);
+                Require(torque[axis] == 0, "FK interpolation added a joint PD torque");
+            }
+            maximum_acceleration = std::max(maximum_acceleration, std::sqrt(acceleration_squared));
+            maximum_jerk = std::max(maximum_jerk, std::sqrt(jerk_squared));
+            pause = input != 0 && speed_squared < 1e-10 ? pause + .001 : 0;
+            longest_pause = std::max(longest_pause, pause);
+            Require(!follower.workspace_limited(), "interior stick motion left the FK interpolation cells");
+            Require(std::sqrt(speed_squared) <= follower.foot_speed() * 1.02,
+                "smoothed FK path exceeded foot speed");
+            previous = position;
+            previous_velocity = velocity;
+            previous_acceleration = acceleration;
+        }
+        Require(longest_pause < .015, "FK interpolant still pauses between grid vertices");
+        Require(maximum_acceleration < 1 && maximum_jerk < 20,
+            "stick start, reversal or release made a discontinuous FK reference");
+        Require(Distance(follower.toe_reference(), follower.nearest_position()) < 1e-5,
+            "released stick did not settle at the FK interpolant");
+        std::sort(compute_us.begin(), compute_us.end());
+        std::cout << "PASS: FK cell interpolation, 1 mm targets, start/reversal/stop; acceleration="
+                  << maximum_acceleration << " m/s2 jerk=" << maximum_jerk
+                  << " m/s3 longest pause=" << longest_pause << " s compute p99="
+                  << compute_us[compute_us.size() * 99 / 100] << " us\n";
+        follower.Start(home);
+
         // Ball jumps to six unreachable targets; the reference must remain Lipschitz,
         // regular and within joint limits, then hold the selected nearest safe FK point.
         for (const auto& target : {std::array<double, 3>{2, .14, .2}, {-2, .14, .2},
@@ -83,7 +160,7 @@ int main(int argc, char** argv) {
 
             for (int step = 0; step < 12000; ++step) {
                 const auto previous = follower.toe_reference();
-                follower.Compute(dt, zero, 0, 0, false, home, zero, zero, torque);
+                follower.Compute(dt, zero, 0, 0, false, home, zero, zero, position_reference, torque);
                 greatest_step = std::max(greatest_step, Distance(previous, follower.toe_reference()));
                 Require(Distance(previous, follower.toe_reference()) <= follower.foot_speed() * dt * 1.02 + 1e-8,
                     "reference position jumped or exceeded the fixed FK travel speed");
@@ -119,6 +196,12 @@ int main(int argc, char** argv) {
 
             Require(follower.workspace_limited() && !follower.entering_workspace(),
                 "outside workspace did not remain projected");
+            if (Distance(follower.toe_reference(), follower.nearest_position()) >= 1e-8)
+                std::cerr << "FK endpoint residual=" << Distance(follower.toe_reference(), follower.nearest_position())
+                          << " target=" << target[0] << ',' << target[1] << ',' << target[2]
+                          << " velocity=" << follower.joint_velocity_reference()[0] << ','
+                          << follower.joint_velocity_reference()[1] << ','
+                          << follower.joint_velocity_reference()[2] << '\n';
             Require(Distance(follower.toe_reference(), follower.nearest_position()) < 1e-8,
                 "foot did not hold its nearest reachable FK endpoint");
             Require(follower.ball_position() == target, "unreachable ball target was silently clamped");
@@ -153,15 +236,17 @@ int main(int argc, char** argv) {
         Require(counts[0] < follower.workspace_points() && follower.workspace_points() < counts[1],
             "changing the condition threshold did not change the sampled workspace");
 
-        for (int invalid = 0; invalid < 3; ++invalid) {
+        for (int invalid = 0; invalid < 4; ++invalid) {
             auto settings = YAML::Clone(workspace_config);
 
             if (invalid == 0)
                 settings["workspace"]["maximum_condition_number"] = .5;
             else if (invalid == 1)
                 settings["workspace"].remove("maximum_condition_number");
-            else
+            else if (invalid == 2)
                 settings["ball_following"]["minimum_singular_value_m"] = .012;
+            else
+                settings["ball_following"]["smoothing_sec"] = 0;
 
             std::ofstream(workspace_path) << settings;
             bool rejected = false;
@@ -180,9 +265,7 @@ int main(int argc, char** argv) {
 
         // Real Linux js_event ingestion over an explicit virtual FIFO, never a host joystick.
         const auto fifo = directory + "/joystick";
-        Require(::mkfifo(fifo.c_str(), 0600) == 0, "joystick FIFO failed");
-        const int writer = ::open(fifo.c_str(), O_RDWR | O_NONBLOCK);
-        Require(writer >= 0, "virtual joystick open failed");
+        int writer = -1;
         auto input_config = YAML::LoadFile(argv[3]);
         input_config["device"] = fifo;
         const auto input_path = directory + "/input.yaml";
@@ -197,8 +280,9 @@ int main(int argc, char** argv) {
                 return owner.get()->control[owner.get()->control_sequence % kShmBufferCount];
             };
             const auto initial = snapshot();
-            Require(initial.joystick_connected && initial.joystick_l2 == 0 && initial.joystick_r2 == 0,
-                "uninitialized trigger appeared pressed");
+            Require(joystick.isRunning() && !initial.joystick_connected &&
+                    initial.joystick_axes == zero && initial.joystick_l2 == 0 && initial.joystick_r2 == 0,
+                "missing joystick stopped the reader or published input");
             const auto send = [&](int axis, int value) {
                 js_event event{};
                 event.type = JS_EVENT_AXIS | JS_EVENT_INIT;
@@ -215,22 +299,66 @@ int main(int argc, char** argv) {
                 }
             };
 
+            auto last_attempt = initial;
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                until([&](const ControlData& c) { return c.joystick_sequence > last_attempt.joystick_sequence; });
+                const auto next = snapshot();
+                const double seconds = (next.joystick_published_ns - last_attempt.joystick_published_ns) / 1e9;
+                Require(seconds >= .90 && seconds < 1.8 && joystick.isRunning() && !next.joystick_connected,
+                    "missing joystick was not retried once per second");
+                last_attempt = next;
+            }
+            Require(::mkfifo(fifo.c_str(), 0600) == 0, "joystick FIFO failed");
+            writer = ::open(fifo.c_str(), O_RDWR | O_NONBLOCK);
+            Require(writer >= 0, "virtual joystick open failed");
+            until([](const ControlData& c) { return c.joystick_connected; });
+            Require(snapshot().joystick_l2 == 0 && snapshot().joystick_r2 == 0,
+                "newly connected trigger appeared pressed");
             send(1, -32767);
             send(5, 32767);
             until([](const ControlData& c) { return c.joystick_axes[0] == 1 && c.joystick_r2 == 1; });
             send(2, 32767);
             until([](const ControlData& c) { return c.joystick_l2 == 1 && c.joystick_r2 == 1; });
-            joystick.stop();
-            joystick.join();
+            js_event button{};
+            button.type = JS_EVENT_BUTTON;
+            button.number = 0;
+            button.value = 1;
+            Require(::write(writer, &button, sizeof(button)) == sizeof(button), "button event write failed");
+            until([](const ControlData& c) { return c.joystick_buttons[0]; });
+            ::close(writer);
+            writer = -1;
+            Require(::unlink(fifo.c_str()) == 0, "virtual disconnect unlink failed");
+            until([](const ControlData& c) { return !c.joystick_connected; });
             const auto disconnected = snapshot();
             Require(!disconnected.joystick_connected && disconnected.joystick_axes == zero &&
-                        disconnected.joystick_r2 == 0 && disconnected.joystick_l2 == 0,
+                        disconnected.joystick_r2 == 0 && disconnected.joystick_l2 == 0 &&
+                        !disconnected.joystick_buttons[0] && joystick.isRunning(),
                 "disconnect left stale joystick commands");
+            Require(::mkfifo(fifo.c_str(), 0600) == 0, "reconnect FIFO failed");
+            writer = ::open(fifo.c_str(), O_RDWR | O_NONBLOCK);
+            Require(writer >= 0, "reconnect writer failed");
+            until([](const ControlData& c) { return c.joystick_connected; });
+            const auto reconnected = snapshot();
+            const double retry_seconds = (reconnected.joystick_published_ns - disconnected.joystick_published_ns) / 1e9;
+            Require(retry_seconds >= .9 && retry_seconds < 1.8 && reconnected.joystick_axes == zero &&
+                    reconnected.joystick_l2 == 0 && reconnected.joystick_r2 == 0 &&
+                    !reconnected.joystick_buttons[0], "reconnect reused old input or bypassed retry interval");
+            send(1, 32767);
+            until([](const ControlData& c) { return c.joystick_axes[0] == -1; });
+            ::close(writer);
+            writer = -1;
+            Require(::unlink(fifo.c_str()) == 0, "second virtual disconnect failed");
+            until([](const ControlData& c) { return !c.joystick_connected; });
+            const auto stop_started = std::chrono::steady_clock::now();
+            joystick.stop();
+            joystick.join();
+            Require(std::chrono::steady_clock::now() - stop_started < std::chrono::milliseconds(200),
+                "stopping waited for the reconnect timer");
         }
 
-        ::close(writer);
+        if (writer >= 0) ::close(writer);
         std::filesystem::remove_all(directory);
-        std::cout << "PASS: virtual Linux joystick init, axes, R2/L2, disconnect\n";
+        std::cout << "PASS: virtual joystick 1 s retry, hot connect, axes/buttons/triggers reset, reconnect, prompt stop\n";
         return 0;
     } catch (const std::exception& error) {
         if (!directory.empty())

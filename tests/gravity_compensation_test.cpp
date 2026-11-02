@@ -56,7 +56,9 @@ int main(int argc, char** argv) {
             mj_makeData(model.get()), mj_deleteData);
         auto config = YAML::LoadFile(argv[2]);
         const auto home = qhrr05::ReadPosition(config["homing"]["position_rad"], model.get());
-        double reference[3];
+        std::array<double, 3> reference{}, torque{};
+
+
 
         // Evaluate both choices at a moving pose, where bias differs from gravity.
         {
@@ -94,7 +96,6 @@ int main(int argc, char** argv) {
             Require(nonlinear_difference > 1e-5, "test pose has no velocity-dependent bias");
             auto options = YAML::Clone(config);
             options["gravity_compensation"]["alpha"] = .6;
-            options["gravity_compensation"]["task_stiffness"] = 3;
             std::array<double, 3> desired = home;
 
             for (double& value : desired)
@@ -108,50 +109,43 @@ int main(int argc, char** argv) {
                     gravity_only ? model_state.gravity_torque : model_state.bias_torque;
                 qhrr05::GravityCompensationController gravity_controller(config_path);
                 gravity_controller.Start(desired.data());
-                std::array<double, 3> torque, reference;
                 gravity_controller.Compute(
-                    State(model.get(), data.get(), rest.get()), torque.data(), reference.data());
+                    State(model.get(), data.get(), rest.get()), reference, torque);
 
                 for (int i = 0; i < 3; ++i) {
-                    const auto kd = options["gravity_compensation"]["kd_motor"];
-                    const double gain = kd.IsScalar() ? kd.as<double>() : kd[i].as<double>();
                     const double expected =
-                        .6 * selected[i] + 3 * (desired[i] - home[i]) - gain * speed[i];
+                        .6 * selected[i];
                     Require(std::abs(torque[i] - expected) < 1e-10,
-                        "gravity controller selected the wrong compensation or lost its PD terms");
+                        "gravity controller mixed a position servo into compensation");
                 }
 
-                const std::array<double, 3> acceleration{}, motor_torque{};
+                const std::array<double, 3> motor_torque{};
                 qhrr05::MagneticTouchController magnetic(config_path);
                 magnetic.Start(0, model_state.toe_position);
                 magnetic.Compute(.001,
                     home,
                     speed,
-                    acceleration,
                     motor_torque,
                     model_state.gravity_torque,
                     model_state.bias_torque,
                     model_state.passive_torque,
                     model_state.friction_limit,
                     model_state.mass,
+                    {},
                     model_state.jacobian,
                     model_state.toe_position,
                     model_state.joint_min,
                     model_state.joint_max,
                     0,
                     .001,
-                    3,
-                    torque,
-                    reference);
+                    3, reference, torque);
 
                 for (int i = 0; i < 3; ++i) {
-                    const double gain =
-                        options["magnetic_touch"]["joint_damping_nm_s_rad"][i].as<double>();
                     const double limit = options["limits"]["torque_nm"][i].as<double>();
                     const double expected =
-                        std::clamp(selected[i] - gain * speed[i], -limit, limit);
+                        std::clamp(selected[i], -limit, limit);
                     Require(std::abs(torque[i] - expected) < 1e-10,
-                        "magnetic controller selected the wrong compensation or lost damping");
+                        "magnetic controller added joint damping or selected the wrong compensation");
                 }
             }
 
@@ -172,11 +166,10 @@ int main(int argc, char** argv) {
 
         for (double alpha : {0.0, .5, 1.0}) {
             config["gravity_compensation"]["alpha"] = alpha;
-            config["gravity_compensation"]["task_stiffness"] = YAML::Load("[3,4,5]");
             save(config);
             qhrr05::GravityCompensationController controller(config_path);
             controller.Start(home.data());
-            double q[3], dq[3] = {.1, -.2, .3}, g[3] = {2, -3, 1}, torque[3];
+            double q[3], dq[3] = {.1, -.2, .3}, g[3] = {2, -3, 1};
 
             for (int i = 0; i < 3; ++i)
                 q[i] = home[i] + .02 * (i + 1);
@@ -186,19 +179,15 @@ int main(int argc, char** argv) {
             std::copy_n(dq, 3, state.joint_velocity.begin());
             std::copy_n(g, 3, state.gravity.begin());
             state.bias = state.gravity;
-            controller.Compute(state, torque, reference);
+            controller.Compute(state, reference, torque);
 
             for (int i = 0; i < 3; ++i) {
-                const auto kd = config["gravity_compensation"]["kd_motor"];
-                const double damping = kd.IsScalar() ? kd.as<double>() : kd[i].as<double>();
-                Require(std::abs(torque[i] - (alpha * g[i] + (3 + i) * (home[i] - q[i]) -
-                                                 damping * dq[i])) < 1e-10,
-                    "surrogate position servo gives wrong gravity/task/damping torque");
+                Require(std::abs(torque[i] - (alpha * g[i])) < 1e-10,
+                    "gravity target includes unwanted joint position/velocity feedback");
             }
         }
 
-        // With no task stiffness, compensation supports weight but permits motion.
-        config["gravity_compensation"]["task_stiffness"] = 0;
+        // Pure compensation supports weight and follows the measured joint position.
 
         for (int scenario = 0; scenario < 3; ++scenario) {
             const double alpha = scenario == 1 ? 0.0 : 1.0;
@@ -213,7 +202,9 @@ int main(int argc, char** argv) {
                 mju_zero(gravity->qvel, 3);
                 mj_forward(model.get(), gravity.get());
                 controller.Compute(
-                    State(model.get(), data.get(), gravity.get()), data->ctrl, reference);
+                    State(model.get(), data.get(), gravity.get()), reference, torque);
+                for (int i = 0; i < 3; ++i)
+                    data->ctrl[i] = torque[i] - controller.kd_motor()[i] * data->qvel[i];
 
                 for (int i = 0; i < 3; ++i)
                     data->ctrl[i] = std::clamp(data->ctrl[i],
@@ -242,15 +233,13 @@ int main(int argc, char** argv) {
                 Require(!data->warning[i].number, "MuJoCo warning");
         }
 
-        // The new drag compensation is controller-side: check both directions,
-        // exact 50% viscous remainder, smooth zero crossing and residual dissipation.
+        // Dry friction compensation stays smooth in both directions. Neither
+        // model viscous damping nor motor kd belongs in the software torque target.
         auto assisted = YAML::Clone(config);
         auto node = assisted["gravity_compensation"];
         node["alpha"] = 1;
         node["gravity_only"] = false;
-        node["task_stiffness"] = 0;
         node["kd_motor"] = .05;
-        node["damping_ratio"] = .5;
         node["friction_compensation"]["coulomb_ratio"] = .85;
         save(assisted);
         qhrr05::GravityCompensationController drag(config_path);
@@ -258,12 +247,11 @@ int main(int argc, char** argv) {
         state.damping.fill(2);
         state.friction.fill(.2);
         drag.Start(state.joint_position.data());
-        double torque[3];
         for (double speed : {-.5, -.000001, 0.0, .000001, .5}) {
             state.joint_velocity.fill(speed);
-            drag.Compute(state, torque, reference);
+            drag.Compute(state, reference, torque);
             for (int i = 0; i < 3; ++i) {
-                const double expected = .95 * speed + .17 * std::tanh(speed / .03);
+                const double expected = .17 * std::tanh(speed / .03);
                 Require(std::abs(torque[i] - expected) < 1e-12, "wrong signed drag compensation");
                 const double net = torque[i] - 2 * speed - .2 * std::tanh(speed / .03);
                 Require(net * speed <= 0, "drag compensation injected energy into free motion");
@@ -272,7 +260,7 @@ int main(int argc, char** argv) {
             }
         }
         std::cout
-            << "PASS: signed 50% damping compensation, smooth partial dry friction, zero creep\n";
+            << "PASS: no joint damping, smooth partial dry friction, zero creep\n";
 
         node["friction_compensation"]["enabled"] = false;
         save(assisted);
@@ -280,16 +268,15 @@ int main(int argc, char** argv) {
         state.joint_velocity = {.5, -.5, 0};
         state.bias = {1, -2, 3};
         without_friction.Start(state.joint_position.data());
-        without_friction.Compute(state, torque, reference);
+        without_friction.Compute(state, reference, torque);
         for (int i = 0; i < 3; ++i)
-            Require(std::abs(torque[i] - (state.bias[i] - .05 * state.joint_velocity[i])) < 1e-12,
+            Require(std::abs(torque[i] - state.bias[i]) < 1e-12,
                 "friction OFF changed bias support or retained viscous/dry compensation");
         node["friction_compensation"]["enabled"] = true;
         std::cout
-            << "PASS: friction OFF removes both compensation terms and retains bias/motor damping\n";
+            << "PASS: friction OFF leaves bias without joint damping\n";
 
-        const auto pushed_travel = [&](double damping_ratio, double coulomb_ratio) {
-            node["damping_ratio"] = damping_ratio;
+        const auto pushed_travel = [&](double coulomb_ratio) {
             node["friction_compensation"]["coulomb_ratio"] = coulomb_ratio;
             save(assisted);
             qhrr05::GravityCompensationController controller(config_path);
@@ -298,7 +285,9 @@ int main(int argc, char** argv) {
             while (data->time < .6) {
                 mj_forward(model.get(), data.get());
                 controller.Compute(
-                    State(model.get(), data.get(), gravity.get()), data->ctrl, reference);
+                    State(model.get(), data.get(), gravity.get()), reference, torque);
+                for (int i = 0; i < 3; ++i)
+                    data->ctrl[i] = torque[i] - controller.kd_motor()[i] * data->qvel[i];
                 data->qfrc_applied[0] = data->time < .2 ? 1.0 : 0.0;
                 mj_step(model.get(), data.get());
             }
@@ -306,19 +295,18 @@ int main(int argc, char** argv) {
                 Require(!data->warning[i].number, "friction-compensated plant became unstable");
             return std::abs(data->qpos[0] - home[0]);
         };
-        const double original_travel = pushed_travel(1, 0);
-        const double compensated_travel = pushed_travel(.5, .85);
+        const double original_travel = pushed_travel(0);
+        const double compensated_travel = pushed_travel(.85);
         Require(compensated_travel > 1.1 * original_travel,
             "same MuJoCo plant/push did not move more freely with controller friction compensation");
         std::cout << "PASS: same-plant push travel " << original_travel << " -> "
                   << compensated_travel << " rad; physical damping/friction unchanged\n";
-        node["damping_ratio"] = .5;
         node["friction_compensation"]["coulomb_ratio"] = .85;
 
         // Keep output saturation and malformed configuration checks after removing the observer.
         state.bias.fill(100);
         state.joint_velocity.fill(0);
-        drag.Compute(state, torque, reference);
+        drag.Compute(state, reference, torque);
         Require(torque[0] == assisted["limits"]["torque_nm"][0].as<double>(),
             "gravity effort exceeded configured torque limit");
         const auto rejects = [&](const YAML::Node& bad) {
@@ -331,7 +319,7 @@ int main(int argc, char** argv) {
             }
             Require(rejected, "invalid gravity configuration was silently accepted");
         };
-        for (const auto* key : {"damping_ratio", "friction_compensation"}) {
+        for (const auto* key : {"friction_compensation"}) {
             auto bad = YAML::Clone(assisted);
             bad["gravity_compensation"].remove(key);
             rejects(bad);
@@ -344,7 +332,7 @@ int main(int argc, char** argv) {
         rejects(invalid_switch);
         for (double value : {-.1, 1.1, std::numeric_limits<double>::quiet_NaN()}) {
             auto bad = YAML::Clone(assisted);
-            bad["gravity_compensation"]["damping_ratio"] = value;
+            bad["gravity_compensation"]["friction_compensation"]["coulomb_ratio"] = value;
             rejects(bad);
         }
         auto obsolete = YAML::Clone(assisted);

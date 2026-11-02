@@ -1,6 +1,6 @@
 #include <array>
 #include "simulation/simulation.hpp"
-#include "control/limits.hpp"
+#include "control/control.hpp"
 #include "simulation/interaction.hpp"
 #include "daemon/daemon.hpp"
 #include "interfaces/input/interface.hpp"
@@ -152,7 +152,6 @@ int main(int argc, char** argv) {
             if (publish_simulation || options.without_can) {
                 auto& motors = shm_utils::Next(shm.motors, shm.motor_sequence);
                 for (int i = 0; i < 3; ++i) {
-                    motors.position_offset[i] = options.without_can ? initial[i] : 0;
                     if (options.without_can)
                         motors.coordinate_valid[i] = true;
                 }
@@ -187,7 +186,7 @@ int main(int argc, char** argv) {
                 model->actuator_ctrlrange[2 * i + 1]});
 
             if (virtual_motors)
-                torque_limits[i] = std::min(torque_limits[i], virtual_motors->torque_limit_nm());
+                torque_limits[i] = std::min(torque_limits[i], virtual_motors->torque_limit_nm(i));
         }
 
         const auto update_io = [&] {
@@ -686,7 +685,7 @@ int main(int argc, char** argv) {
                     if (applied_command.mode == 5 && applied_command.damping_reference_valid)
                         std::snprintf(status,
                             sizeof(status),
-                            "DAMPING%s | kp=0 kd=1 | no position stiffness\n"
+                            "DAMPING%s | kp=0 kd=0 | encoder-derived torque\n"
                             "Toe target: %.3f / %.3f / %.3f m\nsim=%.2f ctrl=%.2f",
                             !sim->run ? " / PAUSED" : "",
                             target[0],
@@ -697,7 +696,7 @@ int main(int argc, char** argv) {
                     else
                         std::snprintf(status,
                             sizeof(status),
-                            "DAMPING | kp=0 kd=1 | awaiting controller/model sample");
+                            "DAMPING | kp=0 kd=0 | awaiting controller/model sample");
                 } else if (mode == 4) {
                     double error_squared = 0;
 

@@ -142,6 +142,29 @@ int main(int argc, char** argv) {
             Near(state.passive, data->qfrc_passive, 1e-11, "passive");
             Near(state.damping, model->dof_damping, 1e-12, "damping");
             Near(state.friction, model->dof_frictionloss, 1e-12, "friction");
+            const auto coriolis = backend->CoriolisMatrix(q, dq);
+            const auto cv = ModelProduct(coriolis, dq);
+            Vec3 bias_without_gravity{};
+            for (int i = 0; i < 3; ++i) bias_without_gravity[i] = state.bias[i] - state.gravity[i];
+            Near(cv, bias_without_gravity.data(), 1e-10, "C*dq must equal bias minus gravity");
+            // Independent directional mass derivative checks Mdot = C + C^T.
+            constexpr double epsilon = 1e-6;
+            Mat3 plus_mass{}, minus_mass{}, expected_mass_rate{};
+            for (int i = 0; i < 3; ++i) data->qpos[i] = q[i] + epsilon * dq[i];
+            mj_forward(model.get(), data.get());
+            DenseMass(model.get(), data.get(), plus_mass.data());
+            for (int i = 0; i < 3; ++i) data->qpos[i] = q[i] - epsilon * dq[i];
+            mj_forward(model.get(), data.get());
+            DenseMass(model.get(), data.get(), minus_mass.data());
+            Mat3 mass_rate{};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) {
+                    mass_rate[3 * i + j] = coriolis[3 * i + j] + coriolis[3 * j + i];
+                    expected_mass_rate[3 * i + j] = (plus_mass[3 * i + j] - minus_mass[3 * i + j]) / (2 * epsilon);
+                }
+            Near(mass_rate, expected_mass_rate.data(), 2e-8, "C+C^T must equal directional Mdot");
+            std::copy(q.begin(), q.end(), data->qpos);
+            mj_forward(model.get(), data.get());
             mj_jacDot(model.get(),
                 data.get(),
                 jdot.data(),
@@ -214,10 +237,17 @@ int main(int argc, char** argv) {
                 sink = backend->Evaluate(a).jacobian[0];
             },
             10000);
+        const auto coriolis_time = Benchmark(
+            [&](int i) {
+                auto a = q;
+                a[0] += i * 1e-7;
+                sink = backend->CoriolisMatrix(a, dq)[0];
+            }, 10000);
         std::cout << "BENCH model load: backend=" << backend_load
                   << " ms, full visual model=" << full_load << " ms\n"
                   << "BENCH measured update (M/J/bias/gravity/passive)=" << fast
-                  << " us, full mj_forward=" << full << " us, IK FK/J=" << fk << " us\n";
+                  << " us, full mj_forward=" << full << " us, IK FK/J=" << fk
+                  << " us, GM Coriolis=" << coriolis_time << " us\n";
         (void)sink;
         std::cout
             << "PASS: 200 pose dynamics/Jdot comparisons, inertia preservation, scratch isolation and cache\n";

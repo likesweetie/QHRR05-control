@@ -1,5 +1,5 @@
 #include "motion_controllers/tracking_controller.hpp"
-#include "control/limits.hpp"
+#include "control/control.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +22,7 @@ TrackingController::TrackingController(const std::string& config_path, ModelBack
 TrackingController::TrackingController(const std::string& config_path, ModelBackend* backend, int)
     : ilc_(config_path), backend_(backend) {
     const auto config = YAML::LoadFile(config_path);
+    const bool torque_ref_as_position = ReadTorqueRefAsPosition(config);
 
     if (config["robot"].as<std::string>() != "qhrr-05")
         throw std::runtime_error("only qhrr-05 is supported");
@@ -63,7 +64,7 @@ TrackingController::TrackingController(const std::string& config_path, ModelBack
     const auto ctc = settings["ctc"];
 
     if (ctc && (ctc["kp"].IsDefined() || ctc["kd"].IsDefined()))
-        throw std::runtime_error("tracking.ctc kp/kd were renamed to kp_per_s2/kd_per_s");
+        throw std::runtime_error("tracking.ctc uses kp_per_s2 and kd_per_s");
 
     const auto mode = settings["mode"].as<std::string>();
 
@@ -125,17 +126,20 @@ TrackingController::TrackingController(const std::string& config_path, ModelBack
     kd_motor_ = axes(motor, "kd_nm_s_rad");
     torque_limit_ = ReadControlTorqueLimits(config);
 
-    for (int i = 0; i < 3; ++i)
-        if (kp_motor_[i] <= 0 || kp_motor_[i] > 500 || kd_motor_[i] > 5 || torque_limit_[i] <= 0)
+    for (int i = 0; i < 3; ++i) {
+        if (kp_motor_[i] < 0 || kp_motor_[i] > 500 || kd_motor_[i] > 5 || torque_limit_[i] <= 0)
             throw std::runtime_error("invalid tracking MIT gains or output torque limit");
+        if (torque_ref_as_position && kp_motor_[i] == 0)
+            throw std::runtime_error(
+                "tracking.motor.kp_nm_rad must be positive when torque_reference_mode=torque_ref_as_position");
+    }
 
     if (method_ == TrackingMethod::CTC) {
         ctc_kp_ = axes(settings["ctc"], "kp_per_s2");
         ctc_kd_ = axes(settings["ctc"], "kd_per_s");
-
-        for (int i = 0; i < 3; ++i)
-            if (ctc_kp_[i] <= 0 || ctc_kd_[i] <= 0)
-                throw std::runtime_error("tracking CTC gains must be positive");
+        for (double gain : ctc_kp_)
+            if (gain <= 0)
+                throw std::runtime_error("tracking CTC Kp must be positive");
     } else {
         stiffness_ = axes(settings["impedance"], "stiffness_n_m");
         damping_ = axes(settings["impedance"], "damping_ns_m");
@@ -202,7 +206,7 @@ void TrackingController::Start(double time,
 
     started_ = time;
     plane_ = plane;
-    center_ = toe_reference_ = toe_position;
+    entry_position_ = toe_reference_ = toe_position;
     toe_velocity_reference_.fill(0);
     toe_acceleration_reference_.fill(0);
     joint_reference_ = joint_position;
@@ -253,9 +257,9 @@ bool TrackingController::CheckTrajectory() {
 
     for (int sample = checked_samples_; sample < end; ++sample) {
         const double phase = 2 * std::acos(-1.0) * sample / trajectory_samples_;
-        toe_reference_ = center_;
+        toe_reference_ = entry_position_;
         toe_reference_[axes[0]] += amplitude_[axes[0]] * std::sin(phase);
-        toe_reference_[axes[1]] += amplitude_[axes[1]] * std::sin(2 * phase);
+        toe_reference_[axes[1]] += amplitude_[axes[1]] * (std::cos(phase) - 1);
 
         if (!CheckCondition(jacobian) || !SolvePosition(jacobian) || !CheckCondition(jacobian)) {
             std::cerr << "[tracking] TRAJECTORY REJECTED -> HOLD (" << TrackingPlaneName(plane_)
@@ -272,7 +276,7 @@ bool TrackingController::CheckTrajectory() {
 
     validation_joint_ = joint_reference_;
     joint_reference_ = held_joint;
-    toe_reference_ = center_;
+    toe_reference_ = entry_position_;
 
     if (checked_samples_ == trajectory_samples_ + 1) {
         checking_ = false;
@@ -309,7 +313,7 @@ void TrackingController::BuildArcLengthTables() {
         lengths[0] = 0;
         const auto speed = [&](double phase) {
             return std::hypot(amplitude_[axes[0]] * std::cos(phase),
-                2 * amplitude_[axes[1]] * std::cos(2 * phase));
+                amplitude_[axes[1]] * std::sin(phase));
         };
 
         // Simpson integration of |dx/dphase|; tables are built only at initialization.
@@ -341,8 +345,8 @@ void TrackingController::BuildAccelerationProfiles() {
         std::array<double, samples> tangent_norm, curvature, midpoint_curvature, distance,
             speed_squared;
         const auto geometry = [&](double phase, double& norm, double& kappa) {
-            const double x = a * std::cos(phase), y = 2 * b * std::cos(2 * phase);
-            const double xx = -a * std::sin(phase), yy = -4 * b * std::sin(2 * phase);
+            const double x = a * std::cos(phase), y = -b * std::sin(phase);
+            const double xx = -a * std::sin(phase), yy = -b * std::cos(phase);
             norm = std::hypot(x, y);
             kappa = std::abs(x * yy - y * xx) / (norm * norm * norm);
         };
@@ -467,7 +471,7 @@ void TrackingController::ComputeReference(double elapsed) {
     const auto density = [&](double phase) {
         return uniform_acceleration_ ? PhaseTimeDensity(plane_, phase)
                                      : std::hypot(amplitude_[axes[0]] * std::cos(phase),
-                                           2 * amplitude_[axes[1]] * std::cos(2 * phase));
+                                           amplitude_[axes[1]] * std::sin(phase));
     };
     double phase = lo + phase_step * (progress - integral[segment]) /
                             (integral[segment + 1] - integral[segment]);
@@ -484,9 +488,9 @@ void TrackingController::ComputeReference(double elapsed) {
     }
 
     const std::array<double, 2> tangent{
-        amplitude_[axes[0]] * std::cos(phase), 2 * amplitude_[axes[1]] * std::cos(2 * phase)};
+        amplitude_[axes[0]] * std::cos(phase), -amplitude_[axes[1]] * std::sin(phase)};
     const std::array<double, 2> curvature{
-        -amplitude_[axes[0]] * std::sin(phase), -4 * amplitude_[axes[1]] * std::sin(2 * phase)};
+        -amplitude_[axes[0]] * std::sin(phase), -amplitude_[axes[1]] * std::cos(phase)};
     const double tangent_norm = std::hypot(tangent[0], tangent[1]);
     double log_rate_derivative =
         -(tangent[0] * curvature[0] + tangent[1] * curvature[1]) / (tangent_norm * tangent_norm);
@@ -503,13 +507,16 @@ void TrackingController::ComputeReference(double elapsed) {
     const double phase_acceleration =
         rate * ramp_rate + log_rate_derivative * phase_rate * phase_rate;
 
-    toe_reference_ = center_;
+    // Start on the ellipse at the measured entry pose without a position jump.
+    // Its geometric center is entry_position_[v] - amplitude_[v].
+    toe_reference_ = entry_position_;
+    toe_reference_[axes[0]] += amplitude_[axes[0]] * std::sin(phase);
+    toe_reference_[axes[1]] += amplitude_[axes[1]] * (std::cos(phase) - 1);
     toe_velocity_reference_.fill(0);
     toe_acceleration_reference_.fill(0);
 
     for (int component = 0; component < 2; ++component) {
         const int axis = axes[component];
-        toe_reference_[axis] += amplitude_[axis] * std::sin((component + 1) * phase);
         toe_velocity_reference_[axis] = tangent[component] * phase_rate;
         toe_acceleration_reference_[axis] = curvature[component] * phase_rate * phase_rate +
                                             tangent[component] * phase_acceleration;
@@ -582,13 +589,16 @@ bool TrackingController::ComputeJointReference() {
 
 bool TrackingController::ComputeDynamicsTorque(
     const std::array<double, 3>& joint_position, const std::array<double, 3>& joint_velocity) {
-    auto acceleration = joint_acceleration_reference_;
     const bool ctc = method_ == TrackingMethod::CTC;
+    auto acceleration = joint_acceleration_reference_;
     if (ctc) {
-        for (int joint = 0; joint < 3; ++joint)
-            acceleration[joint] +=
-                ctc_kp_[joint] * (joint_reference_[joint] - joint_position[joint]) +
-                ctc_kd_[joint] * (joint_velocity_reference_[joint] - joint_velocity[joint]);
+        // Correct acceleration before the measured-state inverse dynamics.
+        // MIT/RMD damping remains a separate, explicitly configured motor setting.
+        for (int joint = 0; joint < 3; ++joint) {
+            const double position_error = joint_reference_[joint] - joint_position[joint];
+            const double velocity_error = joint_velocity_reference_[joint] - joint_velocity[joint];
+            acceleration[joint] += ctc_kp_[joint] * position_error + ctc_kd_[joint] * velocity_error;
+        }
     }
     auto& torque = ctc ? ctc_torque_ : inverse_dynamics_torque_;
     torque = backend_->InverseDynamics(ctc ? joint_position : joint_reference_,
@@ -608,6 +618,7 @@ void TrackingController::Compute(double time,
     const std::array<double, 3>& gravity_torque,
     const std::array<double, 9>& jacobian,
     const std::array<double, 3>& toe_position,
+    std::array<double, 3>& position_reference,
     std::array<double, 3>& torque) {
     if (!std::isfinite(time) || time < started_)
         throw std::runtime_error("invalid tracking time");
@@ -678,14 +689,16 @@ void TrackingController::Compute(double time,
     if (!ik_failed_ && !checking_)
         ilc_.Compute(time - started_);
 
-    for (int joint = 0; joint < 3; ++joint) {
-        double effort = gravity_torque[joint] - kd_motor_[joint] * joint_velocity[joint];
+    // Cartesian torque control follows the measured joints without adding a
+    // second joint position servo. A latched HOLD uses its captured position.
+    position_reference = (ik_failed_ || checking_) ? joint_reference_ : joint_position;
 
-        if (ik_failed_ || checking_) {
-            effort += kp_motor_[joint] * (joint_reference_[joint] - joint_position[joint]);
-        } else if (method_ == TrackingMethod::CTC) {
+    for (int joint = 0; joint < 3; ++joint) {
+        double effort = gravity_torque[joint];
+
+        if (!ik_failed_ && !checking_ && method_ == TrackingMethod::CTC) {
             effort = ctc_torque_[joint];
-        } else {
+        } else if (!ik_failed_ && !checking_) {
             if (inverse_dynamics_enabled())
                 effort += id_alpha_ * (inverse_dynamics_torque_[joint] - gravity_torque[joint]);
 
@@ -703,15 +716,14 @@ void TrackingController::Compute(double time,
     }
 
     if (ilc_.enabled() && !ik_failed_ && !checking_) {
-        std::array<double, 3> position_error, velocity_error, toe_error;
+        std::array<double, 3> position_error, toe_error;
 
         for (int i = 0; i < 3; ++i) {
             position_error[i] = joint_reference_[i] - joint_position[i];
-            velocity_error[i] = joint_velocity_reference_[i] - joint_velocity[i];
             toe_error[i] = toe_reference_[i] - toe_position[i];
         }
 
-        ilc_.Record(position_error, velocity_error, numeric::Norm(toe_error), torque_saturated_);
+        ilc_.Record(position_error, numeric::Norm(toe_error), torque_saturated_);
     }
 }
 }  // namespace qhrr05

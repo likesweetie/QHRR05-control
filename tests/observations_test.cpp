@@ -24,8 +24,8 @@ int main() {
         Check(!qhrr05::CoordinatesValid(observed.coordinate_valid),
             "raw encoder implied calibrated joint zero");
         data.coordinate_valid.fill(true);
-        data.position_offset = {1, 2, 3};
-        Check(qhrr05::ReadObservation(data).position[1] == 2, "joint frame conversion lost");
+        data.feedback[1].position = 2;
+        Check(qhrr05::ReadObservation(data).position[1] == 2, "motor C3 coordinates were not used directly");
         data.valid[1] = 0;
         Check(!qhrr05::ReadObservation(data).position_velocity,
             "invalid axis was hidden by other valid axes");
@@ -37,7 +37,12 @@ int main() {
         data.valid[0] = JointVelocity;
         Check(qhrr05::ReadObservation(data).velocity_valid,
             "velocity channel depends on unrelated position availability");
+        data.valid[0] = EncoderPosition;
+        Check(qhrr05::ReadObservation(data).position_valid,
+            "position-only damping depends on motor velocity availability");
         data.feedback[0].velocity = std::numeric_limits<double>::quiet_NaN();
+        Check(qhrr05::ReadObservation(data).position_valid,
+            "MIT position observations depend on motor velocity");
         Check(
             !qhrr05::ReadObservation(data).position_velocity, "nonfinite feedback appeared valid");
         std::cout

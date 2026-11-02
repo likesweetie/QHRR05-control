@@ -10,7 +10,9 @@ struct MitCommand {
     double velocity = 0;  // rad/s
     double kp = 0;  // Nm/rad
     double kd = 0;  // Nm*s/rad
-    double tau_ff = 0;  // Nm; this platform accepts zero only.
+    double tau_ff = 0;  // Nm; native torque reference and Damping output-shaft effort.
+    bool rmd_torque = false;  // RMD A1; MIT kp/kd/velocity must be zero.
+    std::uint16_t rmd_damping_constant = 0;  // Firmware level 0..100; not MIT kd.
 };
 
 struct MotorFeedback {
@@ -54,7 +56,9 @@ enum class TransportFault : int {
     CommandTimeout,
     FeedbackTimeout,
     EnableTimeout,
-    InvalidCommand
+    InvalidCommand,
+    ZeroSetTimeout,
+    ZeroSetMismatch
 };
 
 inline const char* DriveStateName(DriveState state) {
@@ -83,11 +87,15 @@ inline const char* TransportFaultName(TransportFault fault) {
         return "motor enable/feedback timeout";
     case TransportFault::InvalidCommand:
         return "invalid motor command";
+    case TransportFault::ZeroSetTimeout:
+        return "C3 zero-set response/feedback timeout";
+    case TransportFault::ZeroSetMismatch:
+        return "unexpected or mismatched C3 zero-set response";
     }
     throw std::invalid_argument("invalid transport fault");
 }
 
-enum class ZeroSetPhase : int { Idle, Waiting, Seeking, Backoff, Complete, Cancelled, Fault };
+enum class ZeroSetPhase : int { Idle, Waiting, Seeking, SettingZero, Backoff, Complete, Cancelled, Fault };
 enum class ZeroSetFailure : int {
     None,
     Timeout,
@@ -110,6 +118,8 @@ inline const char* ZeroSetPhaseName(ZeroSetPhase phase) {
         return "WAITING FOR MOTOR FEEDBACK";
     case ZeroSetPhase::Seeking:
         return "SEEKING STOP";
+    case ZeroSetPhase::SettingZero:
+        return "WAITING FOR C3 ZERO SET";
     case ZeroSetPhase::Backoff:
         return "BACKOFF";
     case ZeroSetPhase::Complete:
@@ -146,7 +156,7 @@ struct ZeroSetTelemetry {
     int axis = 0;
     bool required = false;
     std::array<bool, 3> calibrated{};
-    std::array<double, 3> offset{};
+    std::array<double, 3> position{};  // Requested motor C3 coordinate, not a host offset.
     double travel_rad = 0, elapsed_sec = 0;
 };
 

@@ -22,8 +22,8 @@ public:
     void Update(const mjModel* model, mjData* data);
     MotorData ReadFeedback() const;
 
-    double torque_limit_nm() const {
-        return torque_max_;
+    double torque_limit_nm(int axis) const {
+        return torque_max_[axis];
     }
 
     bool require_zero_position_setup() const {
@@ -31,7 +31,7 @@ public:
     }
 
 private:
-    enum class MotorMode { Released, Enabled, MitControl };
+    enum class MotorMode { Released, Enabled, MitControl, RmdTorque };
 
     void Reply(int axis, const openrobot::Payload& bytes);
     int socket_ = -1;
@@ -46,9 +46,9 @@ private:
     std::array<double, 3> actual_kt_output_{}, gear_ratio_{}, pole_pairs_{}, electrical_zero_{};
     std::array<double, 3> reported_iq_{};
     double sensor_time_ = -1;
-    double velocity_max_ = 0, torque_max_ = 0, kt_output_ = 0;
-    unsigned kd_scale_ = 0;
-    openrobot::Payload rom_parameters_{};  // Simulated motor's C4 response.
+    std::array<double, 3> velocity_max_{}, torque_max_{}, kt_output_{};
+    std::array<unsigned, 3> kd_scale_{};
+    std::array<openrobot::Payload, 3> rom_parameters_{};  // Per-motor C4 responses.
     ShmData& shared_;
 };
 

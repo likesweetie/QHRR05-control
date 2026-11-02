@@ -14,6 +14,25 @@ SafetyLayer::SafetyLayer(const std::string& config_path) {
         throw std::runtime_error("invalid configured safety force limit");
 }
 
+void SafetyLayer::ValidateAnticoggingPhase(int axis, int order, double delta) const {
+    if (axis < 0 || axis >= 3 || (order != 21 && order != 36) ||
+        !std::isfinite(delta) ||
+        (std::abs(std::abs(delta) - .1) > 1e-12 &&
+            std::abs(std::abs(delta) - .25) > 1e-12 && std::abs(std::abs(delta) - .5) > 1e-12))
+        throw std::runtime_error("safety rejected anticogging phase: expected axis 0..2, order 21/36 and step +/-0.1, +/-0.25 or +/-0.5 rad");
+}
+
+void SafetyLayer::ValidateAnticoggingAmplitude(int axis, int order, double delta) const {
+    if (axis < 0 || axis >= 3 || (order != 21 && order != 36) ||
+        !std::isfinite(delta) || std::abs(std::abs(delta) - .01) > 1e-12)
+        throw std::runtime_error("safety rejected anticogging amplitude: expected axis 0..2, order 21/36 and step +/-0.01 motor Nm");
+}
+
+void SafetyLayer::ValidateRmdDampingConstant(double value) const {
+    if (!std::isfinite(value) || value < 0 || value > 100 || value != std::floor(value))
+        throw std::runtime_error("RMD damping constant must be an integer in [0, 100]");
+}
+
 void SafetyLayer::Validate(const ControlData& input, bool stopping, bool failed) const {
     if (stopping || failed)
         throw std::runtime_error("safety rejected request: session stopped or failed");

@@ -18,11 +18,12 @@ public:
         return kd_motor_;
     }
 
-    void Compute(const RobotModelState& state, double torque[3], double reference[3]) const;
+    void Compute(const RobotModelState& state, std::array<double, 3>& position_reference,
+        std::array<double, 3>& torque) const;
 
 private:
-    std::array<double, 3> kp_motor_, kd_motor_, task_stiffness_, desired_{};
-    std::array<double, 3> damping_ratio_, coulomb_ratio_, torque_limit_;
+    std::array<double, 3> kp_motor_, kd_motor_;
+    std::array<double, 3> coulomb_ratio_, torque_limit_;
     double alpha_;
     bool gravity_only_;
     bool friction_compensation_enabled_;

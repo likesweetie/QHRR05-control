@@ -10,7 +10,8 @@ struct JointObservation {
     std::array<double, 3> encoder{}, position{}, velocity{}, torque{};
     std::array<bool, 3> coordinate_valid{};
     std::array<std::uint64_t, 3> sequence{}, sample_ns{}, received_ns{};
-    bool position_velocity = false, velocity_valid = false, torque_valid = false, ready = false;
+    bool position_velocity = false, position_valid = false, velocity_valid = false;
+    bool torque_valid = false, ready = false;
 };
 
 inline bool HasSignals(const MotorData& data, int axis, std::uint32_t signals) {
@@ -20,26 +21,26 @@ inline bool HasSignals(const MotorData& data, int axis, std::uint32_t signals) {
 
 inline JointObservation ReadObservation(const MotorData& data) {
     JointObservation result;
-    result.position_velocity = result.velocity_valid = result.torque_valid = result.ready = true;
+    result.position_valid = result.velocity_valid = result.torque_valid = result.ready = true;
     result.coordinate_valid = data.coordinate_valid;
     result.sequence = data.received_sequence;
     result.sample_ns = data.measurement_ns;
     result.received_ns = data.received_ns;
     for (int i = 0; i < 3; ++i) {
         result.encoder[i] = data.feedback[i].position;
-        result.position[i] = data.position_offset[i] + result.encoder[i];
+        result.position[i] = result.encoder[i];
         result.velocity[i] = data.feedback[i].velocity;
         result.torque[i] = data.motor_torque[i];
         result.velocity_valid &=
             HasSignals(data, i, JointVelocity) && std::isfinite(result.velocity[i]);
-        result.position_velocity &= HasSignals(data, i, EncoderPosition | JointVelocity) &&
+        result.position_valid &= HasSignals(data, i, EncoderPosition) &&
                                     std::isfinite(result.encoder[i]) &&
-                                    std::isfinite(result.position[i]) &&
-                                    std::isfinite(result.velocity[i]);
+                                    std::isfinite(result.position[i]);
         result.torque_valid &=
             HasSignals(data, i, ConvertedTorque) && std::isfinite(result.torque[i]);
         result.ready &= data.enabled[i];
     }
+    result.position_velocity = result.position_valid && result.velocity_valid;
     return result;
 }
 

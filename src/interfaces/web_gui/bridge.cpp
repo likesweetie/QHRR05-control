@@ -47,7 +47,7 @@ template <class T, std::size_t N> std::string ArrayJson(const std::array<T, N>& 
 }  // namespace
 
 WebGuiBridge::WebGuiBridge(const std::string& shm_name, const std::string& control_config)
-    : mapping_(shm_name) {
+    : mapping_(shm_name), control_config_(control_config) {
     {
         auto& shm = *mapping_.get();
         // Immutable session metadata; do not acquire/repair the control mutex here.
@@ -110,6 +110,19 @@ std::string WebGuiBridge::Snapshot() {
 
     const auto now = shm_utils::MonotonicNs();
     const bool ready = !stopping && !failed && control.published_ns;
+    const bool reaction_active = control.mode == 2 && control.drive_state == DriveState::Active;
+    const auto stale = [now](std::uint64_t stamp) {
+        return !stamp || stamp > now || now - stamp > 500000000;
+    };
+    const bool reaction_stale = stale(control.published_ns) ||
+        std::any_of(motors.received_ns.begin(), motors.received_ns.end(), stale);
+    const auto& force = control.magnetic.estimated_force;
+    const double force_magnitude = std::hypot(force[0], force[1], force[2]);
+    const bool reaction_valid = ready && reaction_active && !reaction_stale &&
+        control.magnetic.observer_valid && std::isfinite(force_magnitude);
+    const bool normal_valid = reaction_valid &&
+        (control.magnetic.phase == MagneticPhase::Following ||
+            control.magnetic.phase == MagneticPhase::Releasing);
     std::ostringstream out;
     out << std::boolalpha << "{\"type\":\"state\",\"ready\":" << ready
         << ",\"can_enabled\":" << can_enabled << ",\"stopping\":" << stopping
@@ -161,6 +174,13 @@ std::string WebGuiBridge::Snapshot() {
         << (control.mode == 2 && control.magnetic.observer_valid
                    ? Number(control.magnetic.estimated_normal_force)
                    : "null")
+        << ",\"reaction_force\":{\"valid\":" << reaction_valid
+        << ",\"status\":" << JsonString(!reaction_active ? "inactive"
+                : reaction_stale ? "stale" : reaction_valid ? "valid" : "invalid")
+        << ",\"xyz_n\":" << (reaction_valid ? ArrayJson(force) : "[null,null,null]")
+        << ",\"magnitude_n\":" << (reaction_valid ? Number(force_magnitude) : "null")
+        << ",\"normal_n\":"
+        << (normal_valid ? Number(control.magnetic.estimated_normal_force) : "null") << '}'
         << ",\"contact\":"
         << (simulation.published_ns ? (simulation.contact ? "true" : "false") : "null")
         << ",\"joystick_connected\":" << control.joystick_connected << ",\"toe_position\":[";
@@ -188,7 +208,7 @@ std::string WebGuiBridge::Snapshot() {
         };
         out << (i ? "," : "") << "{\"position\":"
             << (motors.coordinate_valid[i]
-                       ? value(motors.position_offset[i] + feedback.position, EncoderPosition)
+                       ? value(feedback.position, EncoderPosition)
                        : "null")
             << ",\"velocity\":" << value(feedback.velocity, JointVelocity)
             << ",\"current\":" << value(feedback.current, MotorCurrent)
@@ -198,7 +218,7 @@ std::string WebGuiBridge::Snapshot() {
             << ",\"coordinate_valid\":" << motors.coordinate_valid[i] << ",\"position_status\":"
             << JsonString(
                    motors.coordinate_valid[i]
-                       ? status(EncoderPosition, feedback.position + motors.position_offset[i])
+                       ? status(EncoderPosition, feedback.position)
                        : "uncalibrated")
             << ",\"velocity_status\":" << JsonString(status(JointVelocity, feedback.velocity))
             << ",\"current_status\":" << JsonString(status(MotorCurrent, feedback.current))
@@ -211,10 +231,13 @@ std::string WebGuiBridge::Snapshot() {
             << ",\"velocity\":" << Number(motors.command[i].velocity)
             << ",\"kp\":" << Number(motors.command[i].kp)
             << ",\"kd\":" << Number(motors.command[i].kd)
-            << ",\"tau_ff\":" << Number(motors.command[i].tau_ff) << '}'
+            << ",\"tau_ff\":" << Number(motors.command[i].tau_ff)
+            << ",\"rmd_torque\":" << motors.command[i].rmd_torque
+            << ",\"rmd_damping_constant\":" << motors.command[i].rmd_damping_constant << '}'
             << ",\"reference\":" << Number(motors.reference[i])
             << ",\"supported\":" << motors.supported[i] << ",\"valid\":" << motors.valid[i]
-            << ",\"position_offset\":" << Number(motors.position_offset[i])
+            << ",\"zero_applied_position\":" << Number(motors.zero_applied_position[i])
+            << ",\"zero_completed_sequence\":" << motors.zero_completed_sequence[i]
             << ",\"measurement_ns\":" << motors.measurement_ns[i]
             << ",\"tx_frames\":" << motors.tx_frames[i] << ",\"rx_frames\":" << motors.rx_frames[i]
             << ",\"invalid_frames\":" << motors.invalid_frames[i]
@@ -240,21 +263,138 @@ std::string WebGuiBridge::Snapshot() {
     return out.str();
 }
 
+void WebGuiBridge::SampleTelemetry(bool cogging, bool tracking) {
+    MotorData motors;
+    ControlData control;
+    {
+        auto& shm = *mapping_.get();
+        shm_utils::TryLock lock(shm);
+        if (!lock) {
+            if (cogging) ++cogging_read_misses_;
+            if (tracking) ++tracking_read_misses_;
+            return;
+        }
+        if (shm.stopping || shm.failed) {
+            tracking_active_ = false;
+            tracking_problem_ = "세션 종료";
+            return;
+        }
+        motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+        if (tracking)
+            control = shm.control[shm.control_sequence % kShmBufferCount];
+    }
+    for (int axis = 0; cogging && axis < 3; ++axis) {
+        if (!motors.running || !HasSignals(motors, axis, EncoderPosition) ||
+            !motors.measurement_ns[axis] || !std::isfinite(motors.feedback[axis].position) ||
+            motors.received_sequence[axis] == cogging_sequence_[axis])
+            continue;
+        cogging_sequence_[axis] = motors.received_sequence[axis];
+        std::ostringstream row;
+        row << '[' << axis << ',' << Number(motors.measurement_ns[axis] / 1e6) << ','
+            << motors.received_sequence[axis] << ',' << Number(motors.feedback[axis].position)
+            << ',' << (HasSignals(motors, axis, JointVelocity)
+                           ? Number(motors.feedback[axis].velocity) : "null")
+            << ',' << motors.zero_completed_sequence[axis] << ']';
+        cogging_samples_.push_back(row.str());
+    }
+    if (!tracking)
+        return;
+    const auto motion = control.active_motion_sequence;
+    const auto plane = int(control.tracking_plane);
+    if (motion != tracking_motion_sequence_ || plane != tracking_plane_) {
+        tracking_samples_.clear();
+        tracking_sequence_.fill(0);
+        tracking_motion_sequence_ = motion;
+        tracking_plane_ = plane;
+        tracking_active_ = false;
+    }
+    const bool was_active = tracking_active_;
+    tracking_active_ = false;
+    tracking_problem_ = "트래킹 실행 대기";
+    if (control.mode != 3 || control.drive_state != DriveState::Active || !motors.running)
+        return;
+    if (control.tracking_checking || control.tracking_ik_failed) {
+        tracking_problem_ = control.tracking_checking ? "궤적 검사 중" : "IK 실패 · 위치 유지 중";
+        return;
+    }
+    std::array<double, 3> q;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!motors.coordinate_valid[axis] || !HasSignals(motors, axis, EncoderPosition) ||
+            !std::isfinite(motors.feedback[axis].position) ||
+            !std::isfinite(control.tracking_position_reference[axis])) {
+            tracking_problem_ = "보정된 관절 피드백 대기";
+            return;
+        }
+        q[axis] = motors.feedback[axis].position;
+    }
+    tracking_active_ = true;
+    tracking_problem_.clear();
+    if (!was_active) {
+        ++tracking_generation_;
+        tracking_samples_.clear();
+        tracking_sequence_.fill(0);
+    }
+    if (tracking_sequence_ == motors.received_sequence)
+        return;
+    tracking_sequence_ = motors.received_sequence;
+    const auto actual = tracking_model_->Evaluate(q, false).position;
+    std::ostringstream row;
+    row << '[' << Number(shm_utils::MonotonicNs() / 1e6);
+    for (double value : actual) row << ',' << Number(value);
+    for (double value : control.tracking_position_reference) row << ',' << Number(value);
+    row << ']';
+    tracking_samples_.push_back(row.str());
+}
+
 void WebGuiBridge::Run() {
     auto next_sample = shm_utils::MonotonicNs();
+    auto next_cogging = next_sample;
+    bool cogging = false, tracking = false;
+    std::string input;
 
     for (;;) {
         const auto now = shm_utils::MonotonicNs();
+        if ((cogging || tracking) && now >= next_cogging) {
+            SampleTelemetry(cogging, tracking);
+            next_cogging += 2000000;  // 500 Hz observer; never replay a missed read cycle.
+            const auto done = shm_utils::MonotonicNs();
+            if (next_cogging <= done)
+                next_cogging = done + 2000000;
+        }
 
         if (now >= next_sample) {
             std::cout << Snapshot() << std::endl;
+            if (cogging) {
+                std::cout << "{\"type\":\"cogging-samples\",\"read_hz\":500,\"publish_hz\":20,"
+                             "\"read_misses\":" << cogging_read_misses_ << ",\"samples\":[";
+                for (std::size_t i = 0; i < cogging_samples_.size(); ++i)
+                    std::cout << (i ? "," : "") << cogging_samples_[i];
+                std::cout << "]}" << std::endl;
+                cogging_samples_.clear();
+            }
+            if (tracking) {
+                std::cout << "{\"type\":\"tracking-samples\",\"read_hz\":500,\"active\":"
+                          << (tracking_active_ ? "true" : "false")
+                          << ",\"problem\":" << JsonString(tracking_problem_)
+                          << ",\"motion_sequence\":" << tracking_motion_sequence_
+                          << ",\"generation\":" << tracking_generation_
+                          << ",\"plane\":" << tracking_plane_
+                          << ",\"read_misses\":" << tracking_read_misses_ << ",\"samples\":[";
+                for (std::size_t i = 0; i < tracking_samples_.size(); ++i)
+                    std::cout << (i ? "," : "") << tracking_samples_[i];
+                std::cout << "]}" << std::endl;
+                tracking_samples_.clear();
+            }
             next_sample = now + 50000000;  // 20 Hz observer; not the control scheduler.
         }
 
         pollfd descriptor{STDIN_FILENO, POLLIN, 0};
         const auto current = shm_utils::MonotonicNs();
-        const int timeout = current >= next_sample ? 0 : int((next_sample - current) / 1000000);
-        const int result = ::poll(&descriptor, 1, timeout);
+        const auto wake = (cogging || tracking) ? std::min(next_sample, next_cogging) : next_sample;
+        const auto remaining = current >= wake ? 0 : wake - current;
+        const timespec timeout{static_cast<time_t>(remaining / 1000000000),
+            static_cast<long>(remaining % 1000000000)};
+        const int result = ::ppoll(&descriptor, 1, &timeout, nullptr);
 
         if (result < 0 && errno == EINTR)
             continue;
@@ -275,7 +415,36 @@ void WebGuiBridge::Run() {
             if (count < 0)
                 throw std::runtime_error("web GUI command read failed");
 
-            throw std::runtime_error("telemetry bridge is read-only; send commands through Input");
+            input.append(bytes, count);
+            if (input.size() > 256)
+                throw std::runtime_error("telemetry subscription is too long");
+            for (auto end = input.find('\n'); end != std::string::npos; end = input.find('\n')) {
+                const auto line = input.substr(0, end);
+                input.erase(0, end + 1);
+                if (line != "cogging 0" && line != "cogging 1" &&
+                    line != "tracking 0" && line != "tracking 1")
+                    throw std::runtime_error("telemetry bridge is read-only; send commands through Input");
+                if (line.compare(0, 7, "cogging") == 0) {
+                    cogging = line == "cogging 1";
+                    cogging_sequence_.fill(0);
+                    cogging_samples_.clear();
+                    cogging_read_misses_ = 0;
+                } else {
+                    tracking = line == "tracking 1";
+                    tracking_sequence_.fill(0);
+                    tracking_samples_.clear();
+                    tracking_read_misses_ = 0;
+                    tracking_active_ = false;
+                    if (tracking && !tracking_model_) {
+                        // Keep model initialization diagnostics off the JSON pipe.
+                        auto* output = std::cout.rdbuf(std::cerr.rdbuf());
+                        try { tracking_model_ = MakeMujocoBackend(control_config_); }
+                        catch (...) { std::cout.rdbuf(output); throw; }
+                        std::cout.rdbuf(output);
+                    }
+                }
+                next_cogging = shm_utils::MonotonicNs();
+            }
         }
 
         if (!std::cout)

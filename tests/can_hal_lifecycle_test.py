@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
 
             assert shm.exists()
             time.sleep(0.15)
-            assert 'MIT position / tau_ff=0' in log_path.read_text()
+            assert 'CAN HAL | vcan0 | MIT C0 / RMD A1' in log_path.read_text()
 
             if action == 'collision':
                 original = shm.stat().st_ino
@@ -142,8 +142,51 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
         assert not shm.exists()
         print('PASS: explicit startup failure for', key)
 
-    # A real C4 mismatch must stop startup instead of accepting a stale/default profile.
+    # Reproduce the physical 1.298 vs C5-quantized 1.296 case. Both exact
+    # representations are valid before writing; neither needs another ROM write.
     config.write_text(json.dumps(settings))
+    original_profile = profile.read_text()
+    requested = json.loads(original_profile)
+    requested['mit']['torque_max_nm'] = 33
+    requested['mit']['kt_output_nm_a'] = 1.298
+    profile.write_text(json.dumps(requested))
+    for label, kt_raw in [('configured', 1298), ('previously_written', 1296)]:
+        log_path = directory / f'existing-{label}.log'
+        with socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as peer:
+            peer.bind(('vcan0',))
+            peer.settimeout(0.1)
+            with log_path.open('w') as log:
+                process = subprocess.Popen(
+                    [str(daemon), '--config', str(manifest), '--no-terminals'],
+                    stdout=log, stderr=subprocess.STDOUT)
+            deadline = time.monotonic() + 5
+            try:
+                while log_path.read_text().count('C5 skipped motor_id=') < 3:
+                    assert process.poll() is None, log_path.read_text()
+                    assert time.monotonic() < deadline, log_path.read_text()
+                    try:
+                        identifier, length, payload = struct.unpack('=IB3x8s', peer.recv(16))
+                    except TimeoutError:
+                        continue
+                    assert payload[0] not in (0xC0, 0xC1, 0xC5), payload.hex()
+                    if payload[0] == 0xC2:
+                        reply = bytes([0xC2]) + bytes(7)
+                    elif payload[0] == 0xC4:
+                        reply = bytes([0xC4, 45, 33, kt_raw & 255, kt_raw >> 8, 0x84, 3, 1])
+                    else:
+                        raise AssertionError(payload.hex())
+                    peer.send(struct.pack('=IB3x8s', identifier, 8, reply))
+                process.terminate()
+                assert process.wait(timeout=5) == 0, log_path.read_text()
+                assert not shm.exists()
+                print('PASS: exact', label, 'C4 starts without C5 or drive activation')
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+    profile.write_text(original_profile)
+
+    # A real C4 mismatch must be written and then verified, never accepted.
     log_path = directory / 'rom-mismatch.log'
 
     with socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as peer:
@@ -172,16 +215,76 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-can-life-') as directory:
                 identifier, length, payload = struct.unpack('=IB3x8s', frame)
                 assert payload[0] not in (0xC0, 0xC1), 'Enabled before ROM verification'
 
-                if payload[0] == 0xC4:
-                    # Config expects V_MAX=45; this motor reports 46.
-                    reply = bytes([0xC4, 46, 53, 0xA0, 5, 0x84, 3, 1])
+                if payload[0] == 0xC2:
+                    peer.send(struct.pack('=IB3x8s', identifier, 8, bytes([0xC2]) + bytes(7)))
+                elif payload[0] == 0xC4:
+                    reply = bytes([0xC4, 46, 54, 0xDC, 5, 0xE8, 3, 2])
+                    peer.send(struct.pack('=IB3x8s', identifier, 8, reply))
+                elif payload[0] == 0xC5:
+                    assert payload == bytes([0xC5, 45, 53, 160, 0, 0x84, 3, 1]), payload
+                    # Report different values for every field, including LE/scaled ones.
+                    reply = bytes([0xC4, 46, 54, 0xDC, 5, 0xE8, 3, 2])
                     peer.send(struct.pack('=IB3x8s', identifier, 8, reply))
                     break
 
             assert process.wait(timeout=5) == 1, log_path.read_text()
-            assert 'MIT C4 profile mismatch' in log_path.read_text()
+            contents = log_path.read_text()
+            assert 'MIT C4 profile mismatch; refusing enable' in contents, contents
+            assert 'C5 verification failed' in contents and 'FOC OFF' in contents, contents
+            axis = ['HR', 'HP', 'KP'][identifier - 0x141]
+            assert f'interface=vcan0 axis={axis} motor_id={identifier - 0x140} SID=0x{identifier:X}' in contents, contents
+            assert str(profile) in contents, contents
+            for detail in [
+                'velocity_max_rad_s (V_MAX, rad/s): actual=46 expected=45 [MISMATCH]',
+                'torque_max_nm (T_MAX, Nm): actual=54 expected=53 [MISMATCH]',
+                'kt_output_nm_a (Kt_out, Nm/A): actual=1.500 expected=1.440 [MISMATCH]',
+                'gear_ratio: actual=10.00 expected=9.00 [MISMATCH]',
+                'kd_scale: actual=2 expected=1 [MISMATCH]',
+                'actual bytes: C4 2E 36 DC 05 E8 03 02',
+                'expected bytes: C4 2D 35 A0 05 84 03 01',
+            ]:
+                assert detail in contents, contents
             assert not shm.exists(), log_path.read_text()
-            print('PASS: ROM mismatch fails explicitly without a SHM/default profile')
+            print('PASS: rejected C5 write reports motor, config, decoded differences and raw bytes')
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+
+    # A lost C5 reply may trigger read retries, never repeated EEPROM writes.
+    log_path = directory / 'c5-timeout.log'
+    with socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as peer:
+        peer.bind(('vcan0',))
+        peer.settimeout(0.1)
+        with log_path.open('w') as log:
+            process = subprocess.Popen(
+                [str(daemon), '--config', str(manifest), '--no-terminals'],
+                stdout=log, stderr=subprocess.STDOUT)
+        writes = [0, 0, 0]
+        reads = 0
+        deadline = time.monotonic() + 5
+        try:
+            while process.poll() is None:
+                assert time.monotonic() < deadline, log_path.read_text()
+                try:
+                    identifier, length, payload = struct.unpack('=IB3x8s', peer.recv(16))
+                except TimeoutError:
+                    continue
+                assert payload[0] not in (0xC0, 0xC1), 'Enabled before C5 verification'
+                if payload[0] == 0xC2:
+                    peer.send(struct.pack('=IB3x8s', identifier, 8, bytes([0xC2]) + bytes(7)))
+                elif payload[0] == 0xC5:
+                    writes[identifier - 0x141] += 1
+                elif payload[0] == 0xC4:
+                    reads += 1
+                    if not writes[identifier - 0x141]:
+                        reply = bytes([0xC4, 46, 54, 0xDC, 5, 0xE8, 3, 2])
+                        peer.send(struct.pack('=IB3x8s', identifier, 8, reply))
+            assert process.returncode == 1, log_path.read_text()
+            assert writes == [1, 1, 1] and reads > 0, (writes, reads)
+            assert 'C5/C4 verification timeout' in log_path.read_text()
+            assert not shm.exists()
+            print('PASS: C5 timeout retries only reads, blocks enable and cleans up')
         finally:
             if process.poll() is None:
                 process.terminate()

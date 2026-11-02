@@ -472,7 +472,7 @@ void LoggerService::CheckTriggers(const LogFrame& f) {
         present.insert("SAFETY_STOP");
     if (f.model.valid) {
         for (int i = 0; i < 3; ++i) {
-            const double q = f.motor.feedback[i].position + f.motor.position_offset[i];
+            const double q = f.motor.feedback[i].position;
             if (f.model.joint_max[i] > f.model.joint_min[i] &&
                 (q < f.model.joint_min[i] || q > f.model.joint_max[i]))
                 present.insert("JOINT_LIMIT");

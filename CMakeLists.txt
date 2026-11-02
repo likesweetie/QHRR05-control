@@ -36,6 +36,8 @@ target_link_libraries(robot_model PUBLIC mujoco)
 add_library(motion_controllers STATIC
     src/motion_controllers/numerics/math.cpp
     src/motion_controllers/homing_controller.cpp
+    src/motion_controllers/damping_controller.cpp
+    src/motion_controllers/two_order_anticogging.cpp
     src/motion_controllers/zero_set_controller.cpp
     src/motion_controllers/gravity_compensation_controller.cpp
     src/motion_controllers/tracking_controller.cpp
@@ -168,6 +170,8 @@ if(BUILD_TESTING)
     set_tests_properties(zero_set_can PROPERTIES TIMEOUT 45)
     add_test(NAME launcher_autobuild COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/launcher_autobuild_test.py)
+    add_test(NAME prepare_can COMMAND python3
+        ${PROJECT_SOURCE_DIR}/tests/prepare_can_test.py)
     set_tests_properties(launcher_autobuild PROPERTIES TIMEOUT 120)
     add_test(NAME simulation_restart COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/simulation_restart_test.py)
@@ -244,9 +248,9 @@ if(BUILD_TESTING)
         python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/launcher_modes_test.py
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_simulation.sh)
     add_executable(can_control_integration_test tests/can_control_integration_test.cpp)
-    target_link_libraries(can_control_integration_test PRIVATE simulation_core)
+    target_link_libraries(can_control_integration_test PRIVATE simulation_core interfaces)
     set_target_properties(can_control_integration_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
-    foreach(tracking_variant IN ITEMS inverse_dynamics ctc impedance)
+    foreach(tracking_variant IN ITEMS inverse_dynamics ctc impedance rmd)
         set(tracking_test_args)
         set(tracking_test_name can_control_integration)
         if(NOT tracking_variant STREQUAL "inverse_dynamics")
@@ -271,6 +275,12 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
         python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/can_hal_lifecycle_test.py
         $<TARGET_FILE:can_hal> $<TARGET_FILE:daemon>)
+    add_executable(can_zero_set_test tests/can_zero_set_test.cpp)
+    target_link_libraries(can_zero_set_test PRIVATE motor_can_protocol pthread)
+    add_test(NAME can_zero_set COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_can_hal_vcan_test.sh
+        $<TARGET_FILE:can_zero_set_test> $<TARGET_FILE:can_hal>)
+    set_tests_properties(can_zero_set PROPERTIES TIMEOUT 15)
     add_test(NAME source_layout COMMAND python3 ${PROJECT_SOURCE_DIR}/tests/source_layout_test.py)
     add_executable(motion_numerics_test tests/motion_numerics_test.cpp
         src/motion_controllers/numerics/math.cpp)
@@ -302,6 +312,19 @@ if(BUILD_TESTING)
     add_executable(motion_controller_config_test tests/motion_controller_config_test.cpp)
     target_link_libraries(motion_controller_config_test PRIVATE motion_controllers)
     add_test(NAME motion_controller_config COMMAND motion_controller_config_test)
+    add_executable(joint_reference_test tests/joint_reference_test.cpp)
+    target_link_libraries(joint_reference_test PRIVATE motion_controllers)
+    add_test(NAME joint_reference COMMAND joint_reference_test
+        ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml)
+    add_executable(two_order_anticogging_test tests/two_order_anticogging_test.cpp)
+    target_link_libraries(two_order_anticogging_test PRIVATE control_core motor_can_protocol)
+    set_target_properties(two_order_anticogging_test PROPERTIES BUILD_RPATH "${MUJOCO_DIR}/lib")
+    add_test(NAME two_order_anticogging COMMAND two_order_anticogging_test
+        ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml
+        ${PROJECT_SOURCE_DIR}/models/qhrr-05/qhrr-05.xml)
+    add_executable(damping_controller_test tests/damping_controller_test.cpp)
+    target_link_libraries(damping_controller_test PRIVATE motion_controllers motor_can_protocol)
+    add_test(NAME damping_controller COMMAND damping_controller_test)
     add_executable(ball_following_test tests/ball_following_test.cpp)
     target_link_libraries(ball_following_test PRIVATE motion_controllers interfaces)
     target_include_directories(ball_following_test PRIVATE ${MUJOCO_DIR}/include)
@@ -315,6 +338,9 @@ if(BUILD_TESTING)
     add_test(NAME tracking_controller COMMAND tracking_controller_test
         ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml
         ${PROJECT_SOURCE_DIR}/models/qhrr-05/scene.xml)
+    add_test(NAME tracking_trajectory COMMAND tracking_controller_test
+        ${PROJECT_SOURCE_DIR}/tests/fixtures/control.yaml
+        ${PROJECT_SOURCE_DIR}/models/qhrr-05/scene.xml --trajectory-only)
     add_executable(shm_buffers_test tests/shm_buffers_test.cpp)
     target_link_libraries(shm_buffers_test PRIVATE qhrr05_common pthread)
     add_test(NAME shm_buffers COMMAND shm_buffers_test)

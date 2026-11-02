@@ -1,6 +1,6 @@
 #include <array>
 #include "motion_controllers/homing_controller.hpp"
-#include "control/limits.hpp"
+#include "control/control.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,11 +34,22 @@ std::array<double, 3> Joints(const YAML::Node& value, bool scalar = false) {
 
 HomingController::HomingController(const std::string& config_path) {
     const auto config = YAML::LoadFile(config_path);
+    const bool torque_ref_as_position = ReadTorqueRefAsPosition(config);
 
     if (config["robot"].as<std::string>() != "qhrr-05")
         throw std::runtime_error("only qhrr-05 is supported");
 
     const auto settings = config["homing"];
+    if (settings["torque_control"])
+        torque_control_ = settings["torque_control"].as<bool>();
+    differentiate_position_ = settings["differentiate_position"].as<bool>(false);
+    if (const auto lpf = config["homing_velocity_lpf"]) {
+        velocity_lpf_enabled_ = lpf["enabled"].as<bool>();
+        velocity_lpf_cutoff_hz_ = lpf["cutoff_hz"].as<double>();
+    }
+    if (velocity_lpf_enabled_ &&
+        (!std::isfinite(velocity_lpf_cutoff_hz_) || velocity_lpf_cutoff_hz_ <= 0))
+        throw std::runtime_error("homing_velocity_lpf.cutoff_hz must be positive and finite when enabled");
     torque_limit_ = ReadControlTorqueLimits(config);
     kp_ = Joints(settings["kp"], true);
     kd_ = Joints(settings["kd"], true);
@@ -49,14 +60,20 @@ HomingController::HomingController(const std::string& config_path) {
     if (!std::isfinite(duration_) || duration_ <= 0)
         throw std::runtime_error("homing duration must be positive and finite");
 
-    for (int i = 0; i < 3; ++i)
-        if (kp_[i] <= 0 || kd_[i] < 0)
-            throw std::runtime_error("kp must be positive and kd nonnegative");
+    for (int i = 0; i < 3; ++i) {
+        if (kp_[i] < 0 || kd_[i] < 0)
+            throw std::runtime_error("homing kp and kd must be nonnegative");
+        if (torque_ref_as_position && kp_[i] == 0)
+            throw std::runtime_error(
+                "homing.kp must be positive when torque_reference_mode=torque_ref_as_position");
+    }
 }
 
 void HomingController::Start(double time, const double position[3]) {
     start_time_ = time;
     std::copy_n(position, 3, initial_.begin());
+    initialized_.fill(false);
+    velocity_.fill(0);
 }
 
 HomingReference HomingController::Reference(double sim_time) const {
@@ -79,8 +96,10 @@ HomingReference HomingController::Reference(double sim_time) const {
 void HomingController::Compute(double time,
     const double position[3],
     const double velocity[3],
-    double torque[3],
-    double reference[3]) const {
+    const std::array<std::uint64_t, 3>& sequence,
+    const std::array<std::uint64_t, 3>& sample_ns,
+    std::array<double, 3>& position_reference,
+    std::array<double, 3>& torque) {
     if (!std::isfinite(time) || time < 0)
         throw std::runtime_error("invalid simulation time");
 
@@ -90,13 +109,39 @@ void HomingController::Compute(double time,
         if (!std::isfinite(position[i]) || !std::isfinite(velocity[i]))
             throw std::runtime_error("invalid joint input");
 
-        reference[i] = ref.position[i];
-        torque[i] =
-            kp_[i] * (ref.position[i] - position[i]) + kd_[i] * (ref.velocity[i] - velocity[i]);
-
-        if (!std::isfinite(torque[i]))
-            throw std::runtime_error("non-finite torque command");
-        torque[i] = std::clamp(torque[i], -torque_limit_[i], torque_limit_[i]);
+        position_reference[i] = ref.position[i];
+        if (torque_control_) {
+            if (!differentiate_position_ && !velocity_lpf_enabled_) {
+                velocity_[i] = velocity[i];
+            } else if (!initialized_[i] || sequence[i] != sequence_[i] || sample_ns[i] < sample_ns_[i]) {
+                const bool reset = !initialized_[i] || sequence[i] < sequence_[i] || sample_ns[i] <= sample_ns_[i];
+                if (reset) {
+                    // The first position sample only seeds the difference history.
+                    velocity_[i] = differentiate_position_ ? 0 : velocity[i];
+                } else {
+                    const double dt = (sample_ns[i] - sample_ns_[i]) / 1e9;
+                    const double raw = differentiate_position_
+                        ? (position[i] - previous_position_[i]) / dt : velocity[i];
+                    if (!std::isfinite(raw))
+                        throw std::runtime_error("non-finite homing velocity estimate");
+                    const double alpha = velocity_lpf_enabled_
+                        ? -std::expm1(-2 * 3.14159265358979323846 * velocity_lpf_cutoff_hz_ * dt) : 1;
+                    velocity_[i] += alpha * (raw - velocity_[i]);
+                }
+                previous_position_[i] = position[i];
+                sequence_[i] = sequence[i];
+                sample_ns_[i] = sample_ns[i];
+                initialized_[i] = true;
+            }
+            if (!std::isfinite(velocity_[i]))
+                throw std::runtime_error("non-finite filtered homing velocity");
+        }
+        // Optional host PD uses the selected measured/estimated velocity, never ref.velocity.
+        // TaskController disables MIT P/D; RMD keeps its configured damping.
+        torque[i] = torque_control_
+            ? std::clamp(kp_[i] * (ref.position[i] - position[i]) - kd_[i] * velocity_[i],
+                  -torque_limit_[i], torque_limit_[i])
+            : 0;
     }
 }
 }  // namespace qhrr05

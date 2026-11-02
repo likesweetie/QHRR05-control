@@ -31,6 +31,20 @@ int main(int argc, char** argv) {
             std::filesystem::absolute(std::filesystem::path(argv[2]).parent_path() /
                                       hal_config["motor_config"].as<std::string>())
                 .string();
+        auto motor_profile = YAML::LoadFile(hal_config["motor_config"].as<std::string>());
+        motor_profile["mit"]["torque_max_nm"] = 33;  // Keep sensor regression independent of live tuning.
+        hal_config["motor_config"] = (directory / "motor.yaml").string();
+        std::ofstream(hal_config["motor_config"].as<std::string>()) << motor_profile;
+        const auto profile = motor_profile["mit"];
+        const double torque_max = profile["torque_max_nm"].as<double>();
+        const auto initial_profile = openrobot::EncodeProfile(
+            profile["velocity_max_rad_s"].as<double>(), torque_max,
+            profile["kt_output_nm_a"].as<double>(), profile["gear_ratio"].as<double>(),
+            profile["kd_scale"].as<unsigned>());
+        // An already matching virtual motor retains its existing C4 Kt; no C5
+        // write means there is no extra input-side quantization at startup.
+        const double kt_output = (unsigned(initial_profile[3]) |
+                                  (unsigned(initial_profile[4]) << 8)) * .001;
         char error[1024]{};
         std::unique_ptr<mjModel, decltype(&mj_deleteModel)> model(
             mj_loadXML(argv[1], nullptr, error, sizeof(error)), mj_deleteModel);
@@ -40,7 +54,7 @@ int main(int argc, char** argv) {
         const std::array<double, 3> origin{0, .3, -1};
         const MitCommand command{.1, 0, 20, .3, 0};
         const auto decoded_command =
-            openrobot::DecodeMitCommand(openrobot::EncodeMitCommand(command, 45, 1), 45, 1);
+            openrobot::DecodeMitCommand(openrobot::EncodeMitCommand(command, 45, 1, torque_max), 45, 1, torque_max);
 
         for (int trial = 0; trial < 4; ++trial) {
             const bool enabled = trial != 0;
@@ -93,10 +107,23 @@ int main(int argc, char** argv) {
                 shm_utils::Lock lock(shm);
                 return shm.motors[shm.motor_sequence % kShmBufferCount];
             };
+            bool commanding = false;
+            const auto publish_command = [&] {
+                if (!commanding)
+                    return;
+                shm_utils::Lock lock(shm);
+                auto& target = shm_utils::Next(shm.motors, shm.motor_sequence);
+                target.command.fill(command);
+                target.command_enabled.fill(true);
+                target.command_published_ns = shm_utils::MonotonicNs();
+                ++target.command_sequence;
+                ++shm.motor_sequence;
+            };
             const auto service = [&](auto predicate) {
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 
                 while (!predicate()) {
+                    publish_command();
                     motors.Update(model.get(), data.get());
                     Require(
                         std::chrono::steady_clock::now() < deadline, "CAN sensor trial timed out");
@@ -110,20 +137,15 @@ int main(int argc, char** argv) {
                 return state.profile_verified[0] && state.profile_verified[1] &&
                        state.profile_verified[2];
             });
-            {
-                shm_utils::Lock lock(shm);
-                auto& targets = shm_utils::Next(shm.motors, shm.motor_sequence);
-                targets.command.fill(command);
-                targets.command_enabled.fill(true);
-                ++targets.command_sequence;
-                ++shm.motor_sequence;
-            }
+            commanding = true;
+            publish_command();
 
             service([&] {
                 return snapshot().received_sequence[2] >= 2;
             });
 
             for (int step = 0; step < 80; ++step) {
+                publish_command();
                 motors.Update(model.get(), data.get());
                 mj_step(model.get(), data.get());
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -139,16 +161,16 @@ int main(int argc, char** argv) {
                 const double actual_torque = data->qfrc_actuator[axis];
                 const double actual_kt = settings["motor"]["kt_motor_nm_a"][axis].as<double>() * 9;
                 const double expected_iq =
-                    enabled ? actual_torque / actual_kt + .4 : actual_torque / 1.44;
+                    enabled ? actual_torque / actual_kt + .4 : actual_torque / kt_output;
                 const double tolerance = noisy ? .2 : 33.0 / 2048;
                 Require(std::abs(measured.feedback[axis].current - expected_iq) <= tolerance,
                     "CAN Iq did not reflect sensor/current-model configuration");
                 Require(std::abs(measured.motor_torque[axis] -
-                                 measured.feedback[axis].current * 1.44) < 1e-12,
+                                 measured.feedback[axis].current * kt_output) < 1e-12,
                     "HAL did not calculate torque from the actual returned CAN Iq");
                 const double servo =
                     decoded_command.kp * (decoded_command.position - data->qpos[axis]) +
-                    decoded_command.kd * (decoded_command.velocity - data->qvel[axis]);
+                    decoded_command.kd * (decoded_command.velocity - data->qvel[axis]) + decoded_command.tau_ff;
                 Require(std::abs(data->ctrl[axis] - std::clamp(servo,
                                                         model->actuator_ctrlrange[2 * axis],
                                                         model->actuator_ctrlrange[2 * axis + 1])) <

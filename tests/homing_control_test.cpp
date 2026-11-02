@@ -50,10 +50,15 @@ int main(int argc, char** argv) {
 
         Require(rejected, "home outside joint limits must be rejected");
         const double duration = config["homing"]["duration_sec"].as<double>();
+        const auto original_home = YAML::Clone(config["homing"]["position_rad"]);
 
-        for (int scenario = 0; scenario < 2; ++scenario) {
-            if (scenario == 1)
-                config["homing"]["position_rad"] = YAML::Load("[.1,.6,-1.5]");
+        for (int scenario = 0; scenario < 6; ++scenario) {
+            config["homing"]["position_rad"] = scenario % 2
+                ? YAML::Load("[.1,.6,-1.5]") : YAML::Clone(original_home);
+            config["homing"]["torque_control"] = scenario >= 2;
+            config["homing"]["differentiate_position"] = scenario >= 4;
+            config["homing_velocity_lpf"]["enabled"] = scenario >= 4;
+            config["homing_velocity_lpf"]["cutoff_hz"] = 20;
 
             const auto home = qhrr05::ReadPosition(config["homing"]["position_rad"], model.get());
             save(config);
@@ -73,12 +78,29 @@ int main(int argc, char** argv) {
             }
 
             double max_torque = 0;
+            std::array<std::uint64_t, 3> sequence{}, sample_ns{};
 
             while (data->time < duration + 4) {
                 mj_forward(model.get(), data.get());
-                std::array<double, 3> reference;
-                controller.Compute(
-                    data->time, data->qpos, data->qvel, data->ctrl, reference.data());
+                std::array<double, 3> position_reference{}, torque{};
+                for (int i = 0; i < 3; ++i) {
+                    ++sequence[i];
+                    sample_ns[i] = static_cast<std::uint64_t>(std::llround(data->time * 1e9)) + 1;
+                }
+                controller.Compute(data->time, data->qpos, data->qvel, sequence, sample_ns,
+                    position_reference, torque);
+                for (int i = 0; i < 3; ++i) {
+                    const double kp = controller.kp()[i];
+                    const double limit = config["limits"]["torque_nm"][i].as<double>();
+                    const double position = position_reference[i] + torque[i] / kp;
+                    const MitCommand command = controller.torque_control()
+                        ? MitCommand{position_reference[i], 0, 0, 0, torque[i]}
+                        : MitCommand{std::clamp(position,
+                            data->qpos[i] - limit / kp, data->qpos[i] + limit / kp),
+                            0, kp, controller.kd()[i], 0};
+                    data->ctrl[i] = command.kp * (command.position - data->qpos[i]) -
+                                    command.kd * data->qvel[i] + command.tau_ff;
+                }
 
                 if (data->time == 0)
                     for (int i = 0; i < 3; ++i)

@@ -42,12 +42,12 @@ VirtualMotors::VirtualMotors(const std::string& hal_config_path,
         ids_[i] = 0x140 + ids[i];
     }
 
-    velocity_max_ = mit["velocity_max_rad_s"].as<double>();
-    torque_max_ = mit["torque_max_nm"].as<double>();
-    kt_output_ = mit["kt_output_nm_a"].as<double>();
-    kd_scale_ = mit["kd_scale"].as<unsigned>();
-    rom_parameters_ = openrobot::EncodeProfile(
-        velocity_max_, torque_max_, kt_output_, mit["gear_ratio"].as<double>(), kd_scale_);
+    velocity_max_.fill(mit["velocity_max_rad_s"].as<double>());
+    torque_max_.fill(mit["torque_max_nm"].as<double>());
+    kt_output_.fill(mit["kt_output_nm_a"].as<double>());
+    kd_scale_.fill(mit["kd_scale"].as<unsigned>());
+    rom_parameters_.fill(openrobot::EncodeProfile(
+        velocity_max_[0], torque_max_[0], kt_output_[0], mit["gear_ratio"].as<double>(), kd_scale_[0]));
 
     const auto simulation = YAML::LoadFile(simulation_config_path);
     const auto actual_motor = simulation["motor"];
@@ -212,7 +212,7 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
             if (reset)
                 iq_sensors_[i].Reset();
 
-            const double kt = iq_sensors_[i].enabled() ? actual_kt_output_[i] : kt_output_;
+            const double kt = iq_sensors_[i].enabled() ? actual_kt_output_[i] : kt_output_[i];
             const double iq_true = data->qfrc_actuator[i] / kt;
             const double theta_e = std::remainder(
                 pole_pairs_[i] * gear_ratio_[i] * data->qpos[i] + electrical_zero_[i],
@@ -251,8 +251,25 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
         std::copy_n(frame.data, 8, bytes.begin());
 
         if (bytes[0] == 0xC4)
-            Reply(axis, rom_parameters_);
-        else if (bytes[0] == 0xC1) {
+            Reply(axis, rom_parameters_[axis]);
+        else if (bytes[0] == 0xC5) {
+            // Firmware rejects ROM writes while active and replies with old values.
+            if (modes_[axis] == MotorMode::Released) {
+                const double ratio = (unsigned(bytes[5]) | (unsigned(bytes[6]) << 8)) * .01;
+                const double kt_input = (unsigned(bytes[3]) | (unsigned(bytes[4]) << 8)) * .001;
+                const double kt_output = kt_input > 0 ? kt_input * ratio
+                    : actual_kt_output_[axis] / gear_ratio_[axis] * ratio;
+                const unsigned scale = bytes[7] ? bytes[7] : kd_scale_[axis];
+                const auto profile = openrobot::EncodeProfile(
+                    bytes[1], bytes[2], kt_output, ratio, scale);
+                velocity_max_[axis] = bytes[1];
+                torque_max_[axis] = bytes[2];
+                kt_output_[axis] = (unsigned(profile[3]) | (unsigned(profile[4]) << 8)) * .001;
+                kd_scale_[axis] = scale;
+                rom_parameters_[axis] = profile;
+            }
+            Reply(axis, rom_parameters_[axis]);
+        } else if (bytes[0] == 0xC1) {
             if (modes_[axis] == MotorMode::Released) {
                 // Both bootstrap policies initialize an encoder reference. Enabling
                 // never changes it; only an explicit C3 can rebase the coordinates.
@@ -260,7 +277,7 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
                 modes_[axis] = MotorMode::Enabled;
             }
 
-            Reply(axis, {0xC1, std::uint8_t(kd_scale_)});
+            Reply(axis, {0xC1, std::uint8_t(kd_scale_[axis])});
         } else if (bytes[0] == 0xC2) {
             modes_[axis] = MotorMode::Released;
             targets_[axis] = {};
@@ -277,8 +294,28 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
                 modes_[axis] = MotorMode::Enabled;
 
             Reply(axis, {0xC3, 0, 0, 0, 0, 0, bytes[6], bytes[7]});
+        } else if (bytes[0] == 0xA1 || bytes[0] == 0x9C) {
+            if (bytes[0] == 0xA1) {
+                const unsigned raw = unsigned(bytes[4]) | (unsigned(bytes[5]) << 8);
+                const int current = raw >= 0x8000 ? int(raw) - 0x10000 : int(raw);
+                const unsigned damping = unsigned(bytes[6]) | (unsigned(bytes[7]) << 8);
+                if (bytes[1] || bytes[2] || bytes[3] || damping > 100 ||
+                    current < -2048 || current > 2048)
+                    throw std::runtime_error("unsupported virtual RMD torque payload");
+                if (zero_hold_remaining_[axis] <= 1e-12) {
+                    targets_[axis] = {0, 0, 0, 0,
+                        current * (33.0 / 2048.0) * kt_output_[axis], true};
+                    targets_[axis].rmd_damping_constant = static_cast<std::uint16_t>(damping);
+                    modes_[axis] = MotorMode::RmdTorque;
+                }
+            }
+            Reply(axis, openrobot::EncodeRmdFeedback({data->qpos[axis], data->qvel[axis],
+                iq_sensors_[axis].enabled() ? reported_iq_[axis]
+                    : data->qfrc_actuator[axis] / kt_output_[axis], 25},
+                gear_ratio_[axis], bytes[0]));
         } else if (bytes[0] == 0xC0) {
-            const auto target = openrobot::DecodeMitCommand(bytes, velocity_max_, kd_scale_);
+            const auto target = openrobot::DecodeMitCommand(
+                bytes, velocity_max_[axis], kd_scale_[axis], torque_max_[axis]);
 
             if (modes_[axis] != MotorMode::Released && zero_hold_remaining_[axis] <= 1e-12) {
                 targets_[axis] = target;
@@ -289,23 +326,29 @@ void VirtualMotors::Update(const mjModel* model, mjData* data) {
                 openrobot::EncodeFeedback({data->qpos[axis] - mit_origin_[axis],
                     data->qvel[axis],
                     iq_sensors_[axis].enabled() ? reported_iq_[axis]
-                                                : data->qfrc_actuator[axis] / kt_output_,
+                                                : data->qfrc_actuator[axis] / kt_output_[axis],
                     25}));
         } else
             throw std::runtime_error(
                 "unsupported virtual motor command: " + std::to_string(bytes[0]));
     }
 
-    // Only received CAN targets drive the torque actuators. FF is not used.
+    // Only received CAN targets drive the actuators, including quantized torque FF.
     for (int i = 0; i < 3; ++i) {
         const auto& target = targets_[i];
         const double torque =
             modes_[i] == MotorMode::MitControl
                 ? target.kp * (target.position - (data->qpos[i] - mit_origin_[i])) +
-                      target.kd * (target.velocity - data->qvel[i])
-                : 0;
-        const double minimum = std::max(-torque_max_, model->actuator_ctrlrange[2 * i]);
-        const double maximum = std::min(torque_max_, model->actuator_ctrlrange[2 * i + 1]);
+                      target.kd * (target.velocity - data->qvel[i]) + target.tau_ff
+                : modes_[i] == MotorMode::RmdTorque
+                    // Ideal passive interpretation of the documented current/rps damping;
+                    // the raw firmware level is not an MIT Nm*s/rad gain.
+                    ? target.tau_ff - target.rmd_damping_constant *
+                          (data->qvel[i] * gear_ratio_[i] / (2 * 3.14159265358979323846)) * kt_output_[i]
+                    : 0;
+        const double limit = modes_[i] == MotorMode::RmdTorque ? 33 * kt_output_[i] : torque_max_[i];
+        const double minimum = std::max(-limit, model->actuator_ctrlrange[2 * i]);
+        const double maximum = std::min(limit, model->actuator_ctrlrange[2 * i + 1]);
         data->ctrl[i] = std::clamp(torque, minimum, maximum);
     }
 }
@@ -370,7 +413,7 @@ ControlData UpdateControlIO(ShmData& shm,
         }
 
     } else if (!can_feedback) {
-        // Preserve explicit direct-torque simulation feedback; no model publication.
+        // Read the direct simulation state; motor commands are applied below.
         mj_forward(model, data);
     }
     ControlData control;
@@ -400,7 +443,7 @@ ControlData UpdateControlIO(ShmData& shm,
             next.feedback_published_ns = state.published_ns;
 
             for (int i = 0; i < 3; ++i) {
-                next.feedback[i] = {data->qpos[i] - next.position_offset[i],
+                next.feedback[i] = {data->qpos[i],
                     data->qvel[i],
                     0,  // No current measurement in explicit direct-torque debug mode.
                     25};
@@ -426,10 +469,19 @@ ControlData UpdateControlIO(ShmData& shm,
         if (!std::isfinite(motors.debug_torque[i]) || !std::isfinite(motors.reference[i]))
             throw std::runtime_error("non-finite joint output");
 
-        if (!can_feedback)
-            data->ctrl[i] = std::clamp(motors.command_enabled[i] ? motors.debug_torque[i] : 0.0,
+        if (!can_feedback) {
+            const auto& command = motors.command[i];
+            for (double value : {command.position, command.velocity, command.kp,
+                     command.kd, command.tau_ff})
+                if (!std::isfinite(value))
+                    throw std::runtime_error("non-finite simulated motor command");
+            const double effort = command.kp * (command.position - data->qpos[i]) +
+                                  command.kd * (command.velocity - data->qvel[i]) +
+                                  command.tau_ff;
+            data->ctrl[i] = std::clamp(motors.command_enabled[i] ? effort : 0.0,
                 model->actuator_ctrlrange[2 * i],
                 model->actuator_ctrlrange[2 * i + 1]);
+        }
 
         reference[i] = motors.reference[i];
     }

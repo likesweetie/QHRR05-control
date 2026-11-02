@@ -132,7 +132,10 @@ Joystick::Joystick(const char* config_path, ShmData* shared_memory)
 
 void Joystick::initialize() {
     running_ = false;
+    TryConnect();
+}
 
+void Joystick::TryConnect() {
     axes_.fill(0.0f);
     buttons_.fill(false);
 
@@ -140,21 +143,20 @@ void Joystick::initialize() {
         axes_[trigger_axes_[i]] = trigger_rest_[i];
 
     js_ = open(device_id_.c_str(), O_RDONLY | O_NONBLOCK);
+    reconnect_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
 
     if (js_ == -1) {
-        std::cerr << "Failed to open joystick device: " << device_id_ << ", errno: " << errno
-                  << ", message: " << std::strerror(errno) << std::endl;
-        throw std::runtime_error("joystick device open failed");
+        std::cerr << "[joystick] open " << device_id_ << " failed: " << std::strerror(errno)
+                  << "; retry in 1 s" << std::endl;
+    } else {
+        std::cout << "Joystick device opened: " << device_id_ << std::endl;
     }
-
-    std::cout << "Joystick device opened: " << device_id_ << std::endl;
-    Publish();
+    Publish(js_ != -1);
 }
 
 void Joystick::start() {
-    if (js_ == -1) {
-        throw std::runtime_error("joystick device is not open");
-    }
+    if (thread_)
+        throw std::runtime_error("joystick reader is already started");
 
     running_ = true;
 
@@ -229,40 +231,49 @@ void* Joystick::thread_function_wrapper(void* context) {
 }
 
 void* Joystick::loop() {
-    while (running_.load()) {
-        js_event event;
-
-        /*
-         * O_NONBLOCK에서는 큐가 비어 있으면 read()가 -1을 반환하고
-         * errno가 EAGAIN/EWOULDBLOCK가 될 수 있습니다.
-         */
-        const ssize_t bytes = read(js_, &event, sizeof(event));
-
-        if (bytes == sizeof(event)) {
-            processEvent_(event);
-
-            try {
-                Publish();
-            } catch (const std::exception& error) {
-                std::cerr << "[joystick] " << error.what() << std::endl;
-                break;
+    try {
+        while (running_.load()) {
+            if (js_ == -1) {
+                if (std::chrono::steady_clock::now() >= reconnect_at_)
+                    TryConnect();
+                else
+                    usleep(10000);
+                continue;
             }
-        } else if (bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            /*
-             * 이벤트가 없는 정상 상태입니다.
-             * CPU 점유율을 줄이려면 짧게 sleep을 넣는 것이 좋습니다.
-             */
-            usleep(1000);
-        } else if (bytes == -1) {
-            std::cerr << "Error reading joystick event: " << std::strerror(errno) << std::endl;
-            break;
-        } else {
-            std::cerr << "Partial joystick event read. bytes = " << bytes << std::endl;
-            break;
+
+            js_event event;
+            const ssize_t bytes = read(js_, &event, sizeof(event));
+            if (bytes == sizeof(event)) {
+                processEvent_(event);
+                Publish();
+            } else if (bytes == -1 && errno == EINTR) {
+                continue;
+            } else if (bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                usleep(1000);
+            } else {
+                if (bytes == -1)
+                    std::cerr << "[joystick] read " << device_id_ << " failed: " << std::strerror(errno);
+                else
+                    std::cerr << "[joystick] device disconnected; read bytes=" << bytes;
+                std::cerr << "; retry in 1 s" << std::endl;
+                close(js_);
+                js_ = -1;
+                axes_.fill(0);
+                buttons_.fill(false);
+                Publish(false);
+                reconnect_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            }
         }
+    } catch (const std::exception& error) {
+        // Shared-memory/session failures are not joystick disconnects.
+        std::cerr << "[joystick] " << error.what() << std::endl;
     }
 
     running_ = false;
+    if (js_ != -1) {
+        close(js_);
+        js_ = -1;
+    }
 
     try {
         Publish(false);

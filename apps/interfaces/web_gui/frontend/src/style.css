@@ -22,6 +22,44 @@
   --shadow: 0 14px 38px rgba(10, 21, 48, 0.08);
 }
 
+.cogging-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.analysis-intro { color: var(--slate); line-height: 1.6; margin: 0 0 20px; }
+.analysis-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.analysis-controls label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; font-weight: 650; }
+.analysis-controls input:not([type="checkbox"]), .analysis-controls select {
+  width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--hairline-strong);
+  border-radius: 6px; background: var(--surface-soft); color: var(--ink);
+}
+.analysis-controls .analysis-check { flex-direction: row; align-items: center; padding-top: 24px; }
+.analysis-check input { width: 18px; height: 18px; accent-color: var(--primary); }
+.analysis-actions, .analysis-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 18px; }
+.analysis-legend { gap: 24px; font-size: 13px; color: var(--slate); }
+.analysis-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.analysis-legend i { display: inline-block; width: 20px; height: 3px; }
+.cogging-axis .metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 18px; }
+.analysis-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.analysis-chart { margin: 0; min-width: 0; padding: 12px 8px; background: var(--surface-soft); border: 1px solid var(--hairline); border-radius: 6px; }
+.analysis-chart figcaption { padding: 0 8px 6px; font-size: 13px; font-weight: 700; }
+.analysis-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.analysis-grid line { stroke: var(--hairline); stroke-width: 1; }
+.analysis-grid text, .analysis-axis-label { font-size: 13px; fill: var(--slate); }
+.analysis-wait { padding: 24px; text-align: center; color: var(--slate); }
+.analysis-wait progress { width: min(100%, 450px); accent-color: var(--primary); }
+.analysis-warning { padding: 10px 14px; color: #8b4600; background: var(--yellow); border-radius: 6px; font-size: 13px; line-height: 1.5; }
+.analysis-peaks { width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 13px; }
+.analysis-peaks caption { text-align: left; padding: 10px 0; color: var(--slate); }
+.analysis-peaks th, .analysis-peaks td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+@media (max-width: 980px) {
+  .analysis-chart-grid { grid-template-columns: minmax(0, 1fr); }
+  .analysis-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .analysis-controls { grid-template-columns: minmax(0, 1fr); }
+  .analysis-controls .analysis-check { padding-top: 0; }
+  .cogging-axis .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .menubar { flex-wrap: wrap; }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -109,6 +147,13 @@ select {
   max-width: 1480px;
   margin: 0 auto 14px;
   padding: 0 28px;
+  background: var(--navy);
+}
+
+.cogging-axis .table-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
+@media (max-width: 620px) {
+  .cogging-axis .metric-grid.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analysis-grid text, .analysis-axis-label { font-size: 20px; }
 }
 
 .menu-link {
@@ -136,9 +181,14 @@ select {
   grid-template-columns: minmax(280px, 1fr) minmax(320px, 0.9fr);
   grid-template-areas:
     "machine machine"
+    "rmd rmd"
+    "anticogging anticogging"
     "policy-command policy-command"
     "bus command"
     "imu imu"
+    "reaction reaction"
+    "ilc ilc"
+    "trackingerror trackingerror"
     "motors motors"
     "nodes nodes"
     "frames frames";
@@ -149,6 +199,22 @@ select {
 .shm-grid {
   grid-template-columns: 1fr;
   gap: 16px;
+}
+
+.tracking-error-panel { grid-area: trackingerror; }
+.reaction-force-panel { grid-area: reaction; }
+.ilc-panel { grid-area: ilc; }
+.ilc-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: center; gap: 16px; }
+.ilc-controls label { display: grid; gap: 8px; min-width: 0; font-weight: 600; }
+.ilc-controls label span, .ilc-controls output { color: var(--muted); font-size: 12px; font-weight: 400; }
+.ilc-controls input { width: 100%; min-width: 0; }
+.tracking-error-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.tracking-error-charts.stale { opacity: .5; }
+.tracking-legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 16px; font-size: 12px; }
+.tracking-error-summary { margin-bottom: 12px; }
+@media (max-width: 760px) {
+  .tracking-error-charts { grid-template-columns: 1fr; }
+  .ilc-controls { grid-template-columns: 1fr; }
 }
 
 .panel {
@@ -171,6 +237,27 @@ select {
 .policy-command-panel {
   grid-area: policy-command;
 }
+
+.anticogging-panel { grid-area: anticogging; }
+.rmd-panel { grid-area: rmd; }
+.rmd-damping-control { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.rmd-damping-control label { display: grid; gap: 6px; font-size: 13px; }
+.rmd-damping-control input { max-width: 180px; }
+.rmd-damping-control output { align-self: center; font-variant-numeric: tabular-nums; }
+.phase-step-selector { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; font-size: 13px; font-weight: 650; }
+.phase-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.phase-axis { min-width: 0; padding: 14px; border: 1px solid var(--hairline); border-radius: 6px; }
+.phase-axis > strong { display: block; margin-bottom: 12px; }
+.phase-control { margin-top: 12px; }
+.phase-control label, .phase-applied, .amplitude-applied { display: block; font-size: 12px; color: var(--slate); }
+.amplitude-stepper output { font-size: 20px; }
+.phase-stepper { display: flex; align-items: stretch; margin: 6px 0; }
+.phase-stepper output { flex: 1; padding: 8px 12px; min-width: 0; font-size: 24px; font-variant-numeric: tabular-nums; background: var(--surface-soft); border: 1px solid var(--hairline-strong); border-radius: 5px 0 0 5px; }
+.phase-stepper output small { font-size: 12px; }
+.phase-arrows { display: flex; flex-direction: column; }
+.phase-arrows button { flex: 1; min-width: 44px; min-height: 27px; background: var(--surface); border: 1px solid var(--hairline-strong); color: var(--primary); cursor: pointer; }
+.phase-arrows button:disabled { opacity: .4; cursor: default; }
+@media (max-width: 620px) { .phase-grid { grid-template-columns: minmax(0, 1fr); } .phase-arrows button { min-height: 44px; } }
 
 .machine-panel {
   grid-area: machine;
@@ -1299,10 +1386,15 @@ td code,
     grid-template-columns: 1fr;
     grid-template-areas:
       "machine"
+      "rmd"
+      "anticogging"
       "policy-command"
       "bus"
       "command"
       "imu"
+      "reaction"
+      "ilc"
+      "trackingerror"
       "motors"
       "nodes"
       "frames";

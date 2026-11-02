@@ -25,6 +25,7 @@ public:
         const std::array<double, 3>& gravity_torque,
         const std::array<double, 9>& jacobian,
         const std::array<double, 3>& toe_position,
+        std::array<double, 3>& position_reference,
         std::array<double, 3>& torque);
 
     const std::array<double, 3>& kp_motor() const {
@@ -73,6 +74,10 @@ public:
 
     TrackingMethod method() const {
         return method_;
+    }
+
+    TrackingILC& ilc() {
+        return ilc_;
     }
 
     const TrackingILC& ilc() const {
@@ -135,7 +140,7 @@ private:
         std::array<double, 3>& result);
 
     std::array<double, 3> kp_motor_, kd_motor_, stiffness_, damping_, torque_limit_;
-    std::array<double, 3> center_{}, toe_reference_{}, toe_velocity_reference_{};
+    std::array<double, 3> entry_position_{}, toe_reference_{}, toe_velocity_reference_{};
     std::array<double, 3> toe_acceleration_reference_{};
     std::array<double, 3> joint_reference_{}, joint_velocity_reference_{};
     std::array<double, 3> joint_acceleration_reference_{}, inverse_dynamics_torque_{};

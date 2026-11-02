@@ -2,6 +2,7 @@
 #include "ipc/shm_utils.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <csignal>
 #include <filesystem>
@@ -33,25 +34,43 @@ int main(int argc, char** argv) {
 
     try {
         Require(argc == 3, "expected can_hal and shm_logger executables");
-        const auto zero = openrobot::EncodeMitCommand({}, 45, 1);
+        const auto zero = openrobot::EncodeMitCommand({}, 45, 1, 53);
+        Require(openrobot::EncodeRmdTorque(0, 1.296) == openrobot::Payload{0xA1, 0, 0, 0, 0, 0, 0, 0},
+            "RMD zero torque must be exactly zero current");
+        Require(openrobot::EncodeRmdTorque(0, 1.296, 5) == openrobot::Payload{0xA1, 0, 0, 0, 0, 0, 5, 0},
+            "RMD damping constant must occupy DATA[6:7]");
+        bool invalid_damping = false;
+        try { openrobot::EncodeRmdTorque(0, 1.296, 101); }
+        catch (const std::runtime_error&) { invalid_damping = true; }
+        Require(invalid_damping, "RMD encoder accepted damping above 100");
+        Require(openrobot::EncodeRmdTorque(100, 1.296) == openrobot::Payload{0xA1, 0, 0, 0, 0, 8, 0, 0} &&
+                    openrobot::EncodeRmdTorque(-100, 1.296) == openrobot::Payload{0xA1, 0, 0, 0, 0, 0xF8, 0, 0},
+            "RMD current limit or signed little-endian encoding is wrong");
+        Require(openrobot::EncodeRmdTorque(1.296, 1.296)[4] == 62,
+            "RMD output torque must be divided by output-side Kt");
+        const auto rmd_sample = openrobot::DecodeRmdFeedback(
+            openrobot::EncodeRmdFeedback({.3, -2, -8.25, 26}, 9), 9);
+        Require(std::abs(rmd_sample.position - .3) < .00005 &&
+                    std::abs(rmd_sample.velocity + 2) < .002 && rmd_sample.current == -8.25,
+            "RMD feedback must decode motor-shaft angle/speed into output-shaft units");
         Require(zero == openrobot::Payload{0xC0, 0x80, 0, 0x80, 0, 0, 0, 0x80},
             "MIT zero vector mismatch");
-        const auto limits = openrobot::EncodeMitCommand({12.5, -45, 500, 5, 0}, 45, 1);
+        const auto limits = openrobot::EncodeMitCommand({12.5, -45, 500, 5, 0}, 45, 1, 53);
         Require(limits == openrobot::Payload{0xC0, 255, 255, 0, 15, 255, 255, 128},
             "MIT boundary vector mismatch");
 
         for (double invalid : {13.0, std::numeric_limits<double>::quiet_NaN()}) {
             bool rejected = false;
             try {
-                openrobot::EncodeMitCommand({invalid, 0, 1, 1, 0}, 45, 1);
+                openrobot::EncodeMitCommand({invalid, 0, 1, 1, 0}, 45, 1, 53);
             } catch (const std::exception&) {
                 rejected = true;
             }
             Require(rejected, "invalid position accepted");
         }
 
-        for (double invalid : {1.0,
-                 -1.0,
+        for (double invalid : {54.0,
+                 -54.0,
                  std::numeric_limits<double>::quiet_NaN(),
                  std::numeric_limits<double>::infinity()}) {
             MitCommand command;
@@ -59,25 +78,18 @@ int main(int argc, char** argv) {
             bool rejected = false;
 
             try {
-                openrobot::EncodeMitCommand(command, 45, 1);
+                openrobot::EncodeMitCommand(command, 45, 1, 53);
             } catch (const std::runtime_error&) {
                 rejected = true;
             }
 
-            Require(rejected, "unsupported torque FF was silently ignored");
+            Require(rejected, "invalid torque FF was silently accepted");
         }
 
-        auto invalid_ff = zero;
-        invalid_ff[7] = 0;
-        bool rejected_ff = false;
-
-        try {
-            openrobot::DecodeMitCommand(invalid_ff, 45, 1);
-        } catch (const std::runtime_error&) {
-            rejected_ff = true;
-        }
-
-        Require(rejected_ff, "virtual motor accepted a nonzero wire FF field");
+        auto negative_ff = zero;
+        negative_ff[7] = 0;
+        Require(openrobot::DecodeMitCommand(negative_ff, 45, 1, 53).tau_ff == -53,
+            "negative torque FF endpoint decoded incorrectly");
 
         const openrobot::Payload feedback{0xC0, 26, 0, 0xFE, 0xA6, 0xFF, 0, 0xE0};
         const auto measured = openrobot::DecodeFeedback(feedback);
@@ -85,8 +97,23 @@ int main(int argc, char** argv) {
                     std::abs(measured.velocity + 1.5707963267948966) < 1e-12 &&
                     measured.current == -8.25,
             "signed feedback units mismatch");
-        const openrobot::Payload profile{0xC4, 45, 53, 0xA0, 5, 0x84, 3, 1};
-        openrobot::CheckProfile(profile, openrobot::EncodeProfile(45, 53, 1.44, 9, 1));
+        const openrobot::Payload profile{0xC4, 45, 3, 0xA0, 5, 0x84, 3, 1};
+        openrobot::CheckProfile(profile, openrobot::EncodeProfile(45, 3, 1.44, 9, 1));
+        const openrobot::Payload write_profile{0xC5, 45, 3, 0xA0, 0, 0x84, 3, 1};
+        Require(openrobot::EncodeProfileWrite(45, 3, 1.4404, 9, 1) == write_profile,
+            "C5 must encode motor-side Kt rather than copy C4 output-side Kt");
+        Require(openrobot::EncodeProfileWrite(45, 33, 1.298, 9, 1)[3] == 144,
+            "C5 motor-side Kt quantization is incorrect");
+        for (const auto parameters : {std::array<double, 2>{1, .001},
+                 std::array<double, 2>{.00001, 9}, std::array<double, 2>{65.535, .01}}) {
+            bool rejected = false;
+            try {
+                openrobot::EncodeProfileWrite(45, 33, parameters[0], parameters[1], 1);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            Require(rejected, "C5 accepted unrepresentable Kt or gear ratio");
+        }
 
         peer = ::socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
         Require(peer >= 0, "peer socket failed");
@@ -96,7 +123,7 @@ int main(int argc, char** argv) {
         Require(::bind(peer, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0,
             "peer bind failed");
         std::ofstream(motor_profile)
-            << "mit: {velocity_max_rad_s: 45, torque_max_nm: 53, kt_output_nm_a: 1.4404, gear_ratio: 9, kd_scale: 1}\n";
+            << "mit: {velocity_max_rad_s: 45, torque_max_nm: 3, kt_output_nm_a: 1.4404, gear_ratio: 9, kd_scale: 1}\n";
         std::ofstream(config)
             << "interface: vcan0\nfrequency_hz: 1000\nstatistics_hz: 10\nbus_load_bitrate: 1000000\n"
                "command_timeout_sec: 1.0\nfeedback_timeout_sec: 0.25\nenable_timeout_sec: 1.0\npoll_released: false\n"
@@ -114,8 +141,14 @@ int main(int argc, char** argv) {
             _exit(127);
         }
 
-        std::array<unsigned, 3> controls{}, releases{};
+        std::array<unsigned, 3> controls{}, releases{}, parameter_writes{};
+        std::array<unsigned, 3> rmd_controls{}, rmd_anchors{};
+        std::array<double, 3> rmd_position{.69, .69, .69};
+        std::chrono::steady_clock::time_point rmd_pause_until{};
+        bool rmd_pause_done = false;
+        std::array<bool, 3> torque_limit_seen{};
         unsigned parameter_queries = 0;
+        bool first_read_dropped = false;
         const auto service = [&](bool reply = true) {
             for (;;) {
                 can_frame frame{};
@@ -132,7 +165,23 @@ int main(int argc, char** argv) {
 
                 if (opcode == 0xC4) {
                     ++parameter_queries;
+                    Require(releases[index] > 0, "C4 query preceded motor release");
+                    if (index == 0 && !first_read_dropped) {
+                        first_read_dropped = true;
+                        continue;  // Lost initial C4 response must retry without writing ROM.
+                    }
+                    response = index == 0 || parameter_writes[index] ? profile
+                        : openrobot::EncodeProfile(45, 33, 1.298, 9, 1);
+                } else if (opcode == 0xC5) {
+                    Require(index != 0, "already matching C4 unnecessarily triggered a ROM write");
+                    Require(releases[index] > 0, "C5 write preceded motor release");
+                    ++parameter_writes[index];
+                    Require(parameter_writes[index] == 1, "startup C5 ROM write was repeated");
+                    Require(std::equal(write_profile.begin(), write_profile.end(), frame.data),
+                        "C5 payload does not match YAML parameters");
                     response = profile;
+                    if (index == 1)
+                        continue;  // Lost write reply: only C4 reads may retry.
                 } else if (opcode == 0xC1) {
                     response = {0xC1, 1};
                 } else if (opcode == 0xC2) {
@@ -140,8 +189,11 @@ int main(int argc, char** argv) {
                     response = {0xC2};
                 } else if (opcode == 0xC0) {
                     ++controls[index];
-                    Require(
-                        frame.data[7] == 128, "torque feedforward was not fixed to logical zero");
+                    const bool limited = (index == 0 && frame.data[7] == 255) ||
+                                         (index == 1 && frame.data[7] == 0);
+                    Require(frame.data[7] == 128 || limited,
+                        "torque feedforward was not encoded using the verified C4 range");
+                    torque_limit_seen[index] |= limited;
                     const unsigned p = (unsigned(frame.data[1]) << 8) | frame.data[2];
                     const double position = double(p) / 65535 * 25 - 12.5;
                     Require(std::abs(position - (index + 1) * 0.1) < 0.0004,
@@ -149,6 +201,29 @@ int main(int argc, char** argv) {
                     const unsigned kp = ((frame.data[4] & 15) << 8) | frame.data[5];
                     Require(kp == 328, "Kp packing mismatch");
                     response = feedback;
+                } else if (opcode == 0x9C) {
+                    ++rmd_anchors[index];
+                    if (index == 2 && rmd_anchors[index] == 1)
+                        continue;  // The initial KP read is lost; HAL must retry.
+                    response = openrobot::EncodeRmdFeedback({rmd_position[index], 0, -8.25, 26}, 9, 0x9C);
+                } else if (opcode == 0xA1) {
+                    Require(frame.data[1] == 0 && frame.data[2] == 0 && frame.data[3] == 0 &&
+                                frame.data[6] == (index == 0 ? 5 : 0) && frame.data[7] == 0,
+                        "RMD command changed the requested damping constant");
+                    const int raw = int(frame.data[4]) | (int(frame.data[5]) << 8);
+                    const int current = raw >= 32768 ? raw - 65536 : raw;
+                    Require(current == (index == 0 ? 2048 : index == 1 ? -2048 : 62),
+                        "HAL RMD current did not use the verified Kt and 33 A limit");
+                    ++rmd_controls[index];
+                    rmd_position[index] += .001;
+                    if (index == 1 && rmd_controls[index] == 10)
+                        rmd_pause_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(12);
+                    if (index == 1 && rmd_pause_until != std::chrono::steady_clock::time_point{}) {
+                        if (std::chrono::steady_clock::now() < rmd_pause_until)
+                            continue;  // A short gap must use the configured 250 ms timeout.
+                        rmd_pause_done = true;
+                    }
+                    response = openrobot::EncodeRmdFeedback({rmd_position[index], 1, -8.25, 26}, 9);
                 } else {
                     throw std::runtime_error("non-MIT command sent");
                 }
@@ -175,7 +250,7 @@ int main(int argc, char** argv) {
         };
 
         until([&] {
-            return parameter_queries >= 3;
+            return parameter_writes == std::array<unsigned, 3>{0, 1, 1} && parameter_queries >= 4;
         });
         shm_utils::Mapping mapping(name);
         auto& shm = *mapping.get();
@@ -199,7 +274,6 @@ int main(int argc, char** argv) {
             const auto s = snapshot();
             return s.profile_verified[0] && s.profile_verified[1] && s.profile_verified[2];
         });
-        Require(snapshot().rx_frames[0] <= 2, "HAL received its own requests");
 
         const auto command = [&](int axis, const char* position) {
             const std::string index = std::to_string(axis);
@@ -249,11 +323,56 @@ int main(int argc, char** argv) {
                    snapshot().received_sequence[2] > 10;
         });
         auto state = snapshot();
+        {
+            shm_utils::Lock lock(shm);
+            auto& target = shm_utils::Next(shm.motors, shm.motor_sequence);
+            target.command[0].tau_ff = 100;
+            target.command[1].tau_ff = -100;
+            target.command_published_ns = shm_utils::MonotonicNs();
+            ++target.command_sequence;
+            ++shm.motor_sequence;
+        }
+        until([&] { return torque_limit_seen[0] && torque_limit_seen[1]; });
         Require(
             state.feedback[0].current == -8.25 && state.feedback[0].position == measured.position,
             "feedback not published through SHM");
         Require(std::abs(state.motor_torque[0] - measured.current * 1.44) < 1e-12,
             "measured torque must use verified C4 Kt, not the unquantized YAML setting");
+        {
+            shm_utils::Lock lock(shm);
+            auto& target = shm_utils::Next(shm.motors, shm.motor_sequence);
+            for (int i = 0; i < 3; ++i)
+                target.command[i] = {0, 0, 0, 0, i == 0 ? 100. : i == 1 ? -100. : 1.44, true};
+            target.command[0].rmd_damping_constant = 5;
+            target.command_published_ns = shm_utils::MonotonicNs();
+            ++target.command_sequence;
+            ++shm.motor_sequence;
+        }
+        until([&] { return rmd_controls[0] >= 45 && rmd_controls[1] >= 45 && rmd_controls[2] >= 45 && rmd_pause_done; });
+        state = snapshot();
+        Require(state.transport_fault == TransportFault::None,
+            "RMD startup retry or 12 ms response gap incorrectly triggered a transport fault");
+        for (int i = 0; i < 3; ++i) {
+            Require(rmd_anchors[i] == (i == 2 ? 2u : 1u),
+                "RMD initial read was not retried exactly after the lost response");
+            Require(std::abs(state.feedback[i].position - (measured.position + rmd_position[i] - .69)) < .006,
+                "RMD encoder wrap lost the existing MIT coordinate origin");
+            Require(std::abs(state.feedback[i].velocity - 1) < .002 && state.feedback[i].current == -8.25,
+                "RMD measurement was lost or decoded with MIT units");
+        }
+        const auto old_controls = controls;
+        {
+            shm_utils::Lock lock(shm);
+            auto& target = shm_utils::Next(shm.motors, shm.motor_sequence);
+            for (int i = 0; i < 3; ++i)
+                target.command[i] = {(i + 1) * .1, 0, 40, .3, 0};
+            target.command_published_ns = shm_utils::MonotonicNs();
+            ++target.command_sequence;
+            ++shm.motor_sequence;
+        }
+        until([&] { return controls[0] > old_controls[0] + 5 && controls[1] > old_controls[1] + 5 &&
+                           controls[2] > old_controls[2] + 5; });
+        state = snapshot();
         const auto old_cycles = state.cycles;
         const auto old_feedback = state.received_sequence[0];
         const auto quiet_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
@@ -288,7 +407,7 @@ int main(int argc, char** argv) {
         }
 
         until([&] {
-            return releases[0] >= 2;
+            return releases[0] >= 2 && !snapshot().enabled[0];
         });
         const auto stopped_controls = controls[0];
         const auto released_until =

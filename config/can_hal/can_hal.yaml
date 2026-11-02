@@ -3,7 +3,7 @@ interface: can0
 frequency_hz: 500.0
 statistics_hz: 0.5
 # Reference bits/s for the load estimate; does not configure the CAN interface.
-bitrate: 1000000  # Expected physical bus speed; vcan has no physical bitrate.
+bitrate: 1000000  # run_daemon.sh configures this physical bus speed; vcan has no bitrate.
 bus_load_bitrate: 1000000
 motor_ids: [1, 2, 3]  # HR, HP, KP; SID = 0x140 + ID.
 # Resolved relative to this YAML, independently of the process working directory.

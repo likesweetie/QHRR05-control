@@ -76,7 +76,6 @@ int main(int argc, char** argv) {
         config["model_path"] = std::filesystem::absolute(argv[2]).string();
         config["control"]["frequency_hz"] = 100;
         config["homing"]["duration_sec"] = .12;
-        config["gravity_compensation"]["damping_ratio"] = .5;
         config["gravity_compensation"]["friction_compensation"]["coulomb_ratio"] = .85;
         const auto save = [&] {
             std::ofstream output(path);
@@ -205,10 +204,18 @@ int main(int argc, char** argv) {
             Require(after.mode == 5 && after.damping_toe_reference == initial_toe,
                 "damping moved its captured toe reference");
 
+            // The current damping controller uses the user's 20 Hz cutoff.
+            const double sample_dt = model->opt.timestep;
+            const double filtered_velocity = .01 / sample_dt *
+                -std::expm1(-2 * 3.141592653589793 * 20 * sample_dt);
             for (int i = 0; i < 3; ++i)
-                Require(std::abs(Motors(shm).debug_torque[i] + data->qvel[i]) < 1e-12 &&
-                            Motors(shm).reference[i] == initial[i],
-                    "damping is not pure -1*dq or introduced position stiffness");
+                Require(std::abs(Motors(shm).debug_torque[i] + filtered_velocity) < 1e-9 &&
+                            Motors(shm).command[i].velocity == 0 &&
+                            Motors(shm).command[i].kp == 0 &&
+                            Motors(shm).command[i].kd == 0 &&
+                            Motors(shm).command[i].tau_ff == Motors(shm).debug_torque[i] &&
+                            Motors(shm).reference[i] == data->qpos[i],
+                    "damping did not filter position-derived velocity or send direct torque with zero gains");
 
             qhrr05::ResetSimulation(initial, model.get(), data.get());
             data->time = 1000;
@@ -246,6 +253,16 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 3; ++i)
                 Require(std::abs(Motors(shm).reference[i] - home[i]) < 1e-12,
                     "homing stopped with a frozen simulator");
+            const auto home_motors = Motors(shm);
+            for (int i = 0; i < 3; ++i) {
+                const double kp = config["homing"]["kp"][i].as<double>();
+                const double error_limit = config["limits"]["torque_nm"][i].as<double>() / kp;
+                const double expected = std::clamp(home[i],
+                    initial[i] - error_limit, initial[i] + error_limit);
+                Require(std::abs(home_motors.command[i].position - expected) < 1e-12 &&
+                            home_motors.debug_torque[i] == 0,
+                    "homing position target was dropped or mixed into torque");
+            }
 
             for (int i = 0; i < 3; ++i)
                 data->qvel[i] = .2 * (i + 1);
@@ -268,14 +285,15 @@ int main(int argc, char** argv) {
             mju_zero(gravity->qvel, model->nv);
             mj_forward(model.get(), gravity.get());
             for (int i = 0; i < 3; ++i) {
-                const double damping = config["gravity_compensation"]["kd_motor"][i].as<double>();
                 const double drag_compensation =
-                    .5 * model->dof_damping[i] * data->qvel[i] +
                     .85 * model->dof_frictionloss[i] * std::tanh(data->qvel[i] / .03);
                 Require(std::abs(Motors(shm).debug_torque[i] -
-                                 (gravity->qfrc_bias[i] + drag_compensation -
-                                     damping * data->qvel[i])) < 1e-10,
+                                 (gravity->qfrc_bias[i] + drag_compensation)) < 1e-10,
                     "gravity torque is wrong with frozen input");
+                const auto command = Motors(shm).command[i];
+                Require(std::abs(command.kp * (command.position - data->qpos[i]) -
+                            Motors(shm).debug_torque[i]) < 1e-10,
+                    "gravity torque was not added once as an external position offset");
             }
 
             const auto home_request = Request(shm, 0);
@@ -347,52 +365,224 @@ int main(int argc, char** argv) {
             std::cout << "observed 100 Hz cycles in 150ms=" << cycles << '\n';
         }
 
-        // Exercise the actual MIT target path without opening a CAN device.
-        // Fake measured feedback stays in this test-owned SHM mapping only.
+        // Compare both output encodings, including independent position + torque
+        // and saturated effort. Feedback stays in this test-owned SHM mapping.
         const auto normal_limits = YAML::Clone(config["limits"]);
-        config["limits"]["torque_nm"] = .1;
+        const auto normal_config = YAML::Clone(config);
+        for (const std::string variant :
+            {"torque_ref_as_position", "native_torque_ref", "native_zero_kp", "rmd_torque_ref",
+                "position_homing_torque", "native_homing_torque", "rmd_homing_torque",
+                "native_homing_torque_difference"}) {
+            const bool zero_kp = variant == "native_zero_kp";
+            const bool homing_torque = variant.find("homing_torque") != std::string::npos;
+            const bool differentiate_homing = variant == "native_homing_torque_difference";
+            const std::string torque_mode = zero_kp || variant == "native_homing_torque" || differentiate_homing
+                ? "native_torque_ref" : variant == "position_homing_torque"
+                ? "torque_ref_as_position" : variant == "rmd_homing_torque"
+                ? "rmd_torque_ref" : variant;
+            for (bool limited : {false, true}) {
+                config = YAML::Clone(normal_config);
+                config["torque_reference_mode"] = torque_mode;
+                config["homing"]["torque_control"] = homing_torque;
+                if (differentiate_homing) {
+                    config["homing"]["differentiate_position"] = true;
+                    config["homing_velocity_lpf"]["enabled"] = true;
+                    config["homing_velocity_lpf"]["cutoff_hz"] = 20;
+                }
+                if (zero_kp) {
+                    config["homing"]["kp"] = YAML::Load("[0,0,0]");
+                    config["gravity_compensation"]["kp_motor"] = YAML::Load("[0,40,0]");
+                    config["magnetic_touch"]["kp_motor"] = YAML::Load("[0,0,0]");
+                    config["tracking"]["motor"]["kp_nm_rad"] = YAML::Load("[0,0,0]");
+                    config["ball_following"]["kp_motor"] = YAML::Load("[0,0,0]");
+                }
+                if (limited)
+                    config["limits"]["torque_nm"] = .1;
+                save();
+                const auto name = prefix + "-" + variant + (limited ? "-limited" : "-normal");
+                shm_utils::Mapping mapping(name, true);
+                auto& shm = *mapping.get();
+                shm.can_enabled = true;
+                auto& feedback = shm.motors[0];
+                feedback.running = true;
+                feedback.supported.fill(kCanSignals);
+                feedback.valid.fill(kCanSignals);
+                feedback.coordinate_valid.fill(true);
+                feedback.enabled.fill(true);
+                feedback.measurement_ns.fill(shm_utils::MonotonicNs());
+                feedback.received_sequence.fill(1);
+                feedback.received_ns.fill(shm_utils::MonotonicNs());
+                feedback.profile_verified.fill(true);
+                for (int i = 0; i < 3; ++i) {
+                    feedback.feedback[i].position = home[i];
+                    feedback.feedback[i].velocity = 2 + i;
+                }
+                qhrr05::TaskController controller(path, name);
+                qhrr05::InputInterface::RequestDrive(shm, DriveAction::Arm);
+                bool saw_position_and_torque = false, saw_saturation = false;
+                for (int mode : {5, 0, 1, 4}) {
+                    Request(shm, mode);
+                    Require(controller.ReadInput(), "controller refused valid feedback");
+                    controller.Control();
+                    controller.WriteOutput();
+                    const auto before_move = Motors(shm);
+                    if (mode == 5) {
+                        {
+                            shm_utils::Lock lock(shm);
+                            auto& moved = shm_utils::Next(shm.motors, shm.motor_sequence);
+                            for (int i = 0; i < 3; ++i) {
+                                moved.feedback[i].position += .001;
+                                ++moved.received_sequence[i];
+                                moved.measurement_ns[i] += 1000000;
+                            }
+                            ++shm.motor_sequence;
+                        }
+                    }
+                    // Move the measured joints after capturing the position reference.
+                    // Ball now has a position error AND a nonzero gravity torque.
+                    if (mode == 0 || mode == 4) {
+                        shm_utils::Lock lock(shm);
+                        auto& moved = shm_utils::Next(shm.motors, shm.motor_sequence);
+                        const std::array<double, 3> delta{.06, -.05, .04};
+                        for (int i = 0; i < 3; ++i) {
+                            moved.feedback[i].position += delta[i];
+                            ++moved.received_sequence[i];
+                            moved.received_ns[i] += 1000000;
+                            moved.measurement_ns[i] += 1000000;
+                        }
+                        ++shm.motor_sequence;
+                    }
+                    Require(controller.ReadInput(), "controller refused moved feedback");
+                    controller.Control();
+                    controller.WriteOutput();
+                    const auto motors = Motors(shm);
+                    for (int i = 0; i < 3; ++i) {
+                        const auto& command = motors.command[i];
+                        const bool host_pd = homing_torque && mode == 0;
+                        const bool rmd = torque_mode == "rmd_torque_ref" && (host_pd || mode == 1 || mode == 5);
+                        Require(command.rmd_torque == rmd, "incorrect RMD/MIT routing for motion");
+                        Require(command.rmd_damping_constant == (rmd ? 5 : 0),
+                            "RMD default damping was missing or leaked into MIT commands");
+                        const double position = motors.feedback[i].position;
+                        const double limit =
+                            limited ? .1 : normal_limits["torque_nm"][i].as<double>();
+                        const double requested_effort =
+                            (host_pd ? 0 : command.kp * (motors.reference[i] - position)) + motors.debug_torque[i];
+                        if (host_pd) {
+                            double velocity = motors.feedback[i].velocity;
+                            if (differentiate_homing) {
+                                const double dt = (motors.measurement_ns[i] - before_move.measurement_ns[i]) / 1e9;
+                                velocity = (position - before_move.feedback[i].position) / dt *
+                                    -std::expm1(-2 * 3.14159265358979323846 * 20 * dt);
+                            }
+                            const double expected = config["homing"]["kp"][i].as<double>() *
+                                (motors.reference[i] - position) -
+                                config["homing"]["kd"][i].as<double>() * velocity;
+                            Require(std::abs(motors.debug_torque[i] - std::clamp(expected, -limit, limit)) < 1e-10,
+                                "homing PD torque did not reach the output exactly once");
+                        }
+                        const double effort =
+                            command.kp * (command.position - position) + command.tau_ff;
+                        Require(std::abs(motors.debug_torque[i]) <= limit + 1e-10,
+                            "software torque target bypassed shared torque limit");
+                        Require(command.velocity == 0, "MIT output introduced a velocity reference");
+                        Require(std::abs(effort - std::clamp(requested_effort, -limit, limit)) < 1e-10,
+                            "MIT output lost or duplicated position/torque, or bypassed the effort limit");
+                        if (mode == 5) {
+                            Require(command.kp == 0 && command.kd == 0 &&
+                                        command.tau_ff == motors.debug_torque[i] && command.tau_ff < 0,
+                                "output mode changed the direct-torque damping test");
+                        } else if (rmd) {
+                            Require(command.kp == 0 && command.kd == 0 &&
+                                        command.tau_ff == motors.debug_torque[i],
+                                "RMD must carry pure torque without implicit position/velocity feedback");
+                        } else {
+                            const auto gains = mode == 0   ? config["homing"]
+                                               : mode == 1 ? config["gravity_compensation"]
+                                                           : config["ball_following"];
+                            const double expected_kp = host_pd && torque_mode != "torque_ref_as_position"
+                                ? 0 : gains[mode == 0 ? "kp" : "kp_motor"][i].as<double>();
+                            const double expected_kd = host_pd
+                                ? 0 : gains[mode == 0 ? "kd" : "kd_motor"][i].as<double>();
+                            Require(command.kp == expected_kp && command.kd == expected_kd,
+                                "output mode changed the motor P/D gains");
+                            Require(command.tau_ff == (torque_mode != "torque_ref_as_position"
+                                                          ? motors.debug_torque[i]
+                                                          : 0),
+                                "torque reference was sent through the wrong MIT field");
+                            if (torque_mode != "torque_ref_as_position" && std::abs(requested_effort) < limit)
+                                Require(command.position == motors.reference[i],
+                                    "native torque output altered an unsaturated position reference");
+                            saw_position_and_torque |=
+                                mode == 4 && std::abs(motors.reference[i] - position) > .001 &&
+                                std::abs(motors.debug_torque[i]) > .01;
+                            saw_saturation |= std::abs(requested_effort) > limit;
+                        }
+                    }
+                    if (mode == 5) {
+                        {
+                            shm_utils::Lock lock(shm);
+                            auto& invalid = shm_utils::Next(shm.motors, shm.motor_sequence);
+                            invalid.valid[0] &= ~EncoderPosition;
+                            ++shm.motor_sequence;
+                        }
+                        Require(controller.ReadInput(), "invalid encoder stopped input handling");
+                        controller.Control();
+                        controller.WriteOutput();
+                        for (const auto& output : Motors(shm).command)
+                            Require(output.tau_ff == 0, "Damping kept torque with invalid MIT position");
+                        {
+                            shm_utils::Lock lock(shm);
+                            auto& restored = shm_utils::Next(shm.motors, shm.motor_sequence);
+                            restored.valid[0] |= EncoderPosition;
+                            ++shm.motor_sequence;
+                        }
+                    }
+                }
+                Require(saw_position_and_torque,
+                    "test did not exercise independent position and torque");
+                Require(!limited || zero_kp || saw_saturation,
+                    "test did not exercise combined effort saturation");
+            }
+        }
+        std::cout
+            << "PASS: both torque modes preserve position/P/D, direct damping and combined effort limits\n";
+        config = YAML::Clone(normal_config);
+
+        // Reject a zero-gain position conversion before any control cycle starts.
+        config["homing"]["kp"] = YAML::Load("[40,0,40]");
         save();
         {
-            const auto name = prefix + "-limited-mit";
+            const auto name = prefix + "-invalid-zero-kp";
             shm_utils::Mapping mapping(name, true);
-            auto& shm = *mapping.get();
-            shm.can_enabled = true;
-            auto& feedback = shm.motors[0];
-            feedback.running = true;
-            feedback.supported.fill(kCanSignals);
-            feedback.valid.fill(kCanSignals);
-            feedback.coordinate_valid.fill(true);
-            feedback.enabled.fill(true);
-            feedback.measurement_ns.fill(shm_utils::MonotonicNs());
-            feedback.received_sequence.fill(1);
-            feedback.received_ns.fill(shm_utils::MonotonicNs());
-            feedback.profile_verified.fill(true);
-            for (int i = 0; i < 3; ++i) {
-                feedback.feedback[i].position = initial[i];
-                feedback.feedback[i].velocity = 2 + i;
+            bool rejected = false;
+            try {
+                qhrr05::TaskController controller(path, name, true);
+            } catch (const std::exception& error) {
+                rejected = std::string(error.what()).find("homing.kp") != std::string::npos;
             }
-            qhrr05::TaskController limited(path, name);
-            qhrr05::InputInterface::RequestDrive(shm, DriveAction::Arm);
-            for (int mode : {5, 0, 1}) {
-                Request(shm, mode);
-                Require(limited.ReadInput(), "limited controller refused valid feedback");
-                limited.Control();
-                limited.WriteOutput();
-                const auto motors = Motors(shm);
-                for (int i = 0; i < 3; ++i) {
-                    const auto& command = motors.command[i];
-                    const double effort = command.kp * (command.position - initial[i]) +
-                                          command.kd * (command.velocity - (2 + i)) +
-                                          command.tau_ff;
-                    Require(
-                        std::abs(effort) <= .1 + 1e-10, "MIT target bypassed shared torque limit");
-                    Require(std::abs(effort - motors.debug_torque[i]) < 1e-10,
-                        "limited MIT target did not represent computed effort");
-                }
-            }
-            std::cout << "PASS: shared torque limit bounds MIT damping/homing/gravity targets\n";
+            Require(rejected, "TaskController started with kp=0 in position-torque mode");
+            Require(Latest(*mapping.get()).command_sequence == 0,
+                "invalid position-torque configuration published a motor command");
         }
-        config["limits"] = normal_limits;
+        config = YAML::Clone(normal_config);
+
+        for (const auto invalid :
+            {YAML::Node(), YAML::Node("unknown"), YAML::Load("[native_torque_ref]")}) {
+            config["torque_reference_mode"] = invalid;
+            save();
+            const auto name = prefix + "-invalid-torque-mode";
+            shm_utils::Mapping mapping(name, true);
+            bool rejected = false;
+            try {
+                qhrr05::TaskController controller(path, name, true);
+            } catch (const std::exception& error) {
+                rejected =
+                    std::string(error.what()).find("torque_reference_mode") != std::string::npos;
+            }
+            Require(rejected, "invalid/missing torque reference mode was not rejected clearly");
+        }
+        config["torque_reference_mode"] = "torque_ref_as_position";
 
         // A very slow configured period must still allow ordinary process shutdown.
         config["control"]["frequency_hz"] = .1;
@@ -435,7 +625,9 @@ int main(int argc, char** argv) {
             {
                 shm_utils::Lock lock(shm);
                 shm.control[0].command_sequence = 7;
-                shm.motors[shm.motor_sequence % kShmBufferCount].debug_torque[0] = 1000;
+                auto& motors = shm.motors[shm.motor_sequence % kShmBufferCount];
+                motors.debug_torque[0] = -123;  // Diagnostics must not actuate the plant.
+                motors.command[0] = {initial[0] + 1000, 0, 1, 0, 0};
                 shm.motors[shm.motor_sequence % kShmBufferCount].command_enabled[0] = true;
             }
 

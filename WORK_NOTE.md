@@ -2,6 +2,87 @@
 
 갱신: 2026-10-31 · `HW_deploy` 구현과 가상 CAN 최종 검증
 
+## GUI 코깅 보상 진폭과 클리핑 경고 — 2026-11-01
+
+- 기존 위상 아래에 21/36차별 보상 진폭 ▲/▼를 추가했습니다. `amp21_motor_nm`·`amp36_motor_nm`와 동일한 모터축 단위로 0.01 Nm씩 조절하며, 목표/적용 진폭 및 출력축 보상 계산값을 표시합니다. 진폭은 0 이상이며 `amplitude_slew_nm_s: 0.1` 기본값으로 한 단계에 약 0.1초 적용합니다.
+- 모터축 보상 토크, 보상 전류, 최종 합산/P+FF 토크, native CAN 토크 필드 범위의 실제 클리핑을 구분하여 경고하고 마지막 원인을 1초 유지합니다. 위상과 같은 Input 경로이며 SHM/ABI 및 CAN 프로토콜은 바꾸지 않았습니다. 현재 실행값만 바꾸고 YAML은 자동 저장하지 않습니다.
+- 전체 네이티브·웹 빌드, CTest 7개 및 웹 통합 4개/브라우저 3개 통과. 새 검증은 진폭의 100 ms 전환·부호·음수 거부·토크/전류 클립 플래그와 GUI에서 0.01 Nm 증가 후 실제 클리핑 경고 표시를 확인합니다. 로그 `/tmp/qhrr-amplitude-{build-final,tests,web-tests,browser-tests}.log`. 브라우저 최종 결과는 browser-tests 로그에 기록했습니다.
+
+## 코깅 위상 스텝 선택 — 2026-11-01
+
+- 위상 튜닝 패널 상단에 0.1 / 0.25 / 0.5 rad 선택 버튼을 추가했습니다(기본 0.5). 선택된 증분이 모든 축의 21/36차 화살표와 ↑/↓ 키에 적용됩니다. 선택 자체로 위상이나 모션은 바꾸지 않습니다.
+- 기존 0~2π 순환·5 rad/s 전환은 유지합니다. 서버와 Input 검증도 세 스텝의 양·음 값만 허용합니다. 웹/제어기 빌드, 안전 검증, Input 통합과 데스크톱/모바일 브라우저 테스트로 확인합니다. 로그 `/tmp/qhrr-phase-step-selector-{build,tests,web-tests,browser-tests}.log`.
+
+## GUI 실시간 코깅 위상 튜닝 — 2026-11-01
+
+- State Machine 아래에 HR/HP/KP별 21차·36차 위상 목표/적용값과 ▲/▼를 추가했습니다. 클릭과 ↑/↓ 키는 ±0.5 rad 요청이며, 기본 YAML 위상은 0입니다. 기존 Input 경로가 축/차수/증분을 검증하고 TaskController가 목표를 갱신합니다. 파일은 저장하지 않으며 재접속은 현재 값을 읽고 제어기 재시작은 YAML 값을 읽습니다.
+- `phase_slew_rad_s` 기본 5 rad/s, 0.5 rad당 약 100 ms로 적용합니다. 늦어진 제어 루프는 최대 10 ms만 따라가며 ±π 경계는 최단 경로로 이동하며 목표·적용값은 0≤φ<2π로 표시합니다. 상태는 Input 읽기 응답으로 웹 서버가 4 Hz 취득하며 SHM/CAN 구조와 ABI 20은 그대로입니다.
+- 고정 q 수치 검증: G=9, scale=1, A=0.05 Nm에서 즉시 위상 변경은 한 성분 최대 0.2226636 Nm. 램프의 1 ms 변화는 0.00225 Nm 이하이며, native CAN T_MAX=3의 양자화 단계 0.0235294 Nm는 남습니다. 실제 장치 동작 없이 수치·CAN codec·테스트 전용 SHM·Chrome으로 검증했습니다.
+- 전체 네이티브·웹 빌드, 웹/DSP 20개 테스트와 기존 Input 경로 위상/토크 반영 테스트를 통과했습니다. CTest는 코깅/안전/제어/회귀를 검증합니다. 현재 사용자 Damping 구현이 30 Hz로 바뀌어 그에 맞춰 기존 테스트의 10 Hz 기대값을 갱신했으며 구현은 수정하지 않았습니다. 로그 `/tmp/qhrr-anticogging-phase-{build-final,tests,web-tests,routing-tests,regression-tests}.log`, 화면 `build/web_gui_desktop.png`, `build/web_gui_mobile.png`.
+
+- 후속 요청 반영: 증분 0.5 rad, 0~2π 순환, 1회 조절 0.1초 적용. 빌드 및 경계/토크/GUI 검증 로그 `/tmp/qhrr-phase-100ms-{build,tests,web-tests}.log`.
+
+## 21·36차 코깅 토크 보상 — 2026-11-01
+
+- 사용자 제공 `TwoOrderAnticogging`을 `src/motion_controllers/two_order_anticogging.hpp/.cpp`로 추가했습니다. 모터 YAML의 감속비·Kt와 축별 진폭/위상/원점, 공통 scale·모터축 토크·전류 한계를 사용합니다. 사용자 추가 지시에 따라 코깅 출력은 `torque_command_`에 합산 후 기존 제한·출력 변환을 거칩니다. as_position에서는 합산 토크/kp를 위치에 더하고 tau_ff=0, native에서는 합산 토크를 tau_ff로 보냅니다.
+- Zero set·미보정 좌표·출력 해제·유효 관측 부재에서는 보상을 적용하지 않습니다. SHM 구조·CAN 프로토콜·기존 모션 수식은 변경하지 않았습니다. `anticogging` YAML 항목을 추가했고 작업 중 사용자가 바꾼 enabled/scale/limit 값을 유지했습니다. 실제 모터 명령이나 데몬 재시작은 하지 않았습니다.
+- 전체 네이티브 빌드 및 6개 CTest 통과: two_order_anticogging, control_io, source_layout, motion_controller_config, joint_reference, damping_controller. 새 테스트는 21/36차 부호·위상·감속비·Kt·스케일·한계와 모든 모션의 두 출력 방식·ON/OFF·Zero set 제외를 검사합니다. 기존 Damping 구현 10 Hz에 남아 있던 테스트의 30 Hz 기대값만 맞췄으며 Damping 구현값은 유지했습니다. 로그 `/tmp/qhrr-two-order-anticogging-build-final.log`, `/tmp/qhrr-two-order-anticogging-tests-final.log`.
+
+## 웹 Cogging Identification — 2026-11-01
+
+- `/cogging`은 모터 각도 공간 분석입니다. 이전 시간 FFT 후 평균 회전속도로 나누던 방식을 제거했습니다. 기존 웹 브리지가 구독 중 500 Hz로 C0를 읽고, Node 서버에서 실제 시각으로 q 차분·선택적 1차 LPF를 계산한 뒤 `θ_motor = 감속비 × q`에 균일 보간하여 Hann FFT를 계산합니다. 브라우저에는 4 Hz 결과만 전달합니다.
+- 기본 분석 구간은 모터 1회전(출력축 40°)이며 5°·10°·20° 부분 회전도 선택합니다. 정지·반전 중에는 마지막 완료 결과를 유지합니다. 감속비·회전 구간·FFT 점 수·최대 차수를 설정합니다. 파형은 모터 회전수, 스펙트럼·피크·CSV는 cycles/rev이며 Δorder=1/회전 수입니다. 정지·역회전·수신 공백·C3/시퀀스 초기화를 분리하고 원본 최대 각도 간격으로 유효 차수를 제한합니다. 반복 q 코드는 경과 시간을 차분에 포함합니다.
+- 주요 피크 표와 전체 CSV에 q=0 기준 sine/cosine 속도 계수를 추가했습니다. 구간 시작 위상과 역회전의 허수부 부호를 보정하며, LPF 위상 지연은 계수에 남습니다.
+- SHM·제어기·CAN 생산자 보호 파일 32개를 변경하지 않았습니다. 웹 빌드 및 수치 13개·통합 4개·브라우저 3개, 총 20개 테스트를 통과했습니다. 가변 속도·역회전에서도 같은 차수 검출, 저속 양자화, LPF, 데스크톱/모바일, 읽기 전용 동작을 검사합니다. 로그 `/tmp/qhrr-cogging-web-build.log`, `/tmp/qhrr-cogging-coefficients-tests.log`, 화면 `build/web_gui_cogging{,_mobile}.png`. 적용 시 웹 GUI만 재시작합니다.
+
+## Fourier 코깅 보상 되돌림 — 2026-11-01
+
+- 사용자 요청으로 직전에 추가한 코깅 보상·정/역회전 학습, 호출부, 설정·테스트·문서를 제거했습니다. Gravity는 기존 중력/bias + 선택적 건마찰 보상으로 복원했습니다. 이전의 제어기 구조 변경과 현재 사용자 설정값은 유지했습니다.
+
+## JointReference 타입 제거 — 2026-11-01
+
+- `JointReference` 구조체와 전용 헤더를 제거했습니다. 6개 제어기는 위치·토크 배열을 각각 출력 인자로 받고, `control.cpp`는 `position_reference_`·`torque_command_`를 별도로 보관합니다. 계산식·C3·현재 10 Hz Damping 설정·SHM ABI 20은 유지했습니다.
+- 전체 native 빌드 및 기존 관련 테스트 7개 통과. 새 클래스·파일은 추가하지 않았으며 실물 프로세스는 재시작하지 않았습니다.
+
+## 0x93 제거 및 MIT 피드백 복원 — 2026-10-31
+
+- 사용자 요청으로 HAL의 매 주기 0x93 조회·응답 처리, 전용 코덱, 가상 모터 응답과 SHM/관측/로그/웹 필드를 제거했습니다. Damping은 기존 C0 리턴의 C3 기준 누적 위치와 샘플 번호·시각을 사용합니다. 누적각 차분에는 2*pi 래핑을 적용하지 않습니다.
+- 현재 수치 설정인 30 Hz LPF, kp=kd=0 및 tau_ff 직접 출력, 사용자 C3/게인/모터 설정을 유지했습니다. 기존 테스트의 남은 15 Hz 기대값은 실제 30 Hz에 맞췄습니다. SHM ABI는 20이며 전체 세션 재시작이 필요합니다. 실행 중인 실물 프로세스는 재시작하지 않았습니다.
+- 전체 native 빌드, 관련 CTest 11종 및 웹 통합 4종 통과. C0만으로 Damping 출력·유효성·누적각·샘플 유지/초기화, HAL/가상 모터/C3/통합 경로를 확인했습니다. 가상 CAN은 격리된 네트워크에서 검증했으며 실물 송신은 하지 않았습니다. 로그: `/tmp/qhrr-mit-feedback-revert-{build,tests,control-io,web-tests}.log`.
+
+## 실물 CAN RX 누락 원인 조사 — 2026-10-31
+
+- 사용자 활성화 세션 `logs/run-1793455922011-52961`을 추가 송신 없이 관찰했습니다. 활성화 후 6.82초에 1번 HR의 C0 피드백이 250.3 ms 끊겨 HAL이 `motor feedback expired`로 출력을 해제했습니다. 1번은 C0와 0x93 모두 응답을 멈췄고, 0x93은 3.314초 뒤 복구됐습니다. 2·3번은 계속 응답했습니다. 사용자는 전원·CAN 케이블을 건드리지 않았다고 확인했습니다.
+- 복구 후 읽기 전용 B0를 각 모터에 1회 조회: 1번 `B0 0A 00 00 00 00 00 00`(BOOTING_FROM_WATCHDOG_RESET), 2·3번 모두 0. 1번 펌웨어 watchdog 재부팅이 강하게 의심됩니다. 사고 전 B0 이력은 없으므로 이력만으로 발생 시각을 확정하지는 않습니다.
+- 정상 활성 구간 첫 6초에도 모터별 C0 수신률 약 310/314/265 Hz, 0x93 약 309/309/266 Hz(각 요청은 약 500 Hz)입니다. Raw CAN과 HAL 카운터가 일치하며 캡처 소켓 드롭, HAL socket_errors, netdev 오류/드롭 및 qdisc 드롭·재큐잉 증가는 0입니다. HAL 파싱/SHM 뒤의 손실 증거는 없으며 PCAN 내부/CAN/모터 수신·응답 처리 구간의 손실은 추가 분리가 필요합니다. PCAN TX echo/tx_packets는 USB 전송 완료이므로 실제 모터 수신 보장이 아닙니다.
+- 별도 선행 추가 0x93 부하 시험에서는 txqueuelen=10의 호스트 큐가 포화되어 ENOBUFS + qdisc 4 drops, 즉시 C2 해제 3회 실패와 HAL 종료가 발생했습니다. 당시 출력은 해제 상태였지만 제 시험이 세션을 종료시켰음을 사용자에게 알렸습니다. 이후 물리 부하 시험은 자동 검토에서 거절됐고 사용자 명시적 승인 후 재개했습니다. 250 Hz 균등 송신은 3축 모두 748/748 응답했고, 새 daemon 감지 시 자동 중단했습니다. 500/1000 Hz 간격 비교는 완료되지 않았습니다.
+- 확인된 호스트 구현 문제: 활성 중 매 2 ms 6프레임 연속 송신, 지연 후 밀린 주기 따라잡기, ENOBUFS 즉시 예외/종료 및 같은 꽉 찬 큐로 지연 없는 C2 재전송. 이번 조사는 코드·설정·모터 활성화를 직접 변경하지 않았습니다. 원시 캡처와 정리: `logs/diagnostics/2026-10-31-can-rx/summary.json`.
+
+## 0x93 출력축 엔코더 기반 Damping — 2026-10-31
+
+- 프로파일 확인 후 매 CAN 주기, 각 모터에 0x93을 요청합니다. 싱글턴 각도(rad), 원시 상태, 별도 수신 시각·번호·유효성을 MotorData에 저장합니다. C0 피드백은 별도 유지하며 0x93 상태 bit 0과 수신 기한을 검사합니다.
+- Damping 속도만 출력축 각도의 래핑 차분으로 변경했습니다. 현재 사용자 설정인 15 Hz LPF와 kp=kd=0·tau_ff 출력은 유지합니다. 무효/오래된 0x93이면 댐핑 토크를 중단하며 MIT 좌표를 속도 대체값으로 사용하지 않습니다. 다른 제어기·제로셋 좌표는 유지했습니다.
+- SHM ABI 19, MCAP과 웹 상태 필드 추가. 기존 파일 안에서 구현했으며 전체 native 빌드 및 관련 테스트 11개 통과했습니다. 사용자 모터 튜닝은 유지했고 실물 CAN에는 송신하지 않았습니다. 적용하려면 전체 프로세스를 새 바이너리로 재시작해야 합니다.
+
+## HAL 시작 시 모터 YAML 기록 — 2026-10-31
+
+- 기존 CanHal에 C2 해제 응답 → 모터별 C5 단발 쓰기 → C4 검증을 추가했습니다. 검증 전 C0/C1은 차단하며, C5 응답 누락 시 C4 조회만 재시도하고 enable_timeout_sec 초과나 불일치에는 오류 종료합니다. 재Arm에서는 ROM을 다시 쓰지 않습니다. 새 클래스·파일은 추가하지 않았습니다.
+- YAML의 출력축 Kt를 C5 입력축 Kt로 환산하며 C5 양자화를 반영한 C4 값을 검증합니다. 현재 1.298 Nm/A, GR9는 입력축 .144 및 출력축 1.296으로 적용됩니다. 요청값/전송값/예상 응답은 로그에 표시하고 확인된 C4 Kt로 측정 토크를 환산합니다.
+- 가상 모터도 축별 C5 적용과 구동 중 쓰기 거부를 처리합니다. 전체 native 빌드, CAN HAL·수명·가상 MIT/Iq·C3·버스 점유율 6개 테스트 통과. 실제 모터에는 송신하지 않았으며, 다음 실물 HAL 시작부터 YAML 기록이 동작합니다.
+
+## Damping 속도 30 Hz LPF — 2026-10-31
+
+- Damping 모드의 위치 차분 속도에 고정 30 Hz 1차 LPF를 적용했습니다. 축별 새 샘플의 실제 dt로 지수 계수를 계산하고, 필터링한 속도로 댐핑 토크를 생성합니다. 반복 샘플에서는 필터 상태를 유지하고 최초 샘플·시각 리셋·모드 재진입에는 0으로 시작합니다. 모터 kp=kd=0 및 tau_ff 직접 출력은 유지합니다.
+- 빌드 및 damping_controller·control_io·can_control_integration 3/3 통과. 30 Hz -3 dB 응답, 저주파 통과/고주파 억제, 불규칙 dt, 상태 초기화·축별 갱신·토크 제한과 가상 CAN 전달을 확인했습니다. 실제 장치는 구동하지 않았습니다.
+
+## 토크 레퍼런스 출력 방식 선택 — 2026-10-31
+
+- 후속 변경: 다섯 일반 모션의 생성자에서 `torque_ref_as_position`이면 모든 MIT kp가 양수인지 확인하고, `native_torque_ref`에서는 0을 허용합니다. native의 kp=0 출력은 나눗셈 없이 q_ref/kd/tau_ff를 유지합니다. 음수·비유한 게인 거부와 Zero set의 양수 kp 조건은 유지합니다.
+- 후속 검증: 빌드 및 control_io·joint_reference·motion_controller_config·qhrr05_homing·damping_controller 5종 통과. 각 생성자의 축별 kp=0/음수/NaN, native의 0/양수 혼합 게인 출력, 위치 변환의 시작 거부·미발행을 확인했습니다.
+- `control.yaml` 최상단에 필수 `torque_reference_mode`를 추가했습니다. 기본 `torque_ref_as_position`은 q_ref+tau_ref/kp와 tau_ff=0, `native_torque_ref`는 q_ref와 tau_ff=tau_ref를 보냅니다. 위치/토크 성분은 모션 내부에서 계속 분리하며 최종 계산은 기존 control.cpp 출력부에 직접 둡니다.
+- 두 방식 모두 기존 kp/kd, v_des=0과 P+토크 합산 노력 한도를 유지합니다. native에서는 tau_ff를 유지하고 위치 명령 허용 범위를 조정합니다. Damping 테스트의 kp=kd=0 직접 토크와 Zero set 위치/C3 경로는 유지합니다.
+- 관련 타깃 빌드 및 control_io·joint_reference·qhrr05_homing·damping_controller·virtual_mit_motor 5/5 통과. 양 방식의 위치+토크 동시 출력, 포화, 게인 유지와 설정 오류 거부를 확인했습니다. 실제 장치는 구동하지 않았습니다.
+
 ## 웹 GUI 시작 시 포트 충돌 수정 — 2026-10-31
 
 - 수동 실행한 이전 웹 서버가 삭제된 SHM을 계속 읽으며 8080을 점유해, 데몬의 웹 GUI가 EADDRINUSE로 종료됐습니다. 웹 브리지가 SHM의 실제 객체를 확인하고 삭제·교체 시 명확한 오류로 종료하도록 수정했습니다. 스택 Stop/Start에서는 같은 SHM을 유지하므로 웹도 유지합니다.
@@ -63,7 +144,7 @@
 ## 마찰 보상 스위치·공통 출력 토크 제한 — 2026-10-29
 
 - `gravity_compensation.friction_compensation.enabled`를 추가했습니다(현재 true). false는 건마찰과 모델 점성감쇠 보상을 함께 끄며 중력/bias·자세 강성·motor kd를 유지합니다. 보상 비율·속도 파라미터는 저장값을 유지하고, bool 누락/오류는 시작 오류입니다.
-- 각 모션의 최종 토크 제한을 최상위 `limits.torque_nm: 60.7`로 통일했습니다. 현재 YAML의 최대 최종 출력값 60.7을 모든 관절에 적용하며, 스칼라/3개 배열을 지원합니다. 공통 파서는 src/control/limits.hpp입니다. 이전 모션별 torque_limit_nm/output_torque_limit_nm은 거부합니다.
+- 각 모션의 최종 토크 제한을 최상위 `limits.torque_nm: 60.7`로 통일했습니다. 현재 YAML의 최대 최종 출력값 60.7을 모든 관절에 적용하며, 스칼라/3개 배열을 지원합니다. 공통 파서는 src/control/control.hpp입니다. 이전 모션별 torque_limit_nm/output_torque_limit_nm은 거부합니다.
 - Homing/Gravity/Magnetic/Tracking/Ball, TaskController 최종 토크와 MIT 목표, Classic/Filament 그래프가 공통 제한을 읽습니다. Homing/Damping도 제한된 토크를 실제 MIT 목표로 표현하도록 변환했습니다. 물리 MJCF/CAN의 제한, ILC 보정 자체 한도·주기별 갱신 한도는 역할이 달라 유지합니다.
 - runtime의 다른 사용자 튜닝(damping_ratio1, coulomb.95, kd.01, 추종 파라미터 등)은 유지했습니다. native 전체/Filament 빌드, 마찰 ON/OFF·공통 한도·실제 MIT 변환·오류 거부와 관련 모션 7개 시험 통과. Filament 정적 미리보기의 새 설정 로딩도 통과했습니다.
 - 가상 CAN IDFF/CTC/Impedance 3/3 통과(84.60s), 총 관련 회귀 10개 통과. 별도 공통 설정 유효성 재검증도 통과했습니다. 로그: /tmp/qhrr-shared-limits-tests.log, /tmp/qhrr-shared-limits-can.log. diff/서식 검사 통과, 변경은 refactoring 브랜치에 미커밋 상태입니다.

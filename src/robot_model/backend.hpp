@@ -28,6 +28,8 @@ public:
     virtual KinematicState Evaluate(const std::array<double, 3>& q, bool jacobian = true) = 0;
     virtual std::array<double, 3> ConvectiveAcceleration(
         const std::array<double, 3>& q, const std::array<double, 3>& dq) = 0;
+    virtual std::array<double, 9> CoriolisMatrix(
+        const std::array<double, 3>& q, const std::array<double, 3>& dq) = 0;
     virtual std::array<double, 3> InverseDynamics(const std::array<double, 3>& q,
         const std::array<double, 3>& dq,
         const std::array<double, 3>& ddq) = 0;

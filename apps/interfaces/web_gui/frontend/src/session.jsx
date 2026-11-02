@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export const modes = [
   { id: 0, name: "Homing", key: "H" },
@@ -24,6 +24,10 @@ export const vector = (values, digits = 3) =>
 
 export function useSession() {
   const [state, setState] = useState(null);
+  const [anticogging, setAnticogging] = useState(null);
+  const [rmd, setRmd] = useState(null);
+  const [ilc, setIlc] = useState(null);
+  const [tracking, setTracking] = useState(null);
   const [connection, setConnection] = useState("connecting");
   const [epoch, setEpoch] = useState(0);
   const [events, setEvents] = useState([]);
@@ -34,6 +38,23 @@ export function useSession() {
     sequence = useRef(0),
     outstanding = useRef(new Map());
   const latestRef = useRef(null);
+  const coggingListeners = useRef(new Set()), coggingWanted = useRef({ enabled: false });
+  const trackingWanted = useRef(false);
+  const setTrackingStream = useCallback((enabled) => {
+    trackingWanted.current = enabled;
+    if (!enabled) setTracking(null);
+    if (socket.current?.readyState === WebSocket.OPEN)
+      socket.current.send(JSON.stringify({ type: "tracking-subscribe", enabled }));
+  }, []);
+  const subscribeCogging = useCallback((listener) => {
+    coggingListeners.current.add(listener);
+    return () => coggingListeners.current.delete(listener);
+  }, []);
+  const setCoggingStream = useCallback((enabled, settings, reset = false) => {
+    coggingWanted.current = { enabled, settings: settings ?? coggingWanted.current.settings };
+    if (socket.current?.readyState === WebSocket.OPEN)
+      socket.current.send(JSON.stringify({ type: "cogging-subscribe", ...coggingWanted.current, reset }));
+  }, []);
   const record = (text, status) =>
     setEvents((old) =>
       [
@@ -55,6 +76,10 @@ export function useSession() {
   useEffect(() => {
     setConnection("connecting");
     setState(null);
+    setAnticogging(null);
+    setRmd(null);
+    setIlc(null);
+    setTracking(null);
     setHistory([]);
     const ws = new WebSocket(
       `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
@@ -65,12 +90,61 @@ export function useSession() {
       if (!disposed) {
         setConnection("connected");
         record("제어 서버 연결", "CONNECTED");
+        if (coggingWanted.current.enabled)
+          ws.send(JSON.stringify({ type: "cogging-subscribe", ...coggingWanted.current }));
+        if (trackingWanted.current)
+          ws.send(JSON.stringify({ type: "tracking-subscribe", enabled: true }));
       }
     };
     ws.onmessage = (event) => {
       if (disposed) return;
       try {
         const message = JSON.parse(event.data);
+        if (message.type === "tracking-ilc-state") {
+          setIlc(message);
+          const last = latestRef.current;
+          if (message.available && last?.status === "approved" && last.type === "tracking-ilc" &&
+              ["phase_lead_bins", "smoothing_passes", "retention"].every((key) => message[key] === last[key])) {
+            update({ ...last, status: "applied" });
+            record(`${last.label} · 다음 학습 갱신부터 적용`, "APPLIED");
+          }
+          return;
+        }
+        if (message.type === "tracking-analysis") {
+          if (trackingWanted.current) setTracking(message);
+          return;
+        }
+        if (message.type === "rmd-state") {
+          setRmd(message);
+          const last = latestRef.current;
+          if (message.available && last?.status === "approved" && last.type === "rmd-damping" &&
+              message.damping_constant === last.value) {
+            update({ ...last, status: "applied" });
+            record(`${last.label} · 반영 완료`, "APPLIED");
+          }
+          return;
+        }
+        if (message.type === "anticogging-state") {
+          setAnticogging(message);
+          const last = latestRef.current;
+          if (message.available && last?.status === "approved" && ["anticogging-phase", "anticogging-amplitude"].includes(last.type)) {
+            const amplitude = last.type === "anticogging-amplitude";
+            const key = amplitude ? `amp${last.order}_motor_nm` : `phase${last.order}_rad`;
+            const expected = last.data?.[`target_${key}`]?.[last.axis];
+            const current = message[key]?.[last.axis], target = message[`target_${key}`]?.[last.axis];
+            const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) &&
+              (amplitude ? Math.abs(a - b) : Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))) < 1e-6;
+            if (near(current, expected) && near(target, expected)) {
+              update({ ...last, status: "applied" });
+              record(`${last.label} · ${amplitude ? "진폭" : "위상"} 적용 완료`, "APPLIED");
+            }
+          }
+          return;
+        }
+        if (["cogging-analysis", "cogging-status"].includes(message.type)) {
+          for (const listener of coggingListeners.current) listener(message);
+          return;
+        }
         if (message.type === "state") {
           setState(message);
           setHistory((old) => [...old.slice(-199), message]);
@@ -122,7 +196,10 @@ export function useSession() {
       if (disposed) return;
       setConnection("disconnected");
       setState(null);
+      setTracking(null);
+      setIlc(null);
       setHistory([]);
+      for (const listener of coggingListeners.current) listener({ type: "reset" });
       if (outstanding.current.size) {
         update({ ...latestRef.current, status: "unknown" });
         setError(
@@ -162,6 +239,11 @@ export function useSession() {
   };
   return {
     state,
+    anticogging,
+    rmd,
+    ilc,
+    tracking,
+    setTrackingStream,
     connection,
     events,
     history,
@@ -169,6 +251,8 @@ export function useSession() {
     error,
     setError,
     send,
+    subscribeCogging,
+    setCoggingStream,
     reconnect: () => setEpoch((x) => x + 1),
     available: connection === "connected" && state?.ready,
   };

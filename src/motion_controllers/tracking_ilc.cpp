@@ -11,15 +11,20 @@ TrackingILC::TrackingILC(const std::string& config_path) {
     const auto tracking = config["tracking"];
     const auto ilc = tracking["ilc"];
     if (ilc["learning_rate"].IsDefined())
-        throw std::runtime_error("ILC learning_rate was removed; multiply it into the position/velocity gains");
+        throw std::runtime_error("ILC learning_rate was removed; multiply it into the position gains");
 
     if (ilc["torque_limit_nm"].IsDefined() || ilc["step_limit_nm"].IsDefined())
         throw std::runtime_error("ILC limits were renamed to correction_limit_nm/update_limit_nm");
 
     enabled_ = ilc["enabled"].as<bool>();
 
-    if (!enabled_)
+    if (!enabled_) {
+        bins_ = ilc["phase_bins"].as<int>(0);
+        lead_bins_ = ilc["phase_lead_bins"].as<int>(0);
+        smoothing_passes_ = ilc["smoothing_passes"].as<int>(0);
+        retention_ = ilc["retention"].as<double>(1);
         return;
+    }
 
     period_ = tracking["trajectory"]["period_sec"].as<double>();
     const double ramp = tracking["trajectory"]["ramp_sec"].as<double>();
@@ -57,7 +62,6 @@ TrackingILC::TrackingILC(const std::string& config_path) {
         return result;
     };
     position_gain_ = axes("position_gain_nm_rad");
-    velocity_gain_ = axes("velocity_gain_nm_s_rad");
     torque_limit_ = axes("correction_limit_nm");
     step_limit_ = axes("update_limit_nm");
 
@@ -67,7 +71,7 @@ TrackingILC::TrackingILC(const std::string& config_path) {
             throw std::runtime_error("ILC position gain/torque/step limits must be positive, step <= torque limit");
 
     // Steady profile-clock phase is (elapsed - ramp/2)/period. Start at its first
-    // center crossing after the speed ramp and any requested warmup laps.
+    // return to the entry point after the speed ramp and any requested warmup laps.
     learning_start_ = .5 * ramp + (std::ceil(.5 * ramp / period_) + warmup_cycles) * period_;
 
     if (!std::isfinite(learning_start_))
@@ -80,6 +84,19 @@ TrackingILC::TrackingILC(const std::string& config_path) {
     scratch_.resize(bins_);
     counts_.resize(bins_);
     Reset();
+}
+
+void TrackingILC::SetParameters(int phase_lead_bins, int smoothing_passes, double retention) {
+    if (!enabled_)
+        throw std::runtime_error("tracking.ilc is disabled in YAML");
+    if (phase_lead_bins < 0 || phase_lead_bins > bins_ / 4 ||
+        smoothing_passes < 0 || smoothing_passes > 32 ||
+        !std::isfinite(retention) || retention <= 0 || retention > 1)
+        throw std::runtime_error(
+            "ILC requires phase_lead_bins in [0, phase_bins/4], smoothing_passes in [0, 32], retention in (0, 1]");
+    lead_bins_ = phase_lead_bins;
+    smoothing_passes_ = smoothing_passes;
+    retention_ = retention;
 }
 
 void TrackingILC::Reset() {
@@ -216,7 +233,7 @@ void TrackingILC::Compute(double elapsed) {
 }
 
 void TrackingILC::Record(const std::array<double, 3>& joint_position_error,
-    const std::array<double, 3>& joint_velocity_error, double toe_error_m, bool controller_saturated) {
+    double toe_error_m, bool controller_saturated) {
     if (!collecting_)
         return;
 
@@ -224,8 +241,7 @@ void TrackingILC::Record(const std::array<double, 3>& joint_position_error,
         throw std::runtime_error("invalid ILC toe error");
 
     for (int joint = 0; joint < 3; ++joint) {
-        const double signal = position_gain_[joint] * joint_position_error[joint] +
-            velocity_gain_[joint] * joint_velocity_error[joint];
+        const double signal = position_gain_[joint] * joint_position_error[joint];
 
         if (!std::isfinite(signal))
             throw std::runtime_error("non-finite ILC learning signal");

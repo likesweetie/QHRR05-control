@@ -1,4 +1,4 @@
-> 현재 기본 `run_visualization.sh`는 실행 중인 장치 세션에 연결합니다. 새 시뮬레이션 세션은 `--simulation`, 정적 미리보기는 `--preview`입니다. 물리 세션은 CAN 관절 좌표와 모델 FK로 갱신하며 GT/외란 조작을 제공하지 않습니다. A=Arm, X=Release이며 SHM ABI 16로 전 프로세스 재빌드가 필요합니다.
+> 현재 기본 `run_visualization.sh`는 실행 중인 장치 세션에 연결합니다. 새 시뮬레이션 세션은 `--simulation`, 정적 미리보기는 `--preview`입니다. 물리 세션은 CAN 관절 좌표와 모델 FK로 갱신하며 GT/외란 조작을 제공하지 않습니다. A=Arm, X=Release이며 SHM ABI 22로 전 프로세스 재빌드가 필요합니다.
 
 # 독립 MuJoCo / Filament 시각화
 
@@ -19,7 +19,7 @@ flowchart LR
     Renderer --> GPU[MuJoCo 3.16.0 mjrf → Filament → RTX 5090 Vulkan]
 ```
 
-SHM ABI는 **16**입니다. 기존 세션을 종료하고 기본 C++ 빌드와 시각화 빌드를 모두 갱신한 뒤 새 세션을 시작하십시오. 구버전 프로세스와 혼용하면 명시적 ABI 오류입니다.
+SHM ABI는 **22**입니다. 기존 세션을 종료하고 기본 C++ 빌드와 시각화 빌드를 모두 갱신한 뒤 새 세션을 시작하십시오. 구버전 프로세스와 혼용하면 명시적 ABI 오류입니다.
 
 ## 준비와 실행
 

@@ -21,13 +21,13 @@ public:
     void Compute(double time,
         const std::array<double, 3>& joint_position,
         const std::array<double, 3>& joint_velocity,
-        const std::array<double, 3>& joint_acceleration,
         const std::array<double, 3>& motor_torque,
         const std::array<double, 3>& gravity_torque,
         const std::array<double, 3>& bias_torque,
         const std::array<double, 3>& passive_torque,
         const std::array<double, 3>& friction_limit,
         const std::array<double, 9>& mass_matrix,
+        const std::array<double, 9>& coriolis_matrix,
         const std::array<double, 9>& jacobian,
         const std::array<double, 3>& toe_position,
         const std::array<double, 3>& joint_min,
@@ -35,8 +35,8 @@ public:
         std::uint64_t measurement_sequence,
         double measurement_dt,
         double target_force,
-        std::array<double, 3>& torque,
-        std::array<double, 3>& reference);
+        std::array<double, 3>& position_reference,
+        std::array<double, 3>& torque);
 
     const MagneticTelemetry& telemetry() const {
         return telemetry_;
@@ -49,12 +49,11 @@ private:
     ReactionForceObserver observer_;
     MagneticTelemetry telemetry_{};
 
-    std::array<double, 3> damping_;
     std::array<double, 3> kp_motor_, kd_motor_;
     std::array<double, 3> torque_limit_;
     std::array<double, 3> workspace_min_;
     std::array<double, 3> workspace_max_;
-    std::array<double, 3> contact_position_{};
+    std::array<double, 3> anchor_position_{}, previous_toe_position_{};
 
     double contact_on_;
     double contact_cancel_;
@@ -72,6 +71,7 @@ private:
     double maximum_speed_;
     double maximum_distance_;
     double joint_margin_;
+    double normal_bandwidth_, normal_max_rate_, normal_max_deviation_;
 
     double previous_time_ = 0;
     double phase_since_ = 0;

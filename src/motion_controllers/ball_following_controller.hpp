@@ -28,6 +28,7 @@ public:
         const std::array<double, 3>& joint_position,
         const std::array<double, 3>& joint_velocity,
         const std::array<double, 3>& gravity,
+        std::array<double, 3>& position_reference,
         std::array<double, 3>& torque);
 
     const std::array<double, 3>& kp_motor() const {
@@ -47,7 +48,7 @@ public:
     }
 
     const std::array<double, 3>& nearest_position() const {
-        return positions_[goal_];
+        return target_position_;
     }
 
     const std::array<double, 3>& joint_reference() const {
@@ -92,27 +93,35 @@ private:
         const std::atomic<bool>* cancellation,
         int);
     void BuildWorkspace(const std::array<double, 3>& home);
+    void BuildInterpolation();
+    bool Interpolate(const std::array<double, 3>& position,
+        std::array<double, 3>& joint_position, int& anchor);
     std::array<double, 3> Forward(const std::array<double, 3>& q, bool* regular = nullptr);
     bool ClearOfBoundary(const std::array<double, 3>& position) const;
     bool SafeEdge(int from, int to);
+    bool SafePose(const std::array<double, 3>& q, bool entry = false);
+    bool SafeSegment(const std::array<double, 3>& from,
+        const std::array<double, 3>& to, bool entry = false);
     void Plan(int from, int to);
-    void BeginSegment(const std::array<double, 3>& target, int node);
+    void PlanTarget();
     int Nearest(const std::array<double, 3>& position) const;
     int Neighbor(int node, int axis, int sign) const;
 
     std::unique_ptr<ModelBackend> owned_backend_;
     ModelBackend* backend_ = nullptr;
-    int grid_ = 0, current_node_ = -1, segment_node_ = -1, goal_ = -1;
-    int planned_goal_ = -1;
+    int grid_ = 0, goal_ = -1, interpolation_cell_ = -1;
     double margin_, padding_, condition_limit_, branch_sign_ = 1;
     double foot_speed_, slow_speed_, normal_speed_, fast_speed_, trigger_threshold_;
-    double ball_speed_ = 0, segment_progress_ = 0;
+    double ball_speed_ = 0, smoothing_sec_ = .10;
     bool limited_ = false, entering_ = false, saturated_ = false;
+    bool direct_path_ = false, replan_ = true, previous_interpolated_ = false;
+    bool check_route_ = true;
     bool enabled_ = true;
     const std::atomic<bool>* cancellation_ = nullptr;
     std::array<double, 3> kp_, kd_, torque_limit_, ball_{}, reference_{}, reference_velocity_{};
-    std::array<double, 3> toe_reference_{}, previous_ball_{}, segment_start_{}, segment_end_{};
-    std::array<double, 33> segment_arc_{};
+    std::array<double, 3> toe_reference_{}, previous_ball_{}, target_joint_{}, target_position_{};
+    std::array<double, 3> previous_target_joint_{}, planned_target_{}, velocity_stage_{}, filtered_velocity_{};
+    std::array<double, 3> route_check_position_{};
     std::vector<std::array<double, 3>> joints_, positions_;
     std::vector<unsigned char> valid_, edges_;
     std::vector<int> valid_indices_, path_;
@@ -122,5 +131,10 @@ private:
     std::size_t path_next_ = 0;
     std::vector<std::array<double, 9>> boundary_;
     std::map<std::array<int, 3>, std::vector<int>> boundary_bins_;
+    // Tetrahedra share vertices/faces from the existing FK grid. Each basis stores
+    // a Cartesian origin and three constant barycentric rows, computed at startup.
+    std::vector<std::array<int, 4>> interpolation_nodes_;
+    std::vector<std::array<std::array<double, 3>, 4>> interpolation_basis_;
+    std::map<std::array<int, 3>, std::vector<int>> interpolation_bins_;
 };
 }  // namespace qhrr05

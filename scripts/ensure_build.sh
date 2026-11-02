@@ -61,14 +61,17 @@ qhrr_ensure_native_build() (
     set -euo pipefail
     local project_dir="$1"
     shift
-    qhrr_native_ready "$project_dir/build" "$@" && exit 0
     qhrr_build_tools
     mkdir -p "$project_dir/.cache/build-locks"
     exec 9>"$project_dir/.cache/build-locks/native.lock"
     flock 9
-    # Another launcher may have completed the build while we waited.
-    qhrr_native_ready "$project_dir/build" "$@" && exit 0
-    echo "[build] Native executable missing; automatically building: $*"
+    # Always let CMake check source/header/build-file dependencies, even when
+    # executables exist. The lock also protects concurrent incremental builds.
+    if qhrr_native_ready "$project_dir/build" "$@"; then
+        echo "[build] Checking native source changes: $*"
+    else
+        echo "[build] Native executable missing; automatically building: $*"
+    fi
     if [[ -f "$project_dir/build/CMakeCache.txt" ]]; then
         cmake -S "$project_dir" -B "$project_dir/build"
     else

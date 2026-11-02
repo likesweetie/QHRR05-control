@@ -1,10 +1,10 @@
 <?xml version='1.0' encoding='utf-8'?>
 <mujoco model="qhrr-05">
   <compiler angle="radian" meshdir="assets" autolimits="true" inertiafromgeom="auto" />
-  <option cone="elliptic" impratio="100" timestep="0.001" />
+  <option cone="elliptic" impratio="100" timestep="0.002" />
   <default>
     <default class="qhrr-05">
-      <joint damping="2" armature="0.01" frictionloss="0.2" />
+      <joint damping="0" armature="0.01" frictionloss="0.0" />
       <geom friction="0.6" margin="0.001" condim="1" />
       <motor ctrlrange="-53.7 53.7" />
       <default class="visual">
@@ -37,13 +37,13 @@
         <geom name="qhrr_hip_visual" mesh="qhrr_hip" material="gray" class="visual" />
         <geom name="hip_collision" type="capsule" class="collision" fromto="0 0 0 0.0599999999999996 0.0262000000000003 0" size="0.028" />
         <body name="FL_thigh" pos="0.0599999999999996 0.0262000000000003 0">
-          <inertial pos="-0.00385988628636716 0.0573570359748067 -0.0264287380321596" mass="2.176288" fullinertia="0.011888 0.011512 0.003266 0.000292 0.000926 -0.001934" />
+          <inertial pos="-0.00385988628636716 0.0573570359748067 -0.0264287380321596" mass="1.776288" fullinertia="0.011888 0.011512 0.003266 0.000292 0.000926 -0.001934" />
           <joint name="FL_thigh_joint" type="hinge" axis="0 1 0" range="-2.984513 2.879793" />
           <site name="hip_pitch" pos="0 0 0" size="0.004" rgba="0.2 0.7 1 1" group="4" />
           <geom name="qhrr_thigh_visual" mesh="qhrr_thigh" material="gray" class="visual" />
           <geom name="thigh_collision" type="capsule" class="collision" fromto="0 0.0902999999999997 0 0 0.0902999999999997 -0.22" size="0.026" />
           <body name="FL_calf" pos="0 0.0902999999999997 -0.22">
-            <inertial pos="0.00624789973136231 2.56601114564936e-06 -0.164638132808556" mass="0.316044433148062" fullinertia="0.00184658643459813 0.00190518975448778 9.85254384492916e-05 0 0.000046 0" />
+            <inertial pos="0.00624789973136231 2.56601114564936e-06 -0.164638132808556" mass="0.416044433148062" fullinertia="0.00184658643459813 0.00190518975448778 9.85254384492916e-05 0 0.000046 0" />
             <joint name="FL_calf_joint" type="hinge" axis="0 1 0" range="-2.722714 -0.575959" />
             <site name="knee_pitch" pos="0 0 0" size="0.004" rgba="0.2 0.7 1 1" group="4" />
             <geom name="qhrr_calf_visual" mesh="qhrr_calf" material="gray" class="visual" />

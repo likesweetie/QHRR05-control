@@ -100,8 +100,8 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         };
-        const auto command = openrobot::EncodeMitCommand({.2, -.3, 40, 8, 0}, velocity_max, 3);
-        const auto target = openrobot::DecodeMitCommand(command, velocity_max, 3);
+        const auto command = openrobot::EncodeMitCommand({.2, -.3, 40, 8, 0}, velocity_max, 3, torque_max);
+        const auto target = openrobot::DecodeMitCommand(command, velocity_max, 3, torque_max);
         const auto feedback = [&](int axis) {
             return openrobot::DecodeFeedback(exchange(axis, command));
         };
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
         };
         const auto expected_torque = [&](int axis, double position) {
             return std::clamp(target.kp * (target.position - position) +
-                                  target.kd * (target.velocity - data->qvel[axis]),
+                                  target.kd * (target.velocity - data->qvel[axis]) + target.tau_ff,
                 std::max(-torque_max, model->actuator_ctrlrange[2 * axis]),
                 std::min(torque_max, model->actuator_ctrlrange[2 * axis + 1]));
         };
@@ -311,6 +311,27 @@ int main(int argc, char** argv) {
         advance(.020);
         exchange(0, {0xC1});
         Near(feedback(0).position, 0, .0004, "C3 did not calibrate an unknown encoder zero");
+
+        const auto write_profile = openrobot::EncodeProfileWrite(30, 10, 1.298, 9, 2);
+        const auto changed_profile = openrobot::EncodeProfile(30, 10, 1.296, 9, 2);
+        Require(exchange(0, write_profile) == expected_profile,
+            "C5 changed parameters while the motor was active");
+        exchange(0, {0xC2});
+        Require(exchange(0, write_profile) == changed_profile,
+            "released C5 did not write parameters or convert input-side Kt");
+        Require(exchange(0, {0xC4}) == changed_profile, "C4 did not retain C5 parameters");
+        Require(exchange(1, {0xC4}) == expected_profile, "C5 changed a different motor's profile");
+        Require(exchange(0, {0xC1}) == openrobot::Payload{0xC1, 2},
+            "C1 did not use the written Kd scale");
+        const auto torque_command = openrobot::EncodeMitCommand({0, 0, 0, 0, 10}, 30, 2, 10);
+        exchange(0, torque_command);
+        Near(data->ctrl[0], 10, 1e-10, "C0 did not use the written torque range");
+        mj_forward(model.get(), data.get());
+        const auto torque_feedback = openrobot::DecodeFeedback(exchange(0, torque_command));
+        Near(torque_feedback.current, 10 / 1.296, 33.0 / 2048,
+            "C0 feedback did not use the written Kt");
+        exchange(0, {0xC2});
+        Require(exchange(0, {0xC4}) == changed_profile, "C2 discarded written parameters");
 
         ::close(peer);
         peer = -1;

@@ -25,7 +25,6 @@ void CheckILC(const YAML::Node& config, const std::string& directory) {
     ilc["phase_bins"] = 16;
     ilc["warmup_cycles"] = 0;
     ilc["position_gain_nm_rad"] = YAML::Load("[1,1,1]");
-    ilc["velocity_gain_nm_s_rad"] = YAML::Load("[0,0,0]");
     ilc["smoothing_passes"] = 0;
     ilc["correction_limit_nm"] = YAML::Load("[.2,.2,.2]");
     ilc["update_limit_nm"] = YAML::Load("[.1,.1,.1]");
@@ -34,7 +33,7 @@ void CheckILC(const YAML::Node& config, const std::string& directory) {
     qhrr05::TrackingILC learning(path);
     const std::array<double, 3> zero{}, error{1, 0, 0};
     learning.Compute(1.49);
-    learning.Record(error, zero, .01, false);
+    learning.Record(error, .01, false);
     Require(learning.state() == TrackingILCState::Warmup && learning.torque() == zero,
         "ILC learned during the ramp/partial initial lap");
 
@@ -44,7 +43,7 @@ void CheckILC(const YAML::Node& config, const std::string& directory) {
                 continue;  // An incomplete lap must never be stitched into a valid trial.
 
             learning.Compute(1.5 + lap + (bin + .5) / 16);
-            learning.Record(error, zero, .01, lap == 1);
+            learning.Record(error, .01, lap == 1);
             Require(std::abs(learning.torque()[0]) <= .2 + 1e-12,
                 "ILC exceeded its independent torque bound");
         }
@@ -84,7 +83,8 @@ int main(int argc, char** argv) {
     std::string temporary_directory;
 
     try {
-        Require(argc == 3, "expected config and model paths");
+        const bool trajectory_only = argc == 4 && std::string(argv[3]) == "--trajectory-only";
+        Require(argc == 3 || trajectory_only, "expected config and model paths [--trajectory-only]");
         auto plots = std::make_unique<qhrr05::viewer::LivePlots>(2.0);
         qhrr05::viewer::Sample sample;
         sample.mode = 3;
@@ -218,7 +218,8 @@ int main(int argc, char** argv) {
         const auto home = qhrr05::ReadPosition(config["homing"]["position_rad"], model.get());
         const std::array<double, 3> zero{};
         const std::array<double, 9> zero_jacobian{};
-        std::array<double, 3> torque{};
+        std::array<double, 3> position_reference{}, torque{};
+
         const double period = config["tracking"]["trajectory"]["period_sec"].as<double>();
         const double ramp_time = config["tracking"]["trajectory"]["ramp_sec"].as<double>();
         qhrr05::ResetSimulation(home, model.get(), data.get());
@@ -238,7 +239,7 @@ int main(int argc, char** argv) {
             mj_jacSite(model.get(), desired_data.get(), actual_jacobian.data(), nullptr, toe_site);
 
             for (int tick = 0; tick < 4097 && controller.checking(); ++tick)
-                controller.Compute(time, q, zero, zero, actual_jacobian, toe, torque);
+                controller.Compute(time, q, zero, zero, actual_jacobian, toe, position_reference, torque);
 
             Require(!controller.checking(), "trajectory check did not finish in its sample budget");
         };
@@ -254,7 +255,7 @@ int main(int argc, char** argv) {
                 const double p = 2 * std::acos(-1.0) * i / 20000;
                 const double q = 2 * std::acos(-1.0) * (i + 1) / 20000;
                 length += std::hypot(a * (std::sin(q) - std::sin(p)),
-                    b * (std::sin(2 * q) - std::sin(2 * p)));
+                    b * (std::cos(q) - std::cos(p)));
             }
 
             const double speed = length / period;
@@ -262,11 +263,11 @@ int main(int argc, char** argv) {
             prepare(tracking_off, 0, home_toe, home, plane);
 
             for (auto* controller : {&constant_speed, &tracking_off}) {
-                controller->Compute(0, home, zero, zero, home_jacobian, home_toe, torque);
+                controller->Compute(0, home, zero, zero, home_jacobian, home_toe, position_reference, torque);
                 Require(controller->toe_reference() == home_toe &&
                             controller->toe_velocity_reference() == zero &&
                             controller->toe_acceleration_reference() == zero,
-                    "timing profile did not start at rest at the center crossing");
+                    "timing profile did not start at rest at the entry point");
             }
 
             std::array<double, 3> previous{};
@@ -276,12 +277,12 @@ int main(int argc, char** argv) {
 
             for (int i = 0; i <= 4096; ++i) {
                 constant_speed.Compute(ramp_time + (i + .37) * dt,
-                    home, zero, zero, home_jacobian, home_toe, torque);
+                    home, zero, zero, home_jacobian, home_toe, position_reference, torque);
                 const auto& position = constant_speed.toe_reference();
                 const auto& velocity = constant_speed.toe_velocity_reference();
                 const auto& acceleration = constant_speed.toe_acceleration_reference();
                 Require(std::abs(mju_norm3(velocity.data()) / speed - 1) < 1e-6,
-                    "reference speed is not constant along the figure eight");
+                    "reference speed is not constant along the ellipse");
                 Require(std::abs(mju_dot3(velocity.data(), acceleration.data())) < 1e-9,
                     "constant-speed reference retained tangential acceleration");
 
@@ -299,11 +300,11 @@ int main(int argc, char** argv) {
                 previous = position;
 
                 tracking_off.Compute(ramp_time + (i + .37) * dt,
-                    home, zero, zero, home_jacobian, home_toe, torque);
+                    home, zero, zero, home_jacobian, home_toe, position_reference, torque);
                 const double u = (tracking_off.toe_reference()[axes[0]] - home_toe[axes[0]]) / a;
-                const double v = (tracking_off.toe_reference()[axes[1]] - home_toe[axes[1]]) / (2 * b);
-                Require(std::abs(v * v - u * u * (1 - u * u)) < 1e-12,
-                    "acceleration timing changed the figure-eight geometry");
+                const double v = (tracking_off.toe_reference()[axes[1]] - home_toe[axes[1]]) / b + 1;
+                Require(std::abs(u * u + v * v - 1) < 1e-12,
+                    "acceleration timing changed the circle/ellipse geometry");
 
                 if (i < 4096) {
                     const double magnitudes[2]{mju_norm3(acceleration.data()),
@@ -324,26 +325,48 @@ int main(int argc, char** argv) {
 
             for (int profile = 0; profile < 2; ++profile) {
                 const double mean = acceleration_sum[profile] / 4096;
-                cv[profile] = std::sqrt(acceleration_squared[profile] / 4096 - mean * mean) / mean;
+                cv[profile] = std::sqrt(std::max(0.0,
+                    acceleration_squared[profile] / 4096 - mean * mean)) / mean;
             }
 
-            Require(cv[1] < .2 * cv[0] && cv[1] < .15 && acceleration_peak[1] < .65 * acceleration_peak[0],
-                "uniform-acceleration profile did not reduce acceleration variation and peak");
             std::cout << TrackingPlaneName(plane) << " acceleration CV=" << cv[0] << " -> " << cv[1]
                       << ", peak=" << acceleration_peak[0] << " -> " << acceleration_peak[1] << " m/s^2\n";
+            if (std::abs(a - b) < 1e-12) {
+                Require(cv[0] < 1e-5 && cv[1] < 1e-5 &&
+                    std::abs(acceleration_peak[0] - acceleration_peak[1]) < 1e-8,
+                    "circular tracking must have constant centripetal acceleration in both timing modes");
+            } else {
+                Require(cv[1] < cv[0] && acceleration_peak[1] < acceleration_peak[0],
+                    "uniform-acceleration timing did not improve the elliptical acceleration profile");
+            }
+
+            // Both axes complete exactly one cycle; quarter-turn landmarks also
+            // check the 90-degree offset and the continuous entry-point anchor.
+            for (auto* controller : {&constant_speed, &tracking_off}) {
+                for (int quarter = 0; quarter <= 4; ++quarter) {
+                    const double angle = quarter * std::acos(-1.0) / 2;
+                    controller->Compute(.5 * ramp_time + (2 + quarter / 4.0) * period,
+                        home, zero, zero, home_jacobian, home_toe, position_reference, torque);
+                    Require(std::abs(controller->toe_reference()[axes[0]] - home_toe[axes[0]] -
+                                         a * std::sin(angle)) < 1e-9 &&
+                                std::abs(controller->toe_reference()[axes[1]] - home_toe[axes[1]] -
+                                         b * (std::cos(angle) - 1)) < 1e-9,
+                        "tracking axes have different periods or an incorrect circular phase offset");
+                }
+            }
 
             // Check both profiles at ramp completion, table nodes and the periodic seam.
             for (auto* controller : {&constant_speed, &tracking_off}) {
                 for (const double time : {ramp_time * .25, ramp_time, ramp_time * 1.37,
                            .5 * ramp_time + 2 * period, .5 * ramp_time + period / 4}) {
                     constexpr double epsilon = 1e-6;
-                    controller->Compute(time - epsilon, home, zero, zero, home_jacobian, home_toe, torque);
+                    controller->Compute(time - epsilon, home, zero, zero, home_jacobian, home_toe, position_reference, torque);
                     const auto before = controller->toe_reference();
                     const auto before_velocity = controller->toe_velocity_reference();
-                    controller->Compute(time + epsilon, home, zero, zero, home_jacobian, home_toe, torque);
+                    controller->Compute(time + epsilon, home, zero, zero, home_jacobian, home_toe, position_reference, torque);
                     const auto after = controller->toe_reference();
                     const auto after_velocity = controller->toe_velocity_reference();
-                    controller->Compute(time, home, zero, zero, home_jacobian, home_toe, torque);
+                    controller->Compute(time, home, zero, zero, home_jacobian, home_toe, position_reference, torque);
 
                     for (int axis = 0; axis < 3; ++axis) {
                         Require(std::abs((after[axis] - before[axis]) / (2 * epsilon) -
@@ -364,9 +387,9 @@ int main(int argc, char** argv) {
             const double speed_ratio = period / .3;
             const double cycles = std::ceil(ramp_time / std::min(period, .3)) + 2.137;
             tracking_off.Compute(.5 * ramp_time + cycles * period,
-                home, zero, zero, home_jacobian, home_toe, torque);
+                home, zero, zero, home_jacobian, home_toe, position_reference, torque);
             faster.Compute(.5 * ramp_time + cycles * .3,
-                home, zero, zero, home_jacobian, home_toe, torque);
+                home, zero, zero, home_jacobian, home_toe, position_reference, torque);
 
             for (int axis = 0; axis < 3; ++axis) {
                 Require(std::abs(faster.toe_reference()[axis] - tracking_off.toe_reference()[axis]) < 1e-12 &&
@@ -377,6 +400,42 @@ int main(int argc, char** argv) {
                     "profile period scaling changed the path or omitted velocity/acceleration scaling");
             }
         }
+
+        // Equal radii must produce a circle with the configured period in every plane.
+        // This closed-form check is independent of the controller's timing tables.
+        auto circle_config = YAML::Clone(off_config);
+        constexpr double radius = .02;
+        circle_config["tracking"]["trajectory"]["amplitude_m"] = YAML::Load("[.02,.02,.02]");
+        const auto circle_path = temporary_directory + "/circle.yaml";
+        for (const char* timing : {"constant_speed", "uniform_acceleration"}) {
+            circle_config["tracking"]["trajectory"]["timing"] = timing;
+            std::ofstream(circle_path) << circle_config;
+            qhrr05::TrackingController circle(circle_path);
+            for (const auto plane : {TrackingPlane::XY, TrackingPlane::XZ, TrackingPlane::YZ}) {
+                prepare(circle, 0, home_toe, home, plane);
+                Require(!circle.ik_failed(), "circular preflight failed");
+                const auto axes = TrackingPlaneAxes(plane);
+                const double omega = 2 * std::acos(-1.0) / period;
+                for (int i = 0; i <= 64; ++i) {
+                    const double phase = 2 * std::acos(-1.0) * i / 64;
+                    circle.Compute(.5 * ramp_time + (2 + i / 64.0) * period,
+                        home, zero, zero, home_jacobian, home_toe, position_reference, torque);
+                    const std::array<double, 2> expected_position{
+                        radius * std::sin(phase), radius * (std::cos(phase) - 1)};
+                    const std::array<double, 2> expected_velocity{
+                        radius * omega * std::cos(phase), -radius * omega * std::sin(phase)};
+                    const std::array<double, 2> expected_acceleration{
+                        -radius * omega * omega * std::sin(phase),
+                        -radius * omega * omega * std::cos(phase)};
+                    for (int j = 0; j < 2; ++j)
+                        Require(std::abs(circle.toe_reference()[axes[j]] - home_toe[axes[j]] - expected_position[j]) < 1e-10 &&
+                            std::abs(circle.toe_velocity_reference()[axes[j]] - expected_velocity[j]) < 1e-10 &&
+                            std::abs(circle.toe_acceleration_reference()[axes[j]] - expected_acceleration[j]) < 1e-9,
+                            "circular position/velocity/acceleration differs from the analytic trajectory");
+                }
+            }
+        }
+        std::cout << "PASS: equal-radius circles in all planes and both timing modes\n";
 
         auto fixed_config = YAML::Clone(config);
         fixed_config["model_path"] = std::filesystem::absolute(argv[2]).string();
@@ -389,20 +448,20 @@ int main(int argc, char** argv) {
         const auto guarded_path = temporary_directory + "/guarded.yaml";
         std::ofstream(guarded_path) << guarded_config;
         qhrr05::TrackingController guarded(guarded_path);
-        guarded.Start(0, home_toe, home);
+        guarded.Start(0, home_toe, home, TrackingPlane::XZ);
         const std::array<double, 3> check_gravity{1, 2, 3};
-        guarded.Compute(0, home, zero, check_gravity, home_jacobian, home_toe, torque);
+        guarded.Compute(0, home, zero, check_gravity, home_jacobian, home_toe, position_reference, torque);
         Require(guarded.checking() && guarded.check_progress() > 0 && guarded.check_progress() < 1 &&
                     torque == check_gravity && guarded.joint_reference() == home &&
                     guarded.toe_velocity_reference() == zero && guarded.inverse_dynamics_torque() == zero,
             "checking did not hold the entry pose or ran trajectory feedforward early");
 
         for (int tick = 0; tick < 4097 && guarded.checking(); ++tick)
-            guarded.Compute(0, home, zero, zero, home_jacobian, home_toe, torque);
+            guarded.Compute(0, home, zero, zero, home_jacobian, home_toe, position_reference, torque);
 
         Require(guarded.ik_failed() && guarded.joint_reference() == home,
             "unsafe later trajectory segment was not rejected before any motion");
-        guarded.Compute(10, home, zero, zero, home_jacobian, home_toe, torque);
+        guarded.Compute(10, home, zero, zero, home_jacobian, home_toe, position_reference, torque);
         Require(torque == zero && guarded.toe_reference() == home_toe &&
                     guarded.inverse_dynamics_torque() == zero,
             "rejected trajectory moved or produced feedforward torque");
@@ -430,6 +489,12 @@ int main(int argc, char** argv) {
         prepare(unreachable, 0, home_toe, home);
         Require(unreachable.ik_failed() && unreachable.joint_reference() == home,
             "unreachable full trajectory was not rejected at entry");
+
+        if (trajectory_only) {
+            std::filesystem::remove_all(temporary_directory);
+            std::cout << "PASS: circular/elliptical references, phase, derivatives and preflight\n";
+            return 0;
+        }
 
         const auto reject_config = [&](const YAML::Node& invalid) {
             const auto path = temporary_directory + "/invalid.yaml";
@@ -479,6 +544,18 @@ int main(int argc, char** argv) {
         reject_config(invalid);
         invalid["tracking"]["ctc"]["kp_per_s2"] = YAML::Load("[1, -1, 1]");
         reject_config(invalid);
+        for (const auto bad_kd : {YAML::Load("[1, 2]"), YAML::Load("[1, -1, 1]"),
+                 YAML::Load("[1, .nan, 1]"), YAML::Load("[1, .inf, 1]")}) {
+            invalid = YAML::Clone(ctc_config);
+            invalid["tracking"]["ctc"]["kd_per_s"] = bad_kd;
+            reject_config(invalid);
+        }
+        invalid = YAML::Clone(ctc_config);
+        invalid["tracking"]["ctc"].remove("kd_per_s");
+        reject_config(invalid);
+        invalid = YAML::Clone(ctc_config);
+        invalid["tracking"]["ctc"]["kd"] = 14;
+        reject_config(invalid);
         invalid = YAML::Clone(ilc_config);
         invalid["tracking"]["ilc"]["phase_bins"] = 0;
         reject_config(invalid);
@@ -520,12 +597,12 @@ int main(int argc, char** argv) {
                                         : ctc ? tracking_ctc : use_model ? tracking_on : tracking_off;
                 qhrr05::ResetSimulation(home, model.get(), data.get());
                 const int site = mj_name2id(model.get(), mjOBJ_SITE, "FL_foot");
-                std::array<double, 3> center, position, velocity{}, gravity{}, torque{};
+                std::array<double, 3> center, position, velocity{}, gravity{};
                 std::array<double, 9> jacobian{};
                 std::copy_n(data->site_xpos + 3 * site, 3, center.begin());
 
                 prepare(tracking, 10, center, home, plane);
-                tracking.Compute(10, home, velocity, gravity, home_jacobian, center, torque);
+                tracking.Compute(10, home, velocity, gravity, home_jacobian, center, position_reference, torque);
                 Require(tracking.toe_reference() == center &&
                             tracking.toe_velocity_reference() == velocity,
                     "entry reference is discontinuous");
@@ -534,17 +611,17 @@ int main(int argc, char** argv) {
                     const double period = config["tracking"]["trajectory"]["period_sec"].as<double>();
                     const double ramp = config["tracking"]["trajectory"]["ramp_sec"].as<double>();
                     const double probe = 10 + ramp + .137 * period;
-                    tracking.Compute(probe, home, velocity, gravity, home_jacobian, center, torque);
+                    tracking.Compute(probe, home, velocity, gravity, home_jacobian, center, position_reference, torque);
                     const auto reference = tracking.toe_reference();
                     const auto reference_velocity = tracking.toe_velocity_reference();
                     const auto reference_acceleration = tracking.toe_acceleration_reference();
-                    tracking.Compute(probe + period, home, velocity, gravity, home_jacobian, center, torque);
+                    tracking.Compute(probe + period, home, velocity, gravity, home_jacobian, center, position_reference, torque);
 
                     for (int i = 0; i < 3; ++i)
                         Require(std::abs(tracking.toe_reference()[i] - reference[i]) < 1e-12,
-                            "figure eight does not repeat at configured period");
+                            "ellipse does not repeat at configured period");
 
-                    tracking.Compute(probe + 1e-6, home, velocity, gravity, home_jacobian, center, torque);
+                    tracking.Compute(probe + 1e-6, home, velocity, gravity, home_jacobian, center, position_reference, torque);
 
                     for (int i = 0; i < 3; ++i)
                         Require(std::abs((tracking.toe_reference()[i] - reference[i]) / 1e-6 -
@@ -581,7 +658,7 @@ int main(int argc, char** argv) {
                         std::copy_n(gravity_data->qfrc_bias, 3, gravity.begin());
                         mj_jacSite(model.get(), data.get(), jacobian.data(), nullptr, site);
                         const std::array<double, 3> measured_q{data->qpos[0], data->qpos[1], data->qpos[2]};
-                        tracking.Compute(data->time, measured_q, velocity, gravity, jacobian, position, torque);
+                        tracking.Compute(data->time, measured_q, velocity, gravity, jacobian, position, position_reference, torque);
                         saturated += tracking.torque_saturated();
                         Require(tracking.toe_reference()[fixed_axis] == center[fixed_axis] &&
                                     tracking.toe_velocity_reference()[fixed_axis] == 0 &&
@@ -659,7 +736,7 @@ int main(int argc, char** argv) {
                                 "impedance + ILC computed an unwanted dynamics feedforward torque");
 
                             for (int joint = 0; joint < 3; ++joint) {
-                                double expected = gravity[joint] - tracking.kd_motor()[joint] * velocity[joint] +
+                                double expected = gravity[joint] +
                                     tracking.ilc().torque()[joint];
 
                                 for (int axis = 0; axis < 3; ++axis) {
@@ -677,17 +754,20 @@ int main(int argc, char** argv) {
 
                                 const double limit = config["limits"]["torque_nm"][joint].as<double>();
                                 Require(std::abs(torque[joint] - std::clamp(expected, -limit, limit)) < 1e-9,
-                                    "impedance torque is not gravity + task feedback + ILC - motor damping");
+                                    "impedance torque is not gravity + task feedback + ILC");
                             }
                         }
 
                         for (int i = 0; i < 3; ++i) {
-                            MitCommand command{
-                                data->qpos[i] - home[i] +
-                                    (torque[i] + tracking.kd_motor()[i] * velocity[i]) / tracking.kp_motor()[i],
-                                0, tracking.kp_motor()[i], tracking.kd_motor()[i], 0};
+                            const double kp = tracking.kp_motor()[i];
+                            const double limit = config["limits"]["torque_nm"][i].as<double>();
+                            const double position = position_reference[i] + torque[i] / kp;
+                            MitCommand command{std::clamp(position,
+                                data->qpos[i] - limit / kp, data->qpos[i] + limit / kp),
+                                0, kp, tracking.kd_motor()[i], 0};
+                            command.position -= home[i];
                             commands[i] = openrobot::DecodeMitCommand(
-                                openrobot::EncodeMitCommand(command, 45, 1), 45, 1);
+                                openrobot::EncodeMitCommand(command, 45, 1, 33), 45, 1, 33);
                         }
 
                         if (data->time > (use_ilc ? 12 : 2)) {
@@ -709,8 +789,8 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < 3; ++i) {
                         const auto& command = commands[i];
                         data->ctrl[i] = std::clamp(
-                            command.kp * (home[i] + command.position - data->qpos[i]) -
-                                command.kd * data->qvel[i],
+                            command.kp * (home[i] + command.position - data->qpos[i]) +
+                                command.kd * (command.velocity - data->qvel[i]) + command.tau_ff,
                             model->actuator_ctrlrange[2 * i], model->actuator_ctrlrange[2 * i + 1]);
 
                         Require(std::isfinite(data->qpos[i]) &&
@@ -751,14 +831,14 @@ int main(int argc, char** argv) {
                     // dwell. Require at least half the full reference span; the
                     // RMS/maximum error bounds above still verify physical tracking.
                     Require(maximum[component] - minimum[component] > amplitude,
-                        "toe did not draw both axes of the figure eight");
+                        "toe did not draw both axes of the ellipse");
                 }
 
                 mj_forward(model.get(), data.get());
                 std::copy_n(data->site_xpos + 3 * site, 3, position.begin());
                 const std::array<double, 3> current_joints{data->qpos[0], data->qpos[1], data->qpos[2]};
                 prepare(tracking, 7, position, current_joints, plane);
-                tracking.Compute(7, current_joints, velocity, gravity, jacobian, position, torque);
+                tracking.Compute(7, current_joints, velocity, gravity, jacobian, position, position_reference, torque);
                 Require(tracking.toe_reference() == position, "re-entry retained the previous center");
                 Require(tracking.ilc().updates() == 0 && tracking.ilc().torque() == zero,
                     "Tracking reentry retained a learned ILC table");
@@ -777,7 +857,7 @@ int main(int argc, char** argv) {
         std::ofstream(geometric_path) << geometric_config;
         qhrr05::TrackingController geometric(geometric_path);
         prepare(geometric, 0, outside_toe, home);
-        geometric.Compute(0, home, zero, zero, home_jacobian, outside_toe, torque);
+        geometric.Compute(0, home, zero, zero, home_jacobian, outside_toe, position_reference, torque);
         Require(geometric.joint_reference()[2] > model->jnt_range[5] && geometric.ik_error() <= 1e-5,
             "IK silently projected the target into physical joint limits");
 
@@ -794,11 +874,11 @@ int main(int argc, char** argv) {
         std::array<double, 3> current_toe;
         std::copy_n(data->site_xpos + 3 * toe_site, 3, current_toe.begin());
         prepare(failure, 0, current_toe, home);
-        failure.Compute(0, home, zero, zero, home_jacobian, current_toe, torque);
+        failure.Compute(0, home, zero, zero, home_jacobian, current_toe, position_reference, torque);
         Require(!failure.ik_failed(), "valid IK entered hold unexpectedly");
         std::array<double, 3> stopped_q = home;
         stopped_q[1] += .04;
-        failure.Compute(1.137, stopped_q, zero, zero, zero_jacobian, current_toe, torque);
+        failure.Compute(1.137, stopped_q, zero, zero, zero_jacobian, current_toe, position_reference, torque);
         Require(failure.ik_failed() && failure.joint_reference() == stopped_q,
             "IK failure did not latch the measured pose");
         const auto stopped_toe = failure.toe_reference();
@@ -813,12 +893,11 @@ int main(int argc, char** argv) {
         const std::array<double, 3> damping_velocity{.1, -.2, .15};
         const std::array<double, 3> hold_gravity{1, 2, 3};
         failure.Compute(20, displaced_q, damping_velocity, hold_gravity, zero_jacobian,
-            current_toe, torque);
+            current_toe, position_reference, torque);
 
         for (int i = 0; i < 3; ++i)
-            Require(std::abs(torque[i] - (hold_gravity[i] + failure.kp_motor()[i] *
-                        (stopped_q[i] - displaced_q[i]) - failure.kd_motor()[i] * damping_velocity[i])) < 1e-10,
-                "hold did not provide gravity-compensated joint PD");
+            Require(std::abs(torque[i] - hold_gravity[i]) < 1e-10,
+                "hold added joint damping or lost gravity/position feedback");
 
         Require(failure.ik_failed() && failure.joint_reference() == stopped_q &&
                     failure.toe_reference() == stopped_toe,
@@ -843,21 +922,24 @@ int main(int argc, char** argv) {
                 mju_zero(gravity_data->qvel, 3);
                 mj_forward(model.get(), gravity_data.get());
                 std::copy_n(gravity_data->qfrc_bias, 3, gravity.begin());
-                failure.Compute(21 + data->time, q, dq, gravity, zero_jacobian, current_toe, torque);
+                failure.Compute(21 + data->time, q, dq, gravity, zero_jacobian, current_toe, position_reference, torque);
 
                 for (int i = 0; i < 3; ++i) {
-                    const MitCommand command{
-                        q[i] - stopped_q[i] + (torque[i] + failure.kd_motor()[i] * dq[i]) / failure.kp_motor()[i],
-                        0, failure.kp_motor()[i], failure.kd_motor()[i], 0};
+                    const double kp = failure.kp_motor()[i];
+                    const double limit = config["limits"]["torque_nm"][i].as<double>();
+                    const double position = position_reference[i] + torque[i] / kp;
+                    MitCommand command{std::clamp(position, q[i] - limit / kp, q[i] + limit / kp),
+                        0, kp, failure.kd_motor()[i], 0};
+                    command.position -= stopped_q[i];
                     hold_commands[i] = openrobot::DecodeMitCommand(
-                        openrobot::EncodeMitCommand(command, 45, 1), 45, 1);
+                        openrobot::EncodeMitCommand(command, 45, 1, 33), 45, 1, 33);
                 }
             }
 
             for (int i = 0; i < 3; ++i) {
                 const auto& command = hold_commands[i];
-                data->ctrl[i] = command.kp * (stopped_q[i] + command.position - data->qpos[i]) -
-                                command.kd * data->qvel[i];
+                data->ctrl[i] = command.kp * (stopped_q[i] + command.position - data->qpos[i]) +
+                                command.kd * (command.velocity - data->qvel[i]) + command.tau_ff;
             }
 
             mj_step(model.get(), data.get());
@@ -874,7 +956,7 @@ int main(int argc, char** argv) {
         std::array<double, 9> recovered_jacobian;
         mj_jacSite(model.get(), data.get(), recovered_jacobian.data(), nullptr, toe_site);
         prepare(failure, 30, current_toe, recovered_q);
-        failure.Compute(30, recovered_q, zero, zero, recovered_jacobian, current_toe, torque);
+        failure.Compute(30, recovered_q, zero, zero, recovered_jacobian, current_toe, position_reference, torque);
         Require(!failure.ik_failed(), "explicit Tracking restart did not clear the hold");
         std::cout << "PASS: IK divergence -> measured-pose hold, zero FF, no auto-resume, MIT hold/settling, restart\n";
 
@@ -884,18 +966,17 @@ int main(int argc, char** argv) {
         std::ofstream(ctc_failure_path) << ctc_failure_config;
         qhrr05::TrackingController ctc_failure(ctc_failure_path);
         prepare(ctc_failure, 0, current_toe, recovered_q);
-        ctc_failure.Compute(0, recovered_q, zero, zero, recovered_jacobian, current_toe, torque);
+        ctc_failure.Compute(0, recovered_q, zero, zero, recovered_jacobian, current_toe, position_reference, torque);
         Require(!ctc_failure.ik_failed(), "CTC could not initialize at the measured pose");
-        ctc_failure.Compute(1.137, stopped_q, zero, zero, zero_jacobian, current_toe, torque);
+        ctc_failure.Compute(1.137, stopped_q, zero, zero, zero_jacobian, current_toe, position_reference, torque);
         Require(ctc_failure.ik_failed() && ctc_failure.joint_reference() == stopped_q &&
                     ctc_failure.ctc_torque() == zero && ctc_failure.inverse_dynamics_torque() == zero,
             "CTC IK failure did not latch the measured pose and clear its dynamic torque");
-        ctc_failure.Compute(20, displaced_q, damping_velocity, hold_gravity, zero_jacobian, current_toe, torque);
+        ctc_failure.Compute(20, displaced_q, damping_velocity, hold_gravity, zero_jacobian, current_toe, position_reference, torque);
 
         for (int i = 0; i < 3; ++i)
-            Require(std::abs(torque[i] - (hold_gravity[i] + ctc_failure.kp_motor()[i] *
-                        (stopped_q[i] - displaced_q[i]) - ctc_failure.kd_motor()[i] * damping_velocity[i])) < 1e-10,
-                "CTC failure did not use the same latched gravity/PD hold");
+            Require(std::abs(torque[i] - hold_gravity[i]) < 1e-10,
+                "CTC failure did not use the same latched gravity/position hold");
 
         auto ctc_limited_config = YAML::Clone(ctc_config);
         ctc_limited_config["limits"]["torque_nm"] = YAML::Load("[.001,.001,.001]");
@@ -903,7 +984,7 @@ int main(int argc, char** argv) {
         std::ofstream(ctc_limited_path) << ctc_limited_config;
         qhrr05::TrackingController ctc_limited(ctc_limited_path);
         prepare(ctc_limited, 0, current_toe, recovered_q);
-        ctc_limited.Compute(0, recovered_q, zero, zero, recovered_jacobian, current_toe, torque);
+        ctc_limited.Compute(0, recovered_q, zero, zero, recovered_jacobian, current_toe, position_reference, torque);
         Require(ctc_limited.torque_saturated(), "CTC torque limit did not report saturation");
 
         for (int i = 0; i < 3; ++i)

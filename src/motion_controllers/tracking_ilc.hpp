@@ -16,8 +16,14 @@ public:
     void Hold();
     void Compute(double elapsed);
     void Record(const std::array<double, 3>& joint_position_error,
-        const std::array<double, 3>& joint_velocity_error,
         double toe_error_m, bool controller_saturated);
+    // Used by FinishCycle only; keep learned tables and current output intact.
+    void SetParameters(int phase_lead_bins, int smoothing_passes, double retention);
+
+    int phase_bins() const { return bins_; }
+    int phase_lead_bins() const { return lead_bins_; }
+    int smoothing_passes() const { return smoothing_passes_; }
+    double retention() const { return retention_; }
 
     bool enabled() const {
         return enabled_;
@@ -56,7 +62,7 @@ private:
     int bins_ = 0, lead_bins_ = 0, smoothing_passes_ = 0, bin_ = 0;
     std::int64_t cycle_ = -1;
     std::uint64_t updates_ = 0, skipped_cycles_ = 0, samples_ = 0;
-    std::array<double, 3> position_gain_{}, velocity_gain_{}, torque_limit_{}, step_limit_{}, torque_{};
+    std::array<double, 3> position_gain_{}, torque_limit_{}, step_limit_{}, torque_{};
     std::vector<std::array<double, 3>> table_, previous_, learning_sum_, candidate_, scratch_;
     std::vector<unsigned> counts_;
 };

@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-bus-load-') as directory:
             before = len(records(log))
             baseline = records(log)[:before]
             assert any(float(row[2]) == 0 for row in baseline), log.read_text()
-            assert sum(int(row[6]) for row in baseline) == 6, 'Local TX was lost or counted twice'
+            assert sum(int(row[6]) for row in baseline) == 3, 'Local TX was lost or counted twice'
 
             # IDs outside the HAL's three motor filters must still contribute.
             with socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as sender:

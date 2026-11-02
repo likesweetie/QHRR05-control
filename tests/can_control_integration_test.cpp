@@ -1,5 +1,6 @@
 #include "simulation/simulation.hpp"
 #include "ipc/simulation/channel.hpp"
+#include "interfaces/input/client.hpp"
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -42,7 +43,8 @@ int main(int argc, char** argv) {
     try {
         Require(argc == 7 || argc == 8,
             "expected control/model/HAL-config/HAL/controller/simulation-config paths [ctc|impedance]");
-        const std::string method = argc == 8 ? argv[7] : "inverse_dynamics";
+        const bool rmd = argc == 8 && std::string(argv[7]) == "rmd";
+        const std::string method = argc == 8 && !rmd ? argv[7] : "inverse_dynamics";
         Require(method == "inverse_dynamics" || method == "ctc" || method == "impedance",
             "unknown CAN test tracking method");
         const bool use_ilc = method != "inverse_dynamics";
@@ -57,6 +59,9 @@ int main(int argc, char** argv) {
         const std::string sim_name = "/qhrr05-can-control-" + suffix;
         const std::string can_name = sim_name + "-bus";
         auto config = YAML::LoadFile(argv[1]);
+        if (rmd)
+            config["torque_reference_mode"] = "rmd_torque_ref";
+        config["rmd_damping_constant"] = 0;  // This test measures host damping and torque transport.
         config["tracking"]["mode"] = method;
         if (use_ilc) {
             // Exercise the independent ILC switch over real CAN while retaining
@@ -71,7 +76,9 @@ int main(int argc, char** argv) {
         auto hal_config = YAML::LoadFile(argv[3]);
         const auto motor_source = std::filesystem::path(argv[3]).parent_path() /
                                   hal_config["motor_config"].as<std::string>();
-        std::ofstream(directory / "motor profile.yaml") << YAML::LoadFile(motor_source.string());
+        auto motor_profile = YAML::LoadFile(motor_source.string());
+        motor_profile["mit"]["torque_max_nm"] = 33;  // Same MIT position-mode plant across variants.
+        std::ofstream(directory / "motor profile.yaml") << motor_profile;
         hal_config["motor_config"] = "motor profile.yaml";
         std::ofstream(hal_path) << hal_config;
 
@@ -79,9 +86,9 @@ int main(int argc, char** argv) {
         Require(openrobot::EncodeFeedback(openrobot::DecodeFeedback(bytes)) == bytes,
             "signed encoder feedback encoding mismatch");
         const auto decoded =
-            openrobot::DecodeMitCommand({0xC0, 255, 255, 0, 15, 255, 255, 128}, 45, 1);
+            openrobot::DecodeMitCommand({0xC0, 255, 255, 0, 15, 255, 255, 128}, 45, 1, 33);
         Require(decoded.position == 12.5 && decoded.velocity == -45 && decoded.kp == 500 &&
-                    decoded.kd == 5 && decoded.tau_ff == 0,
+                    decoded.kd == 5 && std::abs(decoded.tau_ff - 33. / 255) < 1e-12,
             "MIT position decoding mismatch");
 
         can = std::make_unique<shm_utils::Mapping>(can_name, true);
@@ -137,8 +144,7 @@ int main(int argc, char** argv) {
             shm_utils::Lock lock(shm);
             auto& next = shm_utils::Next(shm.motors, shm.motor_sequence);
 
-            for (int i = 0; i < 3; ++i)
-                next.position_offset[i] = 0;
+            next.coordinate_valid.fill(true);
 
             ++shm.motor_sequence;
         }
@@ -151,7 +157,7 @@ int main(int argc, char** argv) {
             const auto feedback = snapshot();
 
             for (int i = 0; i < 3; ++i) {
-                sensed->qpos[i] = feedback.position_offset[i] + feedback.feedback[i].position;
+                sensed->qpos[i] = feedback.feedback[i].position;
                 sensed->qvel[i] = feedback.feedback[i].velocity;
             }
 
@@ -185,13 +191,14 @@ int main(int argc, char** argv) {
             _exit(127);
         }
 
+        qhrr05::InputClient input(can_name);
         const auto request = [&](int mode) {
-            shm_utils::Lock lock(shm);
-            auto& control = shm_utils::Next(shm.control, shm.control_sequence);
-            control.requested_mode = mode;
-            control.target_force = 3;
-            ++control.motion_sequence;
-            ++shm.control_sequence;
+            TrackingPlane plane;
+            {
+                shm_utils::Lock lock(shm);
+                plane = shm.control[shm.control_sequence % kShmBufferCount].requested_tracking_plane;
+            }
+            input.Submit("mode " + std::to_string(mode) + " " + std::to_string(int(plane)));
         };
         const auto command = [&] {
             shm_utils::Lock lock(shm);
@@ -236,27 +243,50 @@ int main(int argc, char** argv) {
 
         for (int i = 0; i < 3; ++i) {
             const auto target = snapshot().command[i];
-            Require(target.kp == 0 && target.kd == 1 && target.velocity == 0 && target.tau_ff == 0,
-                "startup MIT command is not kp=0/kd=1/velocity=0/FF=0");
+            Require(target.kp == 0 && target.kd == 0 && target.velocity == 0 && target.tau_ff == 0,
+                "startup torque damping did not seed zero torque with zero gains");
             physical->qpos[i] += .01;
             physical->qvel[i] = .2 * (i + 1);
         }
 
         mj_forward(model.get(), physical.get());
 
-        for (int step = 0; step < 50; ++step)
+        // Let the output-encoder velocity LPF settle after the position step.
+        for (int step = 0; step < 600; ++step)
             tick(false);
 
         Require(command().damping_toe_reference == initial_toe,
             "CAN damping changed its captured toe target");
 
-        for (int i = 0; i < 3; ++i)
-            Require(std::abs(physical->ctrl[i] + physical->qvel[i]) < .03,
-                "actual MIT CAN damping is not pure -kd*dq");
+        for (int i = 0; i < 3; ++i) {
+            Require(std::abs(snapshot().command[i].tau_ff) < 1e-9,
+                "fixed encoder position retained a false damping torque");
+            Require(std::abs(physical->ctrl[i] - (rmd ? 0 : 33. / 255)) < 1e-9,
+                "zero torque wire quantization was not modeled");
+        }
+        std::array<double, 3> sum_torque{};
+        for (int step = 0; step < 200; ++step) {
+            for (int i = 0; i < 3; ++i) {
+                physical->qpos[i] += .001 * (i + 1);
+                physical->qvel[i] = 0;  // Firmware velocity must not drive host damping.
+            }
+            tick(false);
+            if (step >= 50)
+                for (int i = 0; i < 3; ++i)
+                    sum_torque[i] += physical->ctrl[i];
+        }
+        for (int i = 0; i < 3; ++i) {
+            const auto target = snapshot().command[i];
+            Require(target.kp == 0 && target.kd == 0 && target.tau_ff < 0,
+                "position-derived damping did not reach CAN as direct torque");
+            Require(target.rmd_torque == rmd, "damping selected the wrong CAN protocol");
+            Require(std::abs(sum_torque[i] / 150 + (i + 1)) < .5,
+                "CAN damping torque does not follow differentiated encoder position");
+        }
 
         reset_free_space(origin);
         std::cout
-            << "PASS: actual CAN startup kp=0/kd=1, captured toe target, no position/gravity kick\n";
+            << "PASS: CAN torque damping kp=kd=0, position differentiation and fixed toe reference\n";
         request(0);  // Homing now requires an explicit request.
 
         for (int step = 0; step < 6000 && !command().holding; ++step)
@@ -272,21 +302,14 @@ int main(int argc, char** argv) {
             Require(state.enabled[i] && state.received_sequence[i] > 200,
                 "MIT feedback did not traverse CAN");
             Require(std::abs(physical->qpos[i] - home[i]) < .08, "CAN homing did not track target");
-            Require(std::abs(state.position_offset[i] + state.feedback[i].position -
+            Require(std::abs(state.feedback[i].position -
                              physical->qpos[i]) < .01,
                 "CAN position feedback differs from physics");
         }
 
         std::cout << "PASS: real CAN homing with poisoned legacy joint feedback/torque\n";
         for (const auto plane : {TrackingPlane::XY, TrackingPlane::XZ, TrackingPlane::YZ}) {
-            {
-                shm_utils::Lock lock(shm);
-                auto& control = shm_utils::Next(shm.control, shm.control_sequence);
-                control.requested_tracking_plane = plane;
-                control.requested_mode = 3;
-                ++control.motion_sequence;
-                ++shm.control_sequence;
-            }
+            input.Submit("mode 3 " + std::to_string(int(plane)));
 
             double tracking_error_squared = 0;
             bool observed_ilc_torque = false;
@@ -332,8 +355,10 @@ int main(int argc, char** argv) {
                         const double error = control.tracking_position_reference[i] -
                                              physical->site_xpos[3 * tracking_site + i];
                         tracking_error_squared += error * error;
-                        Require(snapshot().command[i].tau_ff == 0,
-                            "Tracking sent nonzero torque feedforward");
+                        const auto target = snapshot().command[i];
+                        Require(rmd ? target.rmd_torque && target.kp == 0 && target.kd == 0
+                                    : target.tau_ff == 0,
+                            "Tracking selected the wrong torque output path");
                     }
 
                     ++tracking_samples;
@@ -383,7 +408,8 @@ int main(int argc, char** argv) {
             const auto state = snapshot();
 
             for (int i = 0; i < 3; ++i)
-                Require(state.command[i].tau_ff == 0 && std::isfinite(state.command[i].position),
+                Require(!state.command[i].rmd_torque && state.command[i].kp > 0 &&
+                            (rmd || state.command[i].tau_ff == 0) && std::isfinite(state.command[i].position),
                     "Ball mode bypassed MIT position commands");
         }
 
@@ -452,7 +478,9 @@ int main(int argc, char** argv) {
             "IK hold terminated control, resumed tracking or changed its captured target");
 
         for (int i = 0; i < 3; ++i) {
-            Require(snapshot().command[i].tau_ff == 0 && snapshot().enabled[i],
+            const auto target = snapshot().command[i];
+            Require(!target.rmd_torque && target.kp > 0 &&
+                        (rmd || target.tau_ff == 0) && snapshot().enabled[i],
                 "IK hold disabled the motor or used torque FF instead of holding");
             Require(std::abs(physical->qpos[i] - stopped_reference[i]) < .05,
                 "actual CAN IK hold moved away from its captured pose");
@@ -511,6 +539,8 @@ int main(int argc, char** argv) {
 
         Require(command().mode == 2 && std::isfinite(command().magnetic.estimated_normal_force),
             "Magnetic mode did not run over CAN");
+        Require(snapshot().command[0].rmd_torque == rmd,
+            "Magnetic mode selected the wrong CAN protocol");
         std::cout << "PASS: Gravity and Magnetic position targets over CAN\n";
 
         const int object = mj_name2id(model.get(), mjOBJ_BODY, "touch_object");

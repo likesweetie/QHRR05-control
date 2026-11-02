@@ -5,4 +5,4 @@ add_library(interfaces STATIC
     input/interface.cpp
     input/client.cpp
     web_gui/bridge.cpp)
-target_link_libraries(interfaces PUBLIC qhrr05_common ipc_simulation yaml-cpp pthread)
+target_link_libraries(interfaces PUBLIC qhrr05_common ipc_simulation robot_model yaml-cpp pthread)

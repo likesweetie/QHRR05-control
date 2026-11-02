@@ -1,5 +1,5 @@
 #include "motion_controllers/magnetic_touch_controller.hpp"
-#include "control/limits.hpp"
+#include "control/control.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -12,6 +12,7 @@ using numeric::Norm;
 
 MagneticTouchController::MagneticTouchController(const std::string& path) : observer_(path) {
     const auto config = YAML::LoadFile(path);
+    const bool torque_ref_as_position = ReadTorqueRefAsPosition(config);
 
     if (config["robot"].as<std::string>() != "qhrr-05")
         throw std::runtime_error("only qhrr-05 is supported");
@@ -43,7 +44,6 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
         return result;
     };
 
-    damping_ = joints("joint_damping_nm_s_rad");
     kp_motor_ = joints("kp_motor");
     kd_motor_ = joints("kd_motor");
     torque_limit_ = ReadControlTorqueLimits(config);
@@ -66,6 +66,15 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
     maximum_speed_ = scalar("maximum_velocity_m_s");
     maximum_distance_ = scalar("maximum_displacement_m");
     joint_margin_ = scalar("joint_margin_rad");
+    normal_bandwidth_ = s["normal_bandwidth_hz"].as<double>(2.0);
+    normal_max_rate_ = s["normal_max_rate_rad_s"].as<double>(1.5707963267948966);
+    normal_max_deviation_ = s["normal_max_deviation_rad"].as<double>(0.5235987755982988);
+
+    for (double value : {normal_bandwidth_, normal_max_rate_, normal_max_deviation_})
+        if (!std::isfinite(value) || value <= 0)
+            throw std::runtime_error("magnetic normal tracking parameters must be positive and finite");
+    if (normal_max_deviation_ > 1.5707963267948966)
+        throw std::runtime_error("magnetic normal_max_deviation_rad must not exceed pi/2");
 
     const double target = scalar("target_force_n");
 
@@ -75,10 +84,14 @@ MagneticTouchController::MagneticTouchController(const std::string& path) : obse
         release_delay_ <= 0 || maximum_speed_ <= 0 || maximum_distance_ <= 0)
         throw std::runtime_error("invalid magnetic thresholds, force, time or motion bounds");
 
-    for (int i = 0; i < 3; ++i)
-        if (damping_[i] < 0 || kp_motor_[i] <= 0 || kp_motor_[i] > 500 || kd_motor_[i] < 0 ||
+    for (int i = 0; i < 3; ++i) {
+        if (kp_motor_[i] < 0 || kp_motor_[i] > 500 || kd_motor_[i] < 0 ||
             torque_limit_[i] <= 0 || workspace_min_[i] >= workspace_max_[i])
             throw std::runtime_error("invalid magnetic joint/workspace bounds");
+        if (torque_ref_as_position && kp_motor_[i] == 0)
+            throw std::runtime_error(
+                "magnetic_touch.kp_motor must be positive when torque_reference_mode=torque_ref_as_position");
+    }
 }
 
 void MagneticTouchController::Transition(MagneticPhase phase, MagneticReason reason, double time) {
@@ -107,6 +120,7 @@ void MagneticTouchController::Start(double time, const std::array<double, 3>& to
     telemetry_.event_sequence = event;
     telemetry_.event_time = time;
     telemetry_.toe_reference = toe_position;
+    anchor_position_ = previous_toe_position_ = toe_position;
 
     observer_.Reset();
 
@@ -118,13 +132,13 @@ void MagneticTouchController::Start(double time, const std::array<double, 3>& to
 void MagneticTouchController::Compute(double time,
     const std::array<double, 3>& joint_position,
     const std::array<double, 3>& joint_velocity,
-    const std::array<double, 3>& joint_acceleration,
     const std::array<double, 3>& motor_torque,
     const std::array<double, 3>& gravity_torque,
     const std::array<double, 3>& bias_torque,
     const std::array<double, 3>& passive_torque,
     const std::array<double, 3>& friction_limit,
     const std::array<double, 9>& mass_matrix,
+    const std::array<double, 9>& coriolis_matrix,
     const std::array<double, 9>& jacobian,
     const std::array<double, 3>& toe_position,
     const std::array<double, 3>& joint_min,
@@ -132,8 +146,8 @@ void MagneticTouchController::Compute(double time,
     std::uint64_t measurement_sequence,
     double measurement_dt,
     double target_force,
-    std::array<double, 3>& torque,
-    std::array<double, 3>& reference) {
+    std::array<double, 3>& position_reference,
+    std::array<double, 3>& torque) {
     if (!std::isfinite(time) || time < previous_time_ || !std::isfinite(target_force) ||
         target_force < 0 || target_force > maximum_force_)
         throw std::runtime_error("invalid magnetic time or target force");
@@ -144,13 +158,14 @@ void MagneticTouchController::Compute(double time,
     observer_.Update(measurement_sequence,
         measurement_dt,
         joint_velocity,
-        joint_acceleration,
         motor_torque,
         mass_matrix,
+        coriolis_matrix,
         jacobian,
         bias_torque,
         passive_torque,
-        friction_limit);
+        friction_limit,
+        joint_position);
 
     telemetry_.observer_valid = observer_.valid();
     telemetry_.estimated_force = observer_.force();
@@ -160,11 +175,11 @@ void MagneticTouchController::Compute(double time,
     telemetry_.force_command = 0;
     telemetry_.torque_saturated = false;
 
-    reference = joint_position;
+    position_reference = joint_position;
     const auto& compensation = gravity_only_ ? gravity_torque : bias_torque;
 
     for (int i = 0; i < 3; ++i) {
-        torque[i] = compensation[i] - damping_[i] * joint_velocity[i];
+        torque[i] = compensation[i];
 
         if (!std::isfinite(torque[i]))
             throw std::runtime_error("invalid magnetic joint feedback");
@@ -190,7 +205,12 @@ void MagneticTouchController::Compute(double time,
                               : (!observer_.valid() ? MagneticReason::ObserverInvalid : bounds());
 
     if (invalid != MagneticReason::None) {
+        // A fresh GM needs two samples. Starting its momentum history is not a
+        // contact fault; active contact still releases on any observer reset.
+        const bool starting = invalid == MagneticReason::ObserverInvalid && observer_.warming_up() &&
+            telemetry_.phase == MagneticPhase::Free && armed_;
         Release(invalid, time);
+        if (starting) armed_ = true;
         telemetry_.toe_reference = toe_position;
     } else {
         const double magnitude = Norm(telemetry_.estimated_force);
@@ -219,7 +239,7 @@ void MagneticTouchController::Compute(double time,
                 for (int i = 0; i < 3; ++i)
                     telemetry_.normal[i] = -telemetry_.estimated_force[i] / magnitude;
 
-                contact_position_ = toe_position;
+                anchor_position_ = previous_toe_position_ = toe_position;
                 telemetry_.displacement = 0;
 
                 ramp_from_ = ramped_force_ = 0;
@@ -233,16 +253,49 @@ void MagneticTouchController::Compute(double time,
         if (telemetry_.phase == MagneticPhase::Following ||
             telemetry_.phase == MagneticPhase::Releasing) {
             telemetry_.estimated_normal_force = -Dot(telemetry_.normal, telemetry_.estimated_force);
-            std::array<double, 3> delta{}, velocity{};
+            // Gate on the previous normal's projected force, not just |F|: a
+            // tangential force must not rotate the normal to hide contact loss.
+            if (telemetry_.phase == MagneticPhase::Following &&
+                telemetry_.estimated_normal_force > contact_recover_ &&
+                magnitude > contact_recover_ && dt > 0) {
+                std::array<double, 3> measured_normal{};
+                for (int i = 0; i < 3; ++i)
+                    measured_normal[i] = -telemetry_.estimated_force[i] / magnitude;
+                const double alignment = std::clamp(Dot(telemetry_.normal, measured_normal), -1.0, 1.0);
+                if (alignment > std::cos(normal_max_deviation_)) {
+                    const double angle = std::acos(alignment);
+                    if (angle > 1e-8) {
+                        const double alpha = -std::expm1(-2 * std::acos(-1.0) * normal_bandwidth_ * dt);
+                        const double step = std::min(alpha * angle, normal_max_rate_ * dt);
+                        // Spherical interpolation enforces the angular rate cap exactly.
+                        const double from = std::sin(angle - step) / std::sin(angle);
+                        const double to = std::sin(step) / std::sin(angle);
+                        std::array<double, 3> updated{};
+                        for (int i = 0; i < 3; ++i)
+                            updated[i] = from * telemetry_.normal[i] + to * measured_normal[i];
+                        const double length = Norm(updated);
+                        if (length > 1e-8)
+                            for (int i = 0; i < 3; ++i)
+                                telemetry_.normal[i] = updated[i] / length;
+                    }
+                }
+                telemetry_.estimated_normal_force = -Dot(telemetry_.normal, telemetry_.estimated_force);
+            }
+            std::array<double, 3> delta{}, velocity{}, toe_step{};
 
             for (int i = 0; i < 3; ++i) {
-                delta[i] = toe_position[i] - contact_position_[i];
+                toe_step[i] = toe_position[i] - previous_toe_position_[i];
 
                 for (int j = 0; j < 3; ++j)
                     velocity[i] += jacobian[3 * i + j] * joint_velocity[j];
             }
+            const double normal_step = Dot(telemetry_.normal, toe_step);
+            for (int i = 0; i < 3; ++i) {
+                anchor_position_[i] += toe_step[i] - telemetry_.normal[i] * normal_step;
+                delta[i] = toe_position[i] - anchor_position_[i];
+            }
 
-            if (Norm(delta) > maximum_distance_)
+            if (std::abs(Dot(telemetry_.normal, delta)) > maximum_distance_)
                 Release(MagneticReason::StrokeLimit, time);
             else {
                 if (telemetry_.phase == MagneticPhase::Following &&
@@ -283,7 +336,7 @@ void MagneticTouchController::Compute(double time,
 
                     for (int i = 0; i < 3; ++i)
                         telemetry_.toe_reference[i] =
-                            contact_position_[i] + telemetry_.normal[i] * telemetry_.displacement;
+                            anchor_position_[i] + telemetry_.normal[i] * telemetry_.displacement;
 
                     std::array<double, 3> tracking{};
 
@@ -312,7 +365,7 @@ void MagneticTouchController::Compute(double time,
 
                         for (int i = 0; i < 3; ++i)
                             telemetry_.toe_reference[i] =
-                                contact_position_[i] + telemetry_.normal[i] * old_displacement;
+                                anchor_position_[i] + telemetry_.normal[i] * old_displacement;
                     }
                 }
             }
@@ -321,6 +374,7 @@ void MagneticTouchController::Compute(double time,
 
     if (telemetry_.phase == MagneticPhase::Free)
         telemetry_.toe_reference = toe_position;
+    previous_toe_position_ = toe_position;
 
     for (int i = 0; i < 3; ++i) {
         telemetry_.torque_saturated |= std::abs(torque[i]) > torque_limit_[i];

@@ -1,3 +1,4 @@
+torque_reference_mode: torque_ref_as_position
 robot: qhrr-05
 model_path: ../../models/qhrr-05/qhrr-05.xml  # Shared by all controller model calculations.
 
@@ -29,7 +30,11 @@ zero_set:  # 런타임 영점 탐색; 순서 HR(hip) -> HP(thigh) -> KP(calf)
   settle_tolerance_rad: 0.04
   feedback_timeout_sec: 0.25
 
+damping:  # 테스트: MIT C0 누적각 차분 + 30 Hz 1차 속도 LPF, kp=kd=0, tau_ff 직접 출력
+  gain_nm_s_rad: [1.0, 1.0, 1.0]  # tau = -gain * dq_filtered; 모터 MIT D와 별도
+
 homing:
+  torque_control: false
   kp: [40.0, 40.0, 40.0]  # N*m/rad
   kd: [1.0, 1.0, 1.0]    # N*m*s/rad
   initial_position_rad: [0.0, 0.3, -1.0]
@@ -41,12 +46,9 @@ gravity_compensation:
   kp_motor: [40.0, 40.0, 40.0]  # Simulated inner position servo, N*m/rad.
   kd_motor: [1.0, 1.0, 1.0]    # N*m*s/rad.
   alpha: 1.0  # Scale the selected gravity/bias compensation, 0..1.
-  # N*m/rad; desired pose is captured when entering gravity mode.
-  # Zero stiffness allows manual motion; kd_motor still damps velocity.
-  task_stiffness: [0.0, 0.0, 0.0]
-  damping_ratio: [1.0, 1.0, 1.0]  # Baseline regressions retain the original uncompensated plant drag.
+  # Pure torque compensation: position component follows the measured joint angle.
   friction_compensation:
-    enabled: true  # false: 건마찰·점성감쇠 보상 OFF; 중력과 motor kd는 유지
+    enabled: true  # false: 건마찰 보상 OFF; MIT D는 모터에서만 적용
     coulomb_ratio: [0.0, 0.0, 0.0]
     velocity_scale_rad_s: 0.03
 
@@ -69,8 +71,10 @@ magnetic_touch:
   tracking_damping_ns_m: 5.0
   maximum_velocity_m_s: 0.03
   maximum_displacement_m: 0.015
+  normal_bandwidth_hz: 2.0
+  normal_max_rate_rad_s: 1.5707963267948966
+  normal_max_deviation_rad: 0.5235987755982988
   joint_margin_rad: 0.025
-  joint_damping_nm_s_rad: [0.2, 0.2, 0.2]
   workspace_min_m: [-0.15, -0.15, 0.025]
   workspace_max_m: [0.5, 0.5, 0.45]
   observer:
@@ -80,8 +84,8 @@ magnetic_touch:
     maximum_estimate_n: 50.0
     friction_velocity_rad_s: 0.01
 
-# World XY/XZ/YZ figure eight, centered at the toe on entry; GUI keys 1/2/3.
-tracking:  # 월드 XY/XZ/YZ 무한대 궤적 추종; 단축키 1/2/3, 변경 후 재시작
+# World XY/XZ/YZ circle/ellipse, starting at the toe on entry; GUI keys 1/2/3.
+tracking:  # 월드 XY/XZ/YZ 원·타원 궤적 추종; 단축키 1/2/3, 변경 후 재시작
   mode: inverse_dynamics  # inverse_dynamics / ctc / impedance; 기본 제어 방식은 이 항목 하나로 선택
   trajectory:  # 궤적 생성; 월드 X/Y/Z, 제어 방식과 공통
     timing: uniform_acceleration  # 가속도 크기 편차 완화; constant_speed: 기존 호 길이 정속
@@ -105,15 +109,14 @@ tracking:  # 월드 XY/XZ/YZ 무한대 궤적 추종; 단축키 1/2/3, 변경 �
     damping_ns_m: [35.0, 35.0, 35.0]  # 월드 X/Y/Z 목표·현재 속도 오차 감쇠(N·s/m)
   inverse_dynamics:  # mode=inverse_dynamics에서만 사용
     alpha: 1.0  # 0: 현재 자세 중력, 1: 목표 상태 전체 역동역학; 중간값은 보간
-  ctc:  # mode=ctc에서만 사용; HR/HP/KP, 모터 서보 게인과 별개
+  ctc:  # CTC 고유의 모델 기반 관절 위치 피드백; MIT 위치 P와 중복하지 않음
     kp_per_s2: [1600.0, 1600.0, 1600.0]  # 관절 위치 오차→목표 가속도 이득(1/s²)
-    kd_per_s: [80.0, 80.0, 80.0]  # 관절 속도 오차→목표 가속도 이득(1/s)
+    kd_per_s: [14.0, 14.0, 14.0]  # 관절 속도 오차→목표 가속도 이득(1/s)
   ilc:  # 모든 tracking 모드에 독립적으로 더하는 반복 학습 토크; HR/HP/KP
     enabled: false  # true: 사용, false: 보상·학습 OFF
     phase_bins: 128  # 한 주기의 학습 구간 수; 주기×제어 주파수 이하
     warmup_cycles: 1  # 속도 램프와 위상 정렬 후 건너뛸 주기 수
     position_gain_nm_rad: [4.0, 4.0, 4.0]  # 관절 위치 오차→다음 주기 학습 토크(N·m/rad); 유효 게인
-    velocity_gain_nm_s_rad: [0.1, 0.1, 0.1]  # 관절 속도 오차→다음 주기 학습 토크(N·m·s/rad); 유효 게인
     retention: 1.0  # 기존 학습값 유지율(0 초과..1)
     phase_lead_bins: 1  # 뒤쪽 위상 오차를 앞쪽 보상에 반영할 구간 수
     smoothing_passes: 2  # 위상 방향 순환 대칭 3점 Q 필터의 반복 횟수
@@ -132,7 +135,7 @@ ball_following:  # 조이스틱 공 추종; GUI B, FK 격자와 관절 보간 �
   ball_fast_speed_m_s: 0.30  # R2를 누를 때 공 이동 속도(m/s)
   trigger_threshold: 0.3  # 트리거 눌림 판정(0..1); 둘 다 누르면 느린 속도 우선
   kp_motor: [40.0, 40.0, 40.0]  # HR/HP/KP 관절 위치 P(N·m/rad)
-  kd_motor: [1.0, 1.0, 1.0]  # HR/HP/KP 관절 속도 D(N·m·s/rad)
+  kd_motor: [1.0, 1.0, 1.0]  # HR/HP/KP MIT 내부 D(N·m·s/rad); 목표 속도 0
 
 plots:
   history_sec: 10.0

@@ -1,5 +1,5 @@
 #include "operator_panel.hpp"
-#include "control/limits.hpp"
+#include "control/control.hpp"
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <algorithm>
@@ -30,7 +30,7 @@ viewer::Sample PlotSample(const Snapshot& snapshot) {
         result.position[i] =
             snapshot.simulation_available
                 ? s.position_gt[i]
-                : snapshot.motor.position_offset[i] + snapshot.motor.feedback[i].position;
+                : snapshot.motor.feedback[i].position;
     result.reference = snapshot.motor.reference;
     result.measured_torque = snapshot.motor.motor_torque;
     result.magnetic = c.magnetic;

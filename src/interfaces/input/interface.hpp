@@ -16,6 +16,14 @@ struct InputCommand {
     DriveAction drive_action = DriveAction::None;
     int motor_axis = -1;
     bool auxiliary = false;
+    bool anticogging_status = false, set_anticogging_phase = false, set_anticogging_amplitude = false;
+    int anticogging_order = 21;
+    double phase_delta = 0, amplitude_delta = 0;
+    bool rmd_status = false, set_rmd_damping = false;
+    double rmd_damping_constant = 0;
+    bool tracking_ilc_status = false, set_tracking_ilc = false;
+    int ilc_phase_lead_bins = 0, ilc_smoothing_passes = 0;
+    double ilc_retention = 1;
 };
 
 struct InputContext {
@@ -35,7 +43,8 @@ public:
     std::uint64_t ApproveAuxiliary();
     std::optional<InputCommand> Receive();
     void Reply(
-        const InputCommand& command, const std::string& rejection, std::uint64_t motion_sequence);
+        const InputCommand& command, const std::string& rejection, std::uint64_t motion_sequence,
+        const std::string& data_json = {});
 
     static std::uint64_t RequestMode(ShmData& shm, int mode, TrackingPlane plane, double force);
     static void RequestDrive(ShmData& shm, DriveAction action);

@@ -1,4 +1,4 @@
-"""Exercise launcher recovery in a temporary checkout, never deleting the user's build."""
+"""Exercise launcher incremental builds and recovery in a temporary checkout."""
 
 import os
 from pathlib import Path
@@ -18,7 +18,10 @@ def run(root, script, *args, expected=0, env=None):
         text=True,
         timeout=60,
     )
-    assert result.returncode == expected, result.stdout + result.stderr
+    if expected is None:
+        assert result.returncode != 0, result.stdout + result.stderr
+    else:
+        assert result.returncode == expected, result.stdout + result.stderr
     return result.stdout + result.stderr
 
 
@@ -28,20 +31,28 @@ with tempfile.TemporaryDirectory(prefix="qhrr-launcher-build-") as folder:
     scripts.mkdir()
     for name in (
         "ensure_build.sh",
+        "run_daemon.sh",
         "run_simulation.sh",
         "simulation_config.py",
         "run_visualization.sh",
         "visualization_process.sh",
     ):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    # Hardware launcher coverage uses a local CAN-preparation stub, never a device.
+    (scripts / "prepare_can.py").write_text('print("CAN_PREPARED", flush=True)\n')
     (root / "config/daemon").mkdir(parents=True)
     (root / "config/daemon/daemon.yaml").write_text(
         'runtime_mode: hardware\nshm_name: /launcher_test\nprocesses:\n'
         '  - name: control\n    exec_path: control\n    working_directory: ../..\n    args: [control.yaml, "{shm_name}"]\n')
     (root / "config/can_hal").mkdir()
     (root / "config/can_hal/can_hal.yaml").write_text('interface: can0\nmotor_config: motor.yaml\n')
-    (root / "main.cpp").write_text(
-        '#include <iostream>\nint main() {std::cout << "NATIVE_LAUNCHED\\n";}\n'
+    header = root / "message.hpp"
+    header.write_text('#define LAUNCH_MESSAGE "NATIVE_LAUNCHED"\n')
+    source = root / "main.cpp"
+    source.write_text(
+        '#include <iostream>\n#include "message.hpp"\n'
+        '#ifndef LAUNCH_SUFFIX\n#define LAUNCH_SUFFIX ""\n#endif\n'
+        'int main() {std::cout << LAUNCH_MESSAGE << LAUNCH_SUFFIX << "\\n";}\n'
     )
     cmake = root / "CMakeLists.txt"
     cmake.write_text(
@@ -67,11 +78,40 @@ set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
         "web_gui_bridge",
     ):
         assert os.access(root / "build" / name, os.X_OK), name
+    daemon = root / "build" / "daemon"
+    before = daemon.stat().st_mtime_ns
     ready = run(root, "run_simulation.sh", *args)
-    assert "automatically building" not in ready and "NATIVE_LAUNCHED" in ready
+    assert "Checking native source changes" in ready and "NATIVE_LAUNCHED" in ready
+    assert daemon.stat().st_mtime_ns == before, "unchanged executable was rebuilt"
     (root / "build" / "simulation").unlink()
     assert "automatically building" in run(root, "run_simulation.sh", *args)
-    print("PASS: daemon builds missing children, reuses complete builds, runs from another cwd")
+    print("PASS: missing binaries recovered; unchanged native targets are not rebuilt")
+
+    source.write_text(source.read_text().replace('<< "\\n";', '<< " SOURCE_UPDATED\\n";'))
+    changed = run(root, "run_daemon.sh", "--no-terminals")
+    assert "NATIVE_LAUNCHED SOURCE_UPDATED" in changed
+    assert "CAN_PREPARED" in changed
+    assert changed.index("Checking native source changes") < changed.index("CAN_PREPARED")
+    header.write_text('#define LAUNCH_MESSAGE "NATIVE_LAUNCHED_HEADER_UPDATED"\n')
+    changed = run(root, "run_daemon.sh", "--no-terminals")
+    assert "NATIVE_LAUNCHED_HEADER_UPDATED SOURCE_UPDATED" in changed
+    cmake.write_text(cmake.read_text() +
+                     '\ntarget_compile_definitions(daemon PRIVATE LAUNCH_SUFFIX=" CMAKE_UPDATED")\n')
+    changed = run(root, "run_daemon.sh", "--no-terminals")
+    assert "NATIVE_LAUNCHED_HEADER_UPDATED CMAKE_UPDATED SOURCE_UPDATED" in changed
+    before = daemon.stat().st_mtime_ns
+    run(root, "run_daemon.sh", "--no-terminals")
+    assert daemon.stat().st_mtime_ns == before, "unchanged daemon was rebuilt"
+    print("PASS: hardware launcher rebuilds source/header/CMake changes before CAN preparation")
+
+    working_source = source.read_text()
+    source.write_text("#error intentional_compile_failure\n")
+    failed = run(root, "run_daemon.sh", "--no-terminals", expected=None)
+    assert "intentional_compile_failure" in failed
+    assert "CAN_PREPARED" not in failed and "NATIVE_LAUNCHED" not in failed
+    source.write_text(working_source)
+    assert "NATIVE_LAUNCHED" in run(root, "run_daemon.sh", "--no-terminals")
+    print("PASS: compile failure never launches an existing stale daemon or prepares CAN")
 
     shutil.rmtree(root / "build")
     children = [
@@ -88,7 +128,7 @@ set_target_properties(qhrr_logctl PROPERTIES OUTPUT_NAME qhrr-logctl)
     outputs = [child.communicate(timeout=60)[0] for child in children]
     assert all(child.returncode == 0 for child in children), outputs
     assert sum(output.count("automatically building") for output in outputs) == 1, outputs
-    print("PASS: complete build deletion and concurrent launchers perform one recovery build")
+    print("PASS: concurrent launchers serialize build checks and perform one recovery build")
 
     shutil.rmtree(root / "build")
     cmake.write_text(

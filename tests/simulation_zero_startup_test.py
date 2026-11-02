@@ -103,9 +103,7 @@ with tempfile.TemporaryDirectory(prefix='qhrr05-zero-startup-') as directory:
             first_pose = [values[f'simulation/ground_truth/position_gt[{i}]'] for i in range(3)]
         for i in range(3):
             if abs(values[f'motor/feedback[{i}]/velocity']) < 0.2:
-                measured = (
-                    values[f'motor/position_offset[{i}]'] + values[f'motor/feedback[{i}]/position']
-                )
+                measured = values[f'motor/feedback[{i}]/position']
                 errors[i].append(measured - values[f'simulation/ground_truth/position_gt[{i}]'])
 
     assert count > 100, count

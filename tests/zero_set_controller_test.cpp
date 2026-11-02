@@ -60,11 +60,19 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 18; ++i)
                 tick();
             Require(
-                zero.telemetry().phase == ZeroSetPhase::Backoff, "persistent stop not detected");
+                zero.telemetry().phase == ZeroSetPhase::SettingZero, "persistent stop not detected");
             const double expected =
-                config["zero_set"]["stop_position_rad"][axis].as<double>() - q[axis];
+                config["zero_set"]["stop_position_rad"][axis].as<double>();
             Require(
-                std::abs(zero.telemetry().offset[axis] - expected) < 1e-12, "bad runtime offset");
+                std::abs(zero.telemetry().position[axis] - expected) < 1e-12, "bad C3 position");
+            Require(!zero.telemetry().calibrated[axis], "calibrated before C3 confirmation");
+            const double before = zero.reference()[axis];
+            tick();
+            Require(zero.reference()[axis] == before, "moved before C3 confirmation");
+            q[axis] = expected;  // Motor now reports its rebased coordinate.
+            zero.ConfirmZero(time, q);
+            Require(zero.telemetry().calibrated[axis], "C3 confirmation did not calibrate");
+            Require(zero.reference()[axis] == expected, "old-frame reference survived C3");
             tau[axis] = 0;
             for (int i = 0; i < 100 && zero.telemetry().phase == ZeroSetPhase::Backoff; ++i) {
                 q[axis] = zero.reference()[axis];
@@ -95,6 +103,16 @@ int main(int argc, char** argv) {
             timed.Update(i * .01, q, dq, tau, seq);
         }
         Require(timed.telemetry().failure == ZeroSetFailure::Timeout, "axis timeout ignored");
+        config["zero_set"]["stop_position_rad"][0] = 6.0;
+        save();
+        bool rejected_position = false;
+        try {
+            qhrr05::ZeroSetController invalid(path);
+        } catch (const std::exception&) {
+            rejected_position = true;
+        }
+        Require(rejected_position, "unencodable C3 position accepted");
+        config["zero_set"]["stop_position_rad"][0] = .872665;
         config["zero_set"]["direction"][0] = 0;
         save();
         bool rejected = false;
