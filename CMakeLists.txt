@@ -202,6 +202,9 @@ if(BUILD_TESTING)
     set_tests_properties(logging_service logging_daemon PROPERTIES TIMEOUT 90)
     add_test(NAME terminal_layout COMMAND bash
         ${PROJECT_SOURCE_DIR}/tests/run_gui_test.sh ${PROJECT_SOURCE_DIR}/tests/terminal_layout_test.py $<TARGET_FILE:daemon>)
+    add_test(NAME terminal_layout_fhd COMMAND ${CMAKE_COMMAND} -E env
+        QHRR_GUI_TEST_SCREEN=1920x1080x24 bash
+        ${PROJECT_SOURCE_DIR}/tests/run_gui_test.sh ${PROJECT_SOURCE_DIR}/tests/terminal_layout_test.py $<TARGET_FILE:daemon>)
     add_test(NAME terminal_config COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/terminal_config_test.py $<TARGET_FILE:daemon>)
     set_tests_properties(terminal_config PROPERTIES TIMEOUT 30)
@@ -216,7 +219,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/terminal_statistics_test.py $<TARGET_FILE:daemon>)
     add_test(NAME daemon_shm COMMAND python3
         ${PROJECT_SOURCE_DIR}/tests/daemon_shm_smoke.py)
-    set_tests_properties(terminal_layout simulator_gui can_gui terminal_statistics daemon_shm
+    set_tests_properties(terminal_layout terminal_layout_fhd simulator_gui can_gui terminal_statistics daemon_shm
         PROPERTIES TIMEOUT 90)
     add_executable(virtual_iq_sensor_test tests/virtual_iq_sensor_test.cpp)
     target_link_libraries(virtual_iq_sensor_test PRIVATE simulation_core)

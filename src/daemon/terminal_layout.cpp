@@ -434,10 +434,17 @@ void Daemon::PlanTerminalLayout(std::vector<ProcessSpec>& specs,
     const int row_columns = std::min<int>(columns, terminals);
     const int rows = (int(terminals) + row_columns - 1) / row_columns;
     const int height = (area.height - gap_px * (rows - 1)) / rows;
-
-    if (height < 360 || (area.width - gap_px * (row_columns - 1)) / row_columns < 600)
+    // The readable tile size is specified at normal font size. Applying the
+    // configured zoom to both text and this check lets the default 0.85 zoom
+    // fit three rows on FHD without weakening the check at larger font sizes.
+    const int minimum_width = int(std::ceil(600 * zoom));
+    const int minimum_height = int(std::ceil(360 * zoom));
+    if (height < minimum_height ||
+        (area.width - gap_px * (row_columns - 1)) / row_columns < minimum_width)
         throw std::runtime_error(
-            "terminal work area is too small for readable tiles (minimum 600x360 px); change monitor or columns");
+            "terminal work area is too small for readable tiles (minimum " +
+            std::to_string(minimum_width) + "x" + std::to_string(minimum_height) +
+            " px at zoom " + std::to_string(zoom) + "); change monitor, columns, or zoom");
 
     std::ostringstream layout_log;
     layout_log << "[layout] monitor=" << names[selected] << " policy=" << monitor

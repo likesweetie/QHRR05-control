@@ -5,5 +5,5 @@ trap 'rm -rf -- "$gui_runtime_dir"' EXIT
 export XDG_RUNTIME_DIR="$gui_runtime_dir"
 export XDG_SESSION_TYPE=x11 GDK_BACKEND=x11 NO_AT_BRIDGE=1 GIO_USE_VFS=local GTK_USE_PORTAL=0
 unset GNOME_TERMINAL_SERVICE GNOME_TERMINAL_SCREEN AT_SPI_BUS_ADDRESS WAYLAND_DISPLAY
-xvfb-run -a -s '-screen 0 2560x1440x24' dbus-run-session -- \
+xvfb-run -a -s "-screen 0 ${QHRR_GUI_TEST_SCREEN:-2560x1440x24}" dbus-run-session -- \
     python3 "$@"

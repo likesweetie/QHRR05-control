@@ -150,7 +150,7 @@ monitoring:
 
 `monitor`는 `auto`, `primary`, 또는 `xrandr --listmonitors`에 표시되는 이름(예: `DP-2`)입니다. `columns`는 1~8, 여백·간격은 0~200 px, 자식 터미널 `zoom`은 0.5~2.0으로 조정합니다. 기존 호출 터미널의 글꼴 설정은 유지합니다. IDE 내장 터미널처럼 독립된 호출 창을 찾을 수 없는 경우에는 `include_daemon: false`를 명시합니다. 배치는 **시작 시에만** 적용하므로 이후 사용자가 창을 자유롭게 옮길 수 있습니다.
 
-이 기능은 **GNOME/X11 + XRandR** 기준입니다. Wayland 세션에서는 로그 터미널마다 `dbus-run-session`으로 독립 터미널 서버를 시작하고 `GDK_BACKEND=x11`로 XWayland에 연결해 같은 배열을 적용합니다. 기존 Wayland 터미널 서버를 재사용하지 않으며, 제어기·웹 GUI의 환경은 바꾸지 않습니다. 시작 명령을 입력한 native Wayland 터미널은 이동할 수 없으므로 `include_daemon: true`여도 배치에서 제외합니다. 고정 문자 수만 요청하지 않고 실제 창 장식·문자 셀 크기를 반영해 위치와 크기를 검증합니다. 창 식별에는 실행별 고유 `WM_WINDOW_ROLE`을 사용해 같은 제목의 다른 창을 이동하지 않습니다. 지정 모니터 없음·지원하지 않는 창 관리자·배치 거부·읽기 어려운 작은 타일(최소 600×360 px)은 오류로 알리며 겹친 창이나 임의의 다른 배치로 대체하지 않습니다. 창 관리자가 없는 시험용 X11은 작업 영역 정보가 없음을 알리고 모니터 경계를 사용합니다.
+이 기능은 **GNOME/X11 + XRandR** 기준입니다. Wayland 세션에서는 로그 터미널마다 `dbus-run-session`으로 독립 터미널 서버를 시작하고 `GDK_BACKEND=x11`로 XWayland에 연결해 같은 배열을 적용합니다. 기존 Wayland 터미널 서버를 재사용하지 않으며, 제어기·웹 GUI의 환경은 바꾸지 않습니다. 시작 명령을 입력한 native Wayland 터미널은 이동할 수 없으므로 `include_daemon: true`여도 배치에서 제외합니다. 고정 문자 수만 요청하지 않고 실제 창 장식·문자 셀 크기를 반영해 위치와 크기를 검증합니다. 창 식별에는 실행별 고유 `WM_WINDOW_ROLE`을 사용해 같은 제목의 다른 창을 이동하지 않습니다. 최소 타일 크기는 `zoom=1`에서 600×360 px이며 글꼴 배율에 비례합니다. 기본 `zoom=0.85`에서는 510×306 px로, FHD에서 3행 배치가 가능합니다. 지정 모니터 없음·지원하지 않는 창 관리자·배치 거부·최소 크기 미달은 오류로 알리며 겹친 창이나 임의의 다른 배치로 대체하지 않습니다. 창 관리자가 없는 시험용 X11은 작업 영역 정보가 없음을 알리고 모니터 경계를 사용합니다.
 
 `terminal_title`과 프로그램별 `terminal_exec`은 필요할 때만 덮어씁니다. `--terminals`는 기본 동작인 개별 창 실행을 명시합니다. `--no-terminals`를 직접 지정한 경우에만 로그 파일/개별 창 대신 현재 stdout/stderr를 사용하며, daemon의 SHM 표는 계속 출력합니다. 두 옵션은 동시에 사용할 수 없습니다. 터미널 실행 파일이나 X11 배치에 문제가 생기면 오류를 보고하며 출력을 한 창으로 합치지 않습니다.
 
@@ -220,7 +220,7 @@ ctest --test-dir build --output-on-failure
 
 CTest에는 격리된 vcan의 코덱 시험과 실제 MuJoCo 가상 모터 폐루프 시험이 있습니다. 후자는 호밍·G/M/T·물체 접촉/해제·CAN 정지 중 우회 금지·Release를 검사합니다. 실제 AK10-9 하드웨어 검증은 아닙니다. 회귀 시험은 사용자 튜닝과 분리한 [고정 설정](tests/fixtures/control.yaml)을 사용합니다.
 
-GUI 시험도 위 명령에 포함합니다. `simulator_gui`는 H/G/M/T/B·1/2/3 조작·목표 힘 변경·일시정지·Ctrl+드래그를, `can_gui`는 CAN 실행·실패·전체 종료·선택적 로거 창 재시작 경로를 묶어 검사합니다. `logging_core/service/daemon`은 MCAP 스키마·5초/2초 덤프·저장 장애·오프라인 분석·독립적 재시작을 검사합니다. `terminal_layout`과 `terminal_statistics`는 창 배치와 화면 복원·로그 보존을 검사합니다. 공통 [GUI 실행 환경](tests/run_gui_test.sh)과 [X11 도우미](tests/gui_test_utils.py)를 사용하며, Xvfb·D-Bus·xdotool·GNOME Terminal이 필요합니다. 시험은 별도 세션과 임시 디렉터리를 사용하며 프로젝트 문서에 스크린샷을 남기지 않습니다.
+GUI 시험도 위 명령에 포함합니다. `simulator_gui`는 H/G/M/T/B·1/2/3 조작·목표 힘 변경·일시정지·Ctrl+드래그를, `can_gui`는 CAN 실행·실패·전체 종료·선택적 로거 창 재시작 경로를 묶어 검사합니다. `logging_core/service/daemon`은 MCAP 스키마·5초/2초 덤프·저장 장애·오프라인 분석·독립적 재시작을 검사합니다. `terminal_layout`(2560×1440), `terminal_layout_fhd`(1920×1080)는 5개·7개 프로세스와 호출 터미널을 포함한 배치 및 Wayland 실행 경로를 검사합니다. `terminal_statistics`는 화면 복원과 로그 보존을 검사합니다. 공통 [GUI 실행 환경](tests/run_gui_test.sh)과 [X11 도우미](tests/gui_test_utils.py)를 사용하며, Xvfb·D-Bus·xdotool·GNOME Terminal이 필요합니다. 시험은 별도 세션과 임시 디렉터리를 사용하며 프로젝트 문서에 스크린샷을 남기지 않습니다.
 
 - [최근 작업과 다음 우선순위](WORK_NOTE.md)
 - [제어 모드·궤적·작업공간·가상 Iq 센서](docs/control.md)

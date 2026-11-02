@@ -18,6 +18,11 @@ from gui_test_utils import event, geometry, wait_for, windows as visible_windows
 binary = Path(sys.argv[1]).resolve()
 terminal = shutil.which('gnome-terminal.real') or shutil.which('gnome-terminal')
 assert terminal, 'GNOME Terminal is required for the X11 layout test'
+screen_size = re.search(r'current (\d+) x (\d+)',
+                        subprocess.check_output(['xrandr', '--current'], text=True))
+screen_width, screen_height = map(int, screen_size.groups())
+workarea = f'48, 28, {screen_width - 96}, {screen_height - 60}'
+left, top, right, bottom = 60, 40, screen_width - 60, screen_height - 44
 
 
 def window_for_role(role):
@@ -81,7 +86,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             '32c',
             '-set',
             '_NET_WORKAREA',
-            '48, 28, 2464, 1380',
+            workarea,
         ],
         check=True,
     )
@@ -99,16 +104,20 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         check=True,
     )
 
-    for caller in (False, True):
-        name = f'/qhrr05-layout-{os.getpid()}-{caller}'
-        manifest = directory / f'{caller}.json'
+    for process_count, columns, caller in ((3, 2, False), (3, 2, True),
+                                           (5, 2, False), (5, 2, True),
+                                           (7, 3, False), (7, 3, True)):
+        case = f'{process_count}-{caller}'
+        names = [f'worker{i}' for i in range(process_count)]
+        name = f'/qhrr05-layout-{os.getpid()}-{case}'
+        manifest = directory / f'{case}.json'
         settings = {
             'runtime_mode': 'simulation', 'shm_name': name,
             'terminal_exec': 'gnome-terminal',
             'log_directory': str(directory / 'logs'),
             'terminal_layout': {
                 'monitor': 'auto',
-                'columns': 2,
+                'columns': columns,
                 'gap_px': 12,
                 'margin_px': 12,
                 'zoom': 0.85,
@@ -117,12 +126,12 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             'monitoring': {'display_interval_sec': 2, 'window_sec': 10, 'sample_hz': 100},
             'processes': [
                 {'name': name, 'exec_path': '/bin/sleep', 'args': ['60']}
-                for name in ('alpha', 'beta', 'gamma')
+                for name in names
             ],
         }
         manifest.write_text(json.dumps(settings))
-        log_path = directory / f'{caller}.log'
-        foreign_role = f'unrelated-{os.getpid()}-{caller}'
+        log_path = directory / f'{case}.log'
+        foreign_role = f'unrelated-{os.getpid()}-{case}'
         with log_path.open('w') as log:
             foreign = subprocess.Popen(
                 [
@@ -130,7 +139,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
                     '--wait',
                     '--window',
                     '--role=' + foreign_role,
-                    '--title=QHRR05-alpha',
+                    '--title=QHRR05-' + names[0],
                     '--geometry=80x24',
                     '--',
                     '/bin/sleep',
@@ -143,7 +152,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         foreign_window = wait_for(lambda: window_for_role(foreign_role), log_path.read_text)
         foreign_geometry = geometry(foreign_window)
         command = [str(binary), '--config', str(manifest)]
-        restored = directory / 'caller-restored'
+        restored = directory / f'caller-restored-{case}'
         if caller:
             wrapper = (
                 'import os,subprocess,sys,time; from pathlib import Path; '
@@ -171,7 +180,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         pid = None
         try:
             pid = wait_for(lambda: daemon_pid(manifest), log_path.read_text)
-            roles = [f'qhrr05-{pid}-{name}' for name in ('alpha', 'beta', 'gamma')]
+            roles = [f'qhrr05-{pid}-{name}' for name in names]
             if caller:
                 roles.insert(0, 'layout-launcher')
 
@@ -185,12 +194,12 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
                 # Monitor/panel intersection plus configured margins; all tiles must be large.
                 for x, y, width, height in rectangles:
                     if (
-                        x < 60
-                        or y < 40
-                        or x + width > 2500
-                        or y + height > 1396
-                        or width < 600
-                        or height < 500
+                        x < left
+                        or y < top
+                        or x + width > right
+                        or y + height > bottom
+                        or width < 520
+                        or height < 280
                     ):
                         return None
                 if any(
@@ -232,7 +241,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             assert not (Path('/dev/shm') / name[1:]).exists()
             print(
                 'PASS:',
-                'four windows including daemon caller' if caller else 'three child terminals',
+                f'{screen_width}x{screen_height}, {process_count} processes, columns={columns}, caller={caller}',
                 rectangles,
             )
         finally:
@@ -261,7 +270,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         )
         assert result.returncode == 1 and message in result.stderr, result.stdout + result.stderr
         assert not (Path('/dev/shm') / name[1:]).exists()
-        settings['terminal_layout'][key] = 'auto' if key == 'monitor' else 2
+        settings['terminal_layout'][key] = 'auto' if key == 'monitor' else columns
         print('PASS: explicit layout error for', key)
 
     subprocess.run(
@@ -281,14 +290,14 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
     # or global desktop settings are changed, and the child environment stays native.
     subprocess.run(
         ['xprop', '-root', '-f', '_NET_WORKAREA', '32c', '-set', '_NET_WORKAREA',
-         '48, 28, 2464, 1380'], check=True,
+         workarea], check=True,
     )
     for explicit in (False, True):
         settings['shm_name'] = f'/qhrr05-wayland-windows-{os.getpid()}-{explicit}'
         settings['processes'] = [
             {'name': name, 'exec_path': '/bin/sh',
              'args': ['-c', f'printf "SEPARATE-{name} backend=%s\\n" "$GDK_BACKEND"; exec /bin/sleep 60']}
-            for name in ('alpha', 'beta', 'gamma')
+            for name in names
         ]
         manifest.write_text(json.dumps(settings))
         log_path = directory / f'wayland-{explicit}.log'
@@ -301,7 +310,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
                                             'GDK_BACKEND': 'wayland',
                                             'GNOME_TERMINAL_SERVICE': ':999.12345'})
         try:
-            roles = [f'qhrr05-{process.pid}-{name}' for name in ('alpha', 'beta', 'gamma')]
+            roles = [f'qhrr05-{process.pid}-{name}' for name in names]
 
             def tiled_windows():
                 assert process.poll() is None, log_path.read_text()
@@ -309,8 +318,8 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
                 if not all(found):
                     return None
                 rectangles = [geometry(window) for window in found]
-                if any(x < 60 or y < 40 or x + w > 2500 or y + h > 1396
-                       or w < 600 or h < 500 for x, y, w, h in rectangles):
+                if any(x < left or y < top or x + w > right or y + h > bottom
+                       or w < 520 or h < 280 for x, y, w, h in rectangles):
                     return None
                 if any(overlaps(a, b) for i, a in enumerate(rectangles)
                        for b in rectangles[i + 1:]):
@@ -318,7 +327,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
                 return found
 
             windows = wait_for(tiled_windows, log_path.read_text)
-            assert len(set(windows)) == 3, windows
+            assert len(set(windows)) == len(names), windows
             output = log_path.read_text()
             assert 'arranging separate process terminals through XWayland' in output, output
             assert '--no-terminals: child output' not in output, output
@@ -330,8 +339,8 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
                 server_env = (Path('/proc') / server_pid / 'environ').read_bytes().split(b'\0')
                 assert b'GDK_BACKEND=x11' in server_env, server_env
                 assert (b'DBUS_SESSION_BUS_ADDRESS=' + env['DBUS_SESSION_BUS_ADDRESS'].encode()) not in server_env
-            assert len(set(server_pids)) == 3, 'Terminal servers were not isolated'
-            for name in ('alpha', 'beta', 'gamma'):
+            assert len(set(server_pids)) == len(names), 'Terminal servers were not isolated'
+            for name in names:
                 marker = f'SEPARATE-{name} backend=wayland'
 
                 def persisted():
@@ -344,7 +353,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
             assert process.wait(timeout=8) == 0, log_path.read_text()
             assert not (Path('/dev/shm') / settings['shm_name'][1:]).exists()
             wait_for(lambda: not any(window_for_role(role) for role in roles), log_path.read_text)
-            print('PASS: Wayland policy tiles three isolated X11 windows; application environment and logs retained',
+            print(f'PASS: {screen_width}x{screen_height} Wayland policy tiles {len(names)} isolated X11 windows; application environment and logs retained',
                   '(explicit --terminals)' if explicit else '(default)')
         finally:
             if process.poll() is None:
