@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,8 @@ import time
 from gui_test_utils import event, geometry, wait_for, windows as visible_windows
 
 binary = Path(sys.argv[1]).resolve()
-terminal = '/usr/bin/gnome-terminal.real'
+terminal = shutil.which('gnome-terminal.real') or shutil.which('gnome-terminal')
+assert terminal, 'GNOME Terminal is required for the X11 layout test'
 
 
 def window_for_role(role):
@@ -102,7 +104,7 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         manifest = directory / f'{caller}.json'
         settings = {
             'runtime_mode': 'simulation', 'shm_name': name,
-            'terminal_exec': terminal,
+            'terminal_exec': 'gnome-terminal',
             'log_directory': str(directory / 'logs'),
             'terminal_layout': {
                 'monitor': 'auto',

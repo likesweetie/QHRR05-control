@@ -202,6 +202,9 @@ if(BUILD_TESTING)
     set_tests_properties(logging_service logging_daemon PROPERTIES TIMEOUT 90)
     add_test(NAME terminal_layout COMMAND bash
         ${PROJECT_SOURCE_DIR}/tests/run_gui_test.sh ${PROJECT_SOURCE_DIR}/tests/terminal_layout_test.py $<TARGET_FILE:daemon>)
+    add_test(NAME terminal_config COMMAND python3
+        ${PROJECT_SOURCE_DIR}/tests/terminal_config_test.py $<TARGET_FILE:daemon>)
+    set_tests_properties(terminal_config PROPERTIES TIMEOUT 30)
     add_test(NAME simulator_gui COMMAND bash
         ${PROJECT_SOURCE_DIR}/tests/run_gui_test.sh ${PROJECT_SOURCE_DIR}/tests/simulator_gui_test.py)
     add_test(NAME can_gui COMMAND bash

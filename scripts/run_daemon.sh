@@ -7,12 +7,13 @@ daemon_args=()
 while (($#)); do
     case "$1" in
         --config) daemon_config="$(realpath -- "${2:?--config requires a path}")"; shift 2 ;;
-        --no-terminals) daemon_args+=(--no-terminals); shift ;;
+        --no-terminals|--terminals) daemon_args+=("$1"); shift ;;
         --help)
-            echo 'usage: run_daemon.sh [--config YAML] [--no-terminals]'
+            echo 'usage: run_daemon.sh [--config YAML] [--no-terminals | --terminals]'
             echo 'Build changed native sources, bring up the configured CAN interface, then start the hardware session.'
             echo 'Before launch, stop the previous project session and remove its stale SHM/sockets.'
             echo 'Only interface setup may use sudo. For MuJoCo use run_simulation.sh.'
+            echo 'Wayland uses inline logs by default; --terminals explicitly requests X11 window placement.'
             exit 0 ;;
         *) echo "Unknown hardware option: $1. For simulation use scripts/run_simulation.sh." >&2; exit 1 ;;
     esac

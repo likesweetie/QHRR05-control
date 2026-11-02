@@ -8,7 +8,7 @@ daemon_options=()
 while (($#)); do
     case "$1" in
         --help|-h)
-            echo 'usage: run_simulation.sh [--existing-can | --isolated-vcan | --without-can] [--config YAML] [--no-terminals]'
+            echo 'usage: run_simulation.sh [--existing-can | --isolated-vcan | --without-can] [--config YAML] [--no-terminals | --terminals]'
             echo 'Default: vcan0 + existing MuJoCo OpenGL GUI + control processes + web GUI.'
             echo 'Physical hardware uses run_daemon.sh; HW-policy vcan tests use run_hw_deploy_test.sh.'
             exit 0 ;;
@@ -21,7 +21,7 @@ while (($#)); do
             mode="${1#--}"
             shift
             ;;
-        --no-terminals) daemon_options+=(--no-terminals); shift ;;
+        --no-terminals|--terminals) daemon_options+=("$1"); shift ;;
         --config)
             if (($# < 2)); then
                 echo '--config requires a YAML path' >&2
@@ -31,7 +31,7 @@ while (($#)); do
             daemon_config="$(realpath -- "$2")"
             shift 2
             ;;
-        *) echo 'usage: run_simulation.sh [--existing-can | --isolated-vcan | --without-can] [--config YAML] [--no-terminals]' >&2; exit 1 ;;
+        *) echo 'usage: run_simulation.sh [--existing-can | --isolated-vcan | --without-can] [--config YAML] [--no-terminals | --terminals]' >&2; exit 1 ;;
     esac
 done
 

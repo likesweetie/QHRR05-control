@@ -122,16 +122,16 @@ cmake --build build --parallel 4
 
 ## 프로세스 터미널과 SHM 통계
 
-기본 실행은 HAL·TaskController·로거 등 설정된 프로세스마다 터미널을 하나씩 엽니다. 시뮬레이션 프로파일에서는 시뮬레이터 창도 추가됩니다. 창 상단에는 PID·상태·직전 관측 간격의 CPU 사용률·RSS·스레드 수·가동 시간을 **2초마다** 갱신합니다. CPU는 여러 코어를 사용하면 100%를 넘을 수 있습니다. CAN 창에는 기존 모터 상태와 점유율도 같은 고정 영역에 표시합니다.
+X11에서 기본 실행은 HAL·TaskController·로거 등 설정된 프로세스마다 터미널을 하나씩 엽니다. Wayland에서는 자동 창 배치를 사용하지 않고 `--no-terminals`를 적용해 현재 터미널로 로그를 모읍니다. 웹 GUI와 제어 프로세스는 그대로 실행합니다. 시뮬레이션 프로파일에서는 시뮬레이터 창도 추가됩니다. 개별 로그 창 상단에는 PID·상태·직전 관측 간격의 CPU 사용률·RSS·스레드 수·가동 시간을 **2초마다** 갱신합니다. CPU는 여러 코어를 사용하면 100%를 넘을 수 있습니다. CAN 창에는 기존 모터 상태와 점유율도 같은 고정 영역에 표시합니다.
 
 통계 갱신은 로그 영역을 스크롤하지 않습니다. 실제 stdout/stderr는 하단 로그 영역과 실행별 `logs/run-<epoch_ms>-<daemon_pid>/<process>.log`에 함께 기록합니다. 통계 패널은 이 파일에 섞지 않습니다. 시작 실패 메시지도 기록하며, 정상 종료 시 프로그램을 먼저 종료하고 릴레이가 EOF까지 읽은 뒤 창을 닫습니다. 창 크기가 아직 0이거나 너무 작으면 명시적인 대기/잘림 안내를 표시합니다. 로그는 계속 전달됩니다. 기본 실행은 아래 자동 배치로 충분한 작업 영역을 확보합니다.
 
 화면은 터미널의 별도 화면 버퍼를 사용합니다. 정상 종료·Ctrl+C·오류 종료 시 원래 화면·제목·커서·스크롤 영역을 복원하므로 통계가 셸에 남지 않습니다. 핵심 프로세스 창의 Ctrl+C는 daemon에, 선택적 로거 창의 Ctrl+C는 로거에 전달하며 마지막 종료 로그까지 읽습니다. 화면 크기를 변경하면 최근 메시지 최대 200줄을 다시 배치하고, 전체 로그는 파일에 보존합니다.
 
-설정은 [daemon.yaml](config/daemon/daemon.yaml)에 모았습니다. 경로는 해당 YAML 디렉터리 기준입니다.
+설정은 [daemon.yaml](config/daemon/daemon.yaml)에 모았습니다. `terminal_exec: gnome-terminal`은 PATH에서 실행 파일을 찾으며, 기존 Ubuntu/Pop!_OS에서는 PTY 파일 디스크립터 전달을 위해 `gnome-terminal.real`이 있으면 우선 사용합니다. 절대 경로도 지정할 수 있고, 상대 실행 파일 경로는 daemon 바이너리 디렉터리 기준입니다. `log_directory`는 YAML 디렉터리 기준입니다.
 
 ```yaml
-terminal_exec: /usr/bin/gnome-terminal.real
+terminal_exec: gnome-terminal
 log_directory: ../../logs
 terminal_layout:
   monitor: auto
@@ -152,7 +152,7 @@ monitoring:
 
 이 기능은 **GNOME/X11 + XRandR** 기준입니다. 고정 문자 수만 요청하지 않고 실제 창 장식·문자 셀 크기를 반영해 위치와 크기를 검증합니다. 창 식별에는 실행별 고유 `WM_WINDOW_ROLE`을 사용해 같은 제목의 다른 창을 이동하지 않습니다. 지정 모니터 없음·지원하지 않는 창 관리자·배치 거부·읽기 어려운 작은 타일(최소 600×360 px)은 오류로 알리며 겹친 창이나 임의의 다른 배치로 대체하지 않습니다. 창 관리자가 없는 시험용 X11은 작업 영역 정보가 없음을 알리고 모니터 경계를 사용합니다. native Wayland 창의 위치 제어는 지원하지 않습니다.
 
-`terminal_title`과 프로그램별 `terminal_exec`은 필요할 때만 덮어씁니다. 터미널을 사용할 수 없으면 실행을 실패로 보고하며 `--no-terminals`로 자동 전환하지 않습니다. 이 옵션을 직접 지정하면 로그 파일/개별 창 대신 현재 stdout/stderr를 사용하고, daemon의 SHM 표는 계속 출력합니다.
+`terminal_title`과 프로그램별 `terminal_exec`은 필요할 때만 덮어씁니다. Wayland 감지 시에는 시작 전에 `--no-terminals`를 선택합니다. 이 경우 로그 파일/개별 창 대신 현재 stdout/stderr를 사용하고, daemon의 SHM 표는 계속 출력합니다. X11 창 배치를 직접 요청하려면 `--terminals`를 사용하십시오. 두 옵션은 동시에 사용할 수 없습니다. 창을 사용하도록 선택한 뒤 실행 파일이나 배치에 문제가 생기면 오류를 보고하며 실행 경로를 바꾸지 않습니다.
 
 Daemon은 기존 SHM 필드만 읽습니다. mutex는 trylock으로 시도하고 사용 중이면 표본을 건너뛰어 `busy skips`에 표시합니다. 통계 계산·화면 출력·파일 쓰기는 잠금 밖에서 수행합니다. SHM 레이아웃과 제어 루프 계측은 추가하지 않았습니다. 이 관측도 짧은 mutex 획득과 CPU 비용은 발생시킵니다.
 
@@ -208,7 +208,7 @@ CAN 모드에서는 새 관절 피드백의 실제 관측 간격으로 GM 옵저
 
 HAL은 기본 daemon의 필수 프로세스입니다. 통계 창의 `BUS LOAD est.`는 전체 Classic CAN ID를 별도 수신 소켓으로 관측한 점유율 추정치입니다. [HAL 설정](config/can_hal/can_hal.yaml)의 `bus_load_bitrate`는 표시 기준 비트레이트이며 기본값은 1,000,000 bit/s입니다. 인터페이스 속도는 변경하지 않습니다. vcan에서도 같은 기준으로 계산하며 비트 스터핑 최댓값·프레임 오버헤드를 포함합니다. 100%를 넘으면 수치는 유지하고 바만 끝까지 채웁니다.
 
-기본 자동 배치 빌드에는 X11/XRandR 개발 라이브러리(`pkg-config x11 xrandr`)가 필요합니다. 호스트 vcan 준비에는 iproute2·Python 3와 생성/활성화 권한이 필요합니다. 권한이 없으면 sudo 인증을 요청합니다. `--isolated-vcan` 디버깅에는 `unshare`·D-Bus가 추가로 필요합니다. 터미널 실행 파일은 최상위 `terminal_exec`, 창 이름은 프로그램별 `terminal_title`로 지정합니다. 현재 환경은 FD 전달을 지원하는 `/usr/bin/gnome-terminal.real`을 명시했습니다. 실행 파일·인터페이스·창 오류를 다른 경로로 자동 대체하지 않습니다.
+기본 자동 배치 빌드에는 X11/XRandR 개발 라이브러리(`pkg-config x11 xrandr`)가 필요합니다. 호스트 vcan 준비에는 iproute2·Python 3와 생성/활성화 권한이 필요합니다. 권한이 없으면 sudo 인증을 요청합니다. `--isolated-vcan` 디버깅에는 `unshare`·D-Bus가 추가로 필요합니다. 터미널 실행 파일은 최상위 `terminal_exec`, 창 이름은 프로그램별 `terminal_title`로 지정합니다. 기본값 `gnome-terminal`은 PATH에서 `.real` 또는 일반 실행 파일을 찾으므로 `.real`이 없는 배포판에서도 사용할 수 있습니다. 인터페이스·창 오류를 다른 경로로 자동 대체하지 않습니다.
 
 명령은 MIT q target·velocity·kp/kd·tau_ff입니다. Damping 테스트는 MIT C0 누적각의 차분 속도를 30 Hz 1차 LPF로 필터링한 댐핑 토크를 tau_ff에 넣고, HAL은 C4 T_MAX 범위로 제한합니다. 기본 시뮬레이터가 C4 프로파일 조회·C1 enable·C0 제어/피드백·C2 release에 응답합니다. 시작 시 가상 모터가 늦게 준비되어도 100 HAL 주기마다 프로파일/enable을 재요청합니다. 응답 지연 판정이나 시간 초과 정지는 없습니다. 명령 API·로깅·프로토콜 범위·스토퍼 보정 결정은 [CAN HAL 동작 규약](docs/can_hal.md)에 정리했습니다.
 

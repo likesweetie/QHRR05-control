@@ -22,13 +22,13 @@ while (($#)); do
         --shm-name|--frames|--width|--height|--slow-render-ms|--screenshot|--assets|--ibl|--control-config)
             viewer_args+=("$1" "${2:?option requires a value}"); shift 2 ;;
         --hidden|--no-ui) viewer_args+=("$1"); shift ;;
-        --existing-can|--isolated-vcan|--without-can|--no-terminals)
+        --existing-can|--isolated-vcan|--without-can|--no-terminals|--terminals)
             daemon_args+=("$1"); shift ;;
         --help)
             cat <<'USAGE'
 usage: run_visualization.sh [--setup] [--backend filament|classic] [--fps 60]
   Default: observe the running session. --simulation starts an explicit simulation session.
-  --isolated-vcan | --existing-can | --without-can; --no-terminals
+  --isolated-vcan | --existing-can | --without-can; --no-terminals | --terminals
   --config FILE.yaml: select an explicit daemon manifest for a new session
   --attach: add an operator/graph window to a RUNNING session (--shm-name /qhrr05)
   --preview: static model only, no daemon/SHM/physics

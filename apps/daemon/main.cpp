@@ -14,10 +14,12 @@
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <termios.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
 
@@ -37,6 +39,28 @@ fs::path ExecutableDirectory() {
         throw std::runtime_error("cannot resolve daemon executable directory");
 
     return fs::path(std::string(buffer, size)).parent_path();
+}
+
+std::string TerminalExecutable(const std::string& requested) {
+    if (requested.find('/') != std::string::npos)
+        return fs::absolute(ExecutableDirectory() / requested).string();
+
+    // Ubuntu releases use gnome-terminal; older Ubuntu/Pop!_OS has a Python
+    // wrapper around gnome-terminal.real which does not preserve the PTY fd.
+    const std::vector<std::string> names = requested == "gnome-terminal"
+        ? std::vector<std::string>{"gnome-terminal.real", "gnome-terminal"}
+        : std::vector<std::string>{requested};
+    const char* path = std::getenv("PATH");
+    for (const auto& name : names) {
+        std::istringstream paths(path ? path : "");
+        std::string directory;
+        while (std::getline(paths, directory, ':')) {
+            const auto candidate = fs::path(directory.empty() ? "." : directory) / name;
+            if (fs::is_regular_file(candidate) && ::access(candidate.c_str(), X_OK) == 0)
+                return fs::absolute(candidate).string();
+        }
+    }
+    return fs::absolute(ExecutableDirectory() / requested).string();
 }
 
 std::vector<ProcessSpec> LoadProcesses(
@@ -106,12 +130,15 @@ std::vector<ProcessSpec> LoadProcesses(
                                       : "QHRR05-" + spec.name;
             const auto terminal =
                 process["terminal_exec"] ? process["terminal_exec"] : config["terminal_exec"];
-            spec.terminal_exec =
-                fs::absolute(ExecutableDirectory() / terminal.as<std::string>()).string();
+            const auto requested_terminal = terminal.as<std::string>();
+            spec.terminal_exec = TerminalExecutable(requested_terminal);
 
             if (spec.terminal_title.empty() ||
-                (spec.critical && !fs::is_regular_file(spec.terminal_exec)))
-                throw std::runtime_error("invalid terminal configuration: " + spec.name);
+                (spec.critical && (!fs::is_regular_file(spec.terminal_exec) ||
+                    ::access(spec.terminal_exec.c_str(), X_OK) != 0)))
+                throw std::runtime_error("invalid terminal configuration: " + spec.name +
+                    "; terminal_exec=" + requested_terminal + " resolved=" + spec.terminal_exec +
+                    "; install gnome-terminal or use --no-terminals");
         }
 
         if (process["ready_timeout_ms"])
@@ -307,8 +334,9 @@ int main(int argc, char** argv) {
         fs::path config_path = QHRR05_DEFAULT_DAEMON_CONFIG;
         bool without_can = false;
         bool no_terminals = false;
+        bool force_terminals = false;
         const char* usage =
-            "usage: daemon [--config PROCESS_CONFIG.yaml] [--without-can] [--no-terminals]";
+            "usage: daemon [--config PROCESS_CONFIG.yaml] [--without-can] [--no-terminals | --terminals]";
 
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
@@ -317,6 +345,8 @@ int main(int argc, char** argv) {
                 without_can = true;
             else if (argument == "--no-terminals")
                 no_terminals = true;
+            else if (argument == "--terminals")
+                force_terminals = true;
             else if (argument == "--config" && i + 1 < argc)
                 config_path = argv[++i];
             else if (argument == "--help") {
@@ -326,6 +356,17 @@ int main(int argc, char** argv) {
                 throw std::runtime_error(usage);
         }
 
+        if (no_terminals && force_terminals)
+            throw std::runtime_error("--terminals and --no-terminals cannot be combined");
+        const char* session_type = std::getenv("XDG_SESSION_TYPE");
+        const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+        const bool wayland = (session_type && std::string(session_type) == "wayland") ||
+            ((!session_type || !*session_type) && wayland_display && *wayland_display);
+        if (wayland && !no_terminals && !force_terminals) {
+            no_terminals = true;
+            std::cout << "[daemon] Wayland session: using --no-terminals; logs stay here and the web GUI remains available. "
+                         "Use --terminals to explicitly request X11 window placement.\n";
+        }
         daemon.BeginTerminalScreen();
         config_path = fs::absolute(config_path);
         const auto config = YAML::LoadFile(config_path.string());
@@ -395,7 +436,7 @@ int main(int argc, char** argv) {
 
         if (no_terminals)
             daemon.WriteTerminalLog(
-                "[daemon] explicit --no-terminals: child output uses this stream\n");
+                "[daemon] --no-terminals: child output uses this stream\n");
 
         std::map<std::string, int> restart_count;
         std::map<std::string, int> launch_count;
