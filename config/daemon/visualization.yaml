@@ -2,7 +2,7 @@ runtime_mode: simulation
 # Visualization session: original physics/control executables, headless physics, separate GPU process.
 # The development daemon.yaml and run_daemon.sh are unchanged.
 shm_name: /qhrr05
-terminal_exec: gnome-terminal  # PATH lookup; Wayland defaults to inline logs
+terminal_exec: gnome-terminal  # PATH lookup; Wayland opens separate windows without automatic placement
 log_directory: ../../logs
 terminal_layout:
   monitor: auto

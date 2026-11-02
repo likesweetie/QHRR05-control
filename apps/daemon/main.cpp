@@ -362,12 +362,11 @@ int main(int argc, char** argv) {
         const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
         const bool wayland = (session_type && std::string(session_type) == "wayland") ||
             ((!session_type || !*session_type) && wayland_display && *wayland_display);
-        if (wayland && !no_terminals && !force_terminals) {
-            no_terminals = true;
-            std::cout << "[daemon] Wayland session: using --no-terminals; logs stay here and the web GUI remains available. "
-                         "Use --terminals to explicitly request X11 window placement.\n";
-        }
+        const bool arrange_terminals = !no_terminals && !wayland;
         daemon.BeginTerminalScreen();
+        if (wayland && !no_terminals)
+            daemon.WriteTerminalLog(
+                "[daemon] Wayland session: opening separate process terminals; automatic window placement is disabled.\n");
         config_path = fs::absolute(config_path);
         const auto config = YAML::LoadFile(config_path.string());
         const auto runtime = config["runtime_mode"].as<std::string>();
@@ -392,13 +391,23 @@ int main(int argc, char** argv) {
 
         if (!no_terminals) {
             const auto layout = config["terminal_layout"];
-            daemon.PlanTerminalLayout(specs,
-                layout["monitor"].as<std::string>(),
-                layout["columns"].as<int>(),
-                layout["gap_px"].as<int>(),
-                layout["margin_px"].as<int>(),
-                layout["zoom"].as<double>(),
-                layout["include_daemon"].as<bool>());
+            if (arrange_terminals) {
+                daemon.PlanTerminalLayout(specs,
+                    layout["monitor"].as<std::string>(),
+                    layout["columns"].as<int>(),
+                    layout["gap_px"].as<int>(),
+                    layout["margin_px"].as<int>(),
+                    layout["zoom"].as<double>(),
+                    layout["include_daemon"].as<bool>());
+            } else {
+                const double zoom = layout["zoom"].as<double>();
+                if (!std::isfinite(zoom) || zoom < .5 || zoom > 2)
+                    throw std::runtime_error("invalid terminal_layout.zoom: expected .5..2");
+                for (auto& spec : specs) {
+                    spec.terminal_role = "qhrr05-" + std::to_string(::getpid()) + '-' + spec.name;
+                    spec.terminal_zoom = zoom;
+                }
+            }
 
             const auto base =
                 fs::absolute(config_path.parent_path() / config["log_directory"].as<std::string>());
@@ -481,8 +490,9 @@ int main(int argc, char** argv) {
                 display.exec_path = spec.terminal_exec;
                 display.args = {"--wait",
                     "--window",
-                    "--geometry=100x28+" + std::to_string(spec.terminal_x) + "+" +
-                        std::to_string(spec.terminal_y),
+                    "--geometry=100x28" + (arrange_terminals
+                        ? "+" + std::to_string(spec.terminal_x) + "+" + std::to_string(spec.terminal_y)
+                        : std::string{}),
                     "--zoom=" + std::to_string(spec.terminal_zoom),
                     "--role=" + spec.terminal_role,
                     "--title=" + spec.terminal_title,
@@ -498,7 +508,8 @@ int main(int argc, char** argv) {
                     std::to_string(spec.critical ? ::getpid() : daemon.Get(spec.name)->pid)};
                 display.pass_fd = terminal->master;
                 StartProcess(daemon, display, children);
-                daemon.PlaceTerminalWindow(spec);
+                if (arrange_terminals)
+                    daemon.PlaceTerminalWindow(spec);
                 terminals.push_back(std::move(terminal));
             }
         };

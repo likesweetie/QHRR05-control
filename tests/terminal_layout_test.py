@@ -276,3 +276,53 @@ with persistent_display(), tempfile.TemporaryDirectory(prefix='qhrr05-window-lay
         result.stdout + result.stderr
     )
     print('PASS: undersized work area fails explicitly without overlap or fallback')
+
+    # Exercise the Wayland policy using real terminals on our isolated X11 server.
+    # The small work area above would reject X11 tiling; separate windows must still open.
+    for explicit in (False, True):
+        settings['shm_name'] = f'/qhrr05-wayland-windows-{os.getpid()}-{explicit}'
+        settings['processes'] = [
+            {'name': name, 'exec_path': '/bin/sh',
+             'args': ['-c', f'printf "SEPARATE-{name}\\n"; exec /bin/sleep 60']}
+            for name in ('alpha', 'beta', 'gamma')
+        ]
+        manifest.write_text(json.dumps(settings))
+        log_path = directory / f'wayland-{explicit}.log'
+        command = [str(binary), '--config', str(manifest)]
+        if explicit:
+            command.append('--terminals')
+        with log_path.open('w') as log:
+            process = subprocess.Popen(command, stdout=log, stderr=log,
+                                       env={**env, 'XDG_SESSION_TYPE': 'wayland'})
+        try:
+            roles = [f'qhrr05-{process.pid}-{name}' for name in ('alpha', 'beta', 'gamma')]
+
+            def separate_windows():
+                assert process.poll() is None, log_path.read_text()
+                found = [window_for_role(role) for role in roles]
+                return found if all(found) else None
+
+            windows = wait_for(separate_windows, log_path.read_text)
+            assert len(set(windows)) == 3, windows
+            output = log_path.read_text()
+            assert 'opening separate process terminals' in output, output
+            assert '--no-terminals: child output' not in output, output
+            for name in ('alpha', 'beta', 'gamma'):
+                marker = f'SEPARATE-{name}'
+
+                def persisted():
+                    return any(marker in path.read_text()
+                               for path in (directory / 'logs').glob(f'run-*-{process.pid}/{name}.log'))
+
+                wait_for(persisted, log_path.read_text)
+                assert marker not in log_path.read_text(), 'Child output was merged into daemon output'
+            process.send_signal(signal.SIGTERM)
+            assert process.wait(timeout=8) == 0, log_path.read_text()
+            assert not (Path('/dev/shm') / settings['shm_name'][1:]).exists()
+            wait_for(lambda: not any(window_for_role(role) for role in roles), log_path.read_text)
+            print('PASS: Wayland policy opens three separate windows with per-process logs',
+                  '(explicit --terminals)' if explicit else '(default)')
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=8)
